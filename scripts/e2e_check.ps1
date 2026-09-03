@@ -8,6 +8,15 @@ if (-not (Test-Path ".\config.toml")) { Copy-Item ".\config.example.toml" ".\con
 $exe = "D:\DevCache\lc-target\release\live-caption.exe"
 $wav = Join-Path $root "tests\fixtures\en-10s.wav"
 
+# DPI aware, otherwise CopyFromScreen only grabs the top-left part of a scaled display
+Add-Type -TypeDefinition @"
+using System.Runtime.InteropServices;
+public static class DpiHelper { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }
+"@
+[void][DpiHelper]::SetProcessDPIAware()
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+
 Get-Process live-caption -ErrorAction SilentlyContinue | Stop-Process -Force
 
 $p = Start-Process -FilePath $exe -WorkingDirectory $root -PassThru
@@ -21,23 +30,22 @@ for ($i = 1; $i -le 2; $i++) {
     Start-Sleep -Seconds 2
     if ($i -eq 1 -and $Shot -ne "") {
         Start-Sleep -Seconds 4
-        Add-Type -AssemblyName System.Drawing
-        Add-Type -AssemblyName System.Windows.Forms
         $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
         $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
         $bmp.Save($Shot, [System.Drawing.Imaging.ImageFormat]::Png)
         $g.Dispose(); $bmp.Dispose()
-        Write-Host "screenshot -> $Shot"
+        Write-Host "screenshot $($b.Width)x$($b.Height) -> $Shot"
     }
 }
 Write-Host "waiting 15s for asr + translate to drain"
 Start-Sleep -Seconds 15
 
-Write-Host "===== log lines (asr/translate/warn/error)"
+Write-Host "===== log lines (asr/translate/warn/error), this run only"
+$since = (Get-Date).AddMinutes(-2).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm")
 Get-ChildItem ".\logs" -Filter "live-caption.*" | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object {
-    Get-Content $_.FullName -Encoding utf8 | Select-String -Pattern "asr |translate |WARN|ERROR" | ForEach-Object { $_.Line }
+    Get-Content $_.FullName -Encoding utf8 | Select-String -Pattern "asr |translate |WARN|ERROR" | ForEach-Object { $_.Line } | Where-Object { $_ -ge $since }
 }
 Write-Host "===== transcript"
 $t = Get-ChildItem ".\transcripts" -Filter *.md | Sort-Object LastWriteTime | Select-Object -Last 1
