@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const MARGIN: f32 = 14.0;
+
 struct Line {
     id: SegId,
     #[allow(dead_code)]
@@ -32,6 +34,7 @@ pub struct CaptionApp {
     file: Option<TranscriptFile>,
     _hotkeys: Option<GlobalHotKeyManager>,
     last_cfg_save: Instant,
+    last_resize: Instant,
 }
 
 impl CaptionApp {
@@ -63,16 +66,18 @@ impl CaptionApp {
             file,
             _hotkeys: hotkeys,
             last_cfg_save: Instant::now(),
+            last_resize: Instant::now(),
         }
     }
 
     fn drain(&mut self) {
+        let keep = self.cfg.ui.lines.max(1);
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 UiMsg::English { id, at, text } => {
                     self.transcript.push_en(id, at, &text);
                     self.lines.push_back(Line { id, at, en: text, zh: None });
-                    while self.lines.len() > 2 {
+                    while self.lines.len() > keep {
                         self.lines.pop_front();
                     }
                 }
@@ -110,18 +115,38 @@ impl CaptionApp {
         worst
     }
 
+    /// 窗口高度随内容伸缩：下边缘固定，向上长；范围 [height, max_height]
+    fn fit_height(&mut self, ctx: &egui::Context, inner: egui::Rect, content_h: f32) {
+        if self.last_resize.elapsed() < Duration::from_millis(150) {
+            return;
+        }
+        let cur = inner.height();
+        let min_h = self.cfg.ui.height as f32;
+        let max_h = self.cfg.ui.max_height.max(self.cfg.ui.height) as f32;
+        let want = (content_h + MARGIN * 2.0 + 4.0).clamp(min_h, max_h);
+        if (want - cur).abs() < 2.0 {
+            return;
+        }
+        let delta = want - cur;
+        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(outer.min.x, (outer.min.y - delta).max(0.0))));
+        }
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(inner.width(), want)));
+        self.last_resize = Instant::now();
+    }
+
     fn maybe_save_window_rect(&mut self, ctx: &egui::Context) {
         if self.last_cfg_save.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last_cfg_save = Instant::now();
         let Some(r) = ctx.input(|i| i.viewport().outer_rect) else { return };
-        let (x, y, w, h) = (r.min.x as i32, r.min.y as i32, r.width() as u32, r.height() as u32);
-        if (x, y, w, h) != (self.cfg.ui.x, self.cfg.ui.y, self.cfg.ui.width, self.cfg.ui.height) {
+        // 高度是动态的，只记位置与宽度（height 保持为用户配置的最小高度）
+        let (x, y, w) = (r.min.x as i32, r.min.y as i32, r.width() as u32);
+        if (x, y, w) != (self.cfg.ui.x, self.cfg.ui.y, self.cfg.ui.width) {
             self.cfg.ui.x = x;
             self.cfg.ui.y = y;
             self.cfg.ui.width = w;
-            self.cfg.ui.height = h;
             if let Err(e) = self.cfg.save() {
                 tracing::warn!("保存配置失败：{e}");
             }
@@ -166,9 +191,11 @@ impl eframe::App for CaptionApp {
         }
 
         let hovered = ui.rect_contains_pointer(rect);
-        egui::Frame::NONE.inner_margin(14.0).show(ui, |ui| {
+        let mut content_h = 0.0f32;
+        egui::Frame::NONE.inner_margin(MARGIN).show(ui, |ui| {
+            ui.set_width(rect.width() - MARGIN * 2.0);
             // 顶部：状态点 + 提示 + 悬停工具条
-            ui.horizontal(|ui| {
+            let top = ui.horizontal(|ui| {
                 let (color, text) = self.status_color_and_text();
                 let dot = ui.allocate_response(egui::vec2(12.0, 12.0), Sense::hover());
                 ui.painter().circle_filled(dot.rect.center(), 5.0, color);
@@ -203,6 +230,12 @@ impl eframe::App for CaptionApp {
                         if ui.small_button("A+").clicked() {
                             self.cfg.ui.font_size = (self.cfg.ui.font_size + 2.0).min(60.0);
                         }
+                        if ui.small_button("行-").on_hover_text("少显示一段").clicked() {
+                            self.cfg.ui.lines = self.cfg.ui.lines.saturating_sub(1).max(1);
+                        }
+                        if ui.small_button("行+").on_hover_text("多显示一段").clicked() {
+                            self.cfg.ui.lines = (self.cfg.ui.lines + 1).min(8);
+                        }
                         let paused = self.paused.load(Ordering::Relaxed);
                         if ui.small_button(if paused { "▶ 继续" } else { "⏸ 暂停" }).clicked() {
                             self.paused.store(!paused, Ordering::Relaxed);
@@ -211,23 +244,42 @@ impl eframe::App for CaptionApp {
                 }
             });
             ui.add_space(4.0);
+            // 字幕区：自动换行；内容超过最大高度时贴底滚动，永远看得到最新一句
             let fs = self.cfg.ui.font_size;
             let n = self.lines.len();
-            for (i, l) in self.lines.iter().enumerate() {
-                let dim = if i + 1 < n { 150 } else { 255 };
-                ui.label(RichText::new(&l.en).size(fs * 0.85).color(Color32::from_rgba_unmultiplied(200, 210, 230, dim)));
-                match &l.zh {
-                    Some(zh) => {
-                        ui.label(RichText::new(zh).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim)));
+            let out = egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (i, l) in self.lines.iter().enumerate() {
+                        let dim = if i + 1 < n { 150 } else { 255 };
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&l.en).size(fs * 0.85).color(Color32::from_rgba_unmultiplied(200, 210, 230, dim)),
+                            )
+                            .wrap(),
+                        );
+                        match &l.zh {
+                            Some(zh) => {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(zh).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim)),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                            None => {
+                                ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+                            }
+                        }
+                        ui.add_space(6.0);
                     }
-                    None => {
-                        ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
-                    }
-                }
-                ui.add_space(6.0);
-            }
+                });
+            content_h = top.response.rect.height() + 4.0 + out.content_size.y;
         });
 
+        self.fit_height(&ctx, rect, content_h);
         self.maybe_save_window_rect(&ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
     }

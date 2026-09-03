@@ -1,4 +1,6 @@
-//! 用法：cargo run --release --example asr_bench -- <模型.bin> <wav 16k mono，16 位整型或 32 位浮点>
+//! 识别基准。用法：
+//!   cargo run --release --example asr_bench -- <模型.bin> <wav 16k mono> [threads=4] [flash_attn=1] [min_audio_ctx=512] [runs=3]
+//! 打印每次推理毫秒（取最小/中位）与识别文本。
 use live_caption::asr::{Asr, AsrConfig};
 use std::time::Instant;
 
@@ -6,6 +8,10 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let model = args.get(1).expect("模型路径").clone();
     let wav = args.get(2).expect("wav 路径").clone();
+    let threads: i32 = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(4);
+    let flash_attn = args.get(4).map(|s| s == "1").unwrap_or(true);
+    let min_audio_ctx: i32 = args.get(5).map(|s| s.parse().unwrap()).unwrap_or(512);
+    let runs: usize = args.get(6).map(|s| s.parse().unwrap()).unwrap_or(3);
 
     let mut reader = hound::WavReader::open(&wav)?;
     let spec = reader.spec();
@@ -18,19 +24,22 @@ fn main() -> anyhow::Result<()> {
     let audio_sec = pcm.len() as f32 / 16000.0;
 
     let t0 = Instant::now();
-    let mut asr = Asr::load(&AsrConfig { model_path: model, language: "en".into(), threads: 4 })?;
+    let mut asr = Asr::load(&AsrConfig { model_path: model.clone(), language: "en".into(), threads, flash_attn, min_audio_ctx })?;
     let load_ms = t0.elapsed().as_millis();
 
-    // 预热一次
-    let _ = asr.transcribe(&pcm)?;
-
-    let t1 = Instant::now();
-    let text = asr.transcribe(&pcm)?;
-    let infer_ms = t1.elapsed().as_millis();
-
+    let mut times = Vec::new();
+    let mut text = String::new();
+    for _ in 0..runs {
+        let t1 = Instant::now();
+        text = asr.transcribe(&pcm)?;
+        times.push(t1.elapsed().as_millis());
+    }
+    times.sort();
+    let name = std::path::Path::new(&model).file_name().unwrap().to_string_lossy();
     println!(
-        "load_ms={load_ms} audio_sec={audio_sec:.1} infer_ms={infer_ms} rtf={:.2}",
-        infer_ms as f32 / 1000.0 / audio_sec
+        "model={name} threads={threads} flash={flash_attn} min_ctx={min_audio_ctx} audio={audio_sec:.1}s load={load_ms}ms min={}ms median={}ms",
+        times[0],
+        times[times.len() / 2]
     );
     println!("text={text}");
     Ok(())

@@ -8,6 +8,9 @@ pub struct AsrConfig {
     pub model_path: String,
     pub language: String,
     pub threads: i32,
+    pub flash_attn: bool,
+    /// audio_ctx 下限（whisper 编码窗 1500 = 30 s；越小越快、越容易漏字）
+    pub min_audio_ctx: i32,
 }
 
 pub struct Asr {
@@ -21,12 +24,11 @@ pub struct Asr {
 const MIN_SAMPLES: usize = 16000 * 12 / 10;
 
 /// whisper 编码器默认按 30 s 窗（1500 个 audio ctx）算，短段也要付 30 s 的编码开销；
-/// 按实际时长收缩 audio_ctx 可把每段识别从固定约 3.5 s 压下来（whisper.cpp stream 例程同款做法）。
-/// 下限留 512 保证识别质量。
-fn audio_ctx_for(samples: usize) -> i32 {
+/// 按实际时长收缩 audio_ctx 可把每段识别时间压下来（whisper.cpp stream 例程同款做法）。
+fn audio_ctx_for(samples: usize, min_ctx: i32) -> i32 {
     let sec = samples as f32 / 16000.0;
     let ctx = (sec / 30.0 * 1500.0).ceil() as i32;
-    ctx.clamp(512, 1500)
+    ctx.clamp(min_ctx.clamp(64, 1500), 1500)
 }
 
 /// 上一段文本作提示词时，whisper 会模仿它的风格：没标点、全小写的提示会让后面的段也丢标点。
@@ -52,7 +54,7 @@ fn prompt_tail(text: &str) -> String {
 impl Asr {
     pub fn load(cfg: &AsrConfig) -> anyhow::Result<Self> {
         let mut cparams = WhisperContextParameters::default();
-        cparams.flash_attn = true;
+        cparams.flash_attn = cfg.flash_attn;
         let ctx = WhisperContext::new_with_params(&cfg.model_path, cparams)
             .map_err(|e| anyhow::anyhow!("加载模型失败 {}: {e:?}", cfg.model_path))?;
         let state = ctx.create_state().map_err(|e| anyhow::anyhow!("create_state: {e:?}"))?;
@@ -81,7 +83,7 @@ impl Asr {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_n_threads(self.cfg.threads);
-        params.set_audio_ctx(audio_ctx_for(audio.len()));
+        params.set_audio_ctx(audio_ctx_for(audio.len(), self.cfg.min_audio_ctx));
         if !self.prev_text.is_empty() {
             params.set_initial_prompt(&self.prev_text);
         }
@@ -155,9 +157,10 @@ mod tests {
 
     #[test]
     fn audio_ctx_scales_with_length_and_clamps() {
-        assert_eq!(audio_ctx_for(16000 * 2), 512, "2 s 取下限");
-        assert_eq!(audio_ctx_for(16000 * 15), 750, "15 s 取一半");
-        assert_eq!(audio_ctx_for(16000 * 40), 1500, "超 30 s 封顶");
+        assert_eq!(audio_ctx_for(16000 * 2, 512), 512, "2 s 取下限");
+        assert_eq!(audio_ctx_for(16000 * 15, 512), 750, "15 s 取一半");
+        assert_eq!(audio_ctx_for(16000 * 40, 512), 1500, "超 30 s 封顶");
+        assert_eq!(audio_ctx_for(16000 * 2, 256), 256, "下限可配");
     }
 
     #[test]

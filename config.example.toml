@@ -8,6 +8,8 @@ max_segment_ms = 8000     # 长于此强制切
 model_path = 'D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin'
 language = "en"
 threads = 4
+flash_attn = true
+min_audio_ctx = 512       # whisper 编码窗下限（1500 = 30 s 全窗）；越小越快、越容易漏字
 
 [translate]
 claude_bin = 'C:\Users\13601\.local\bin\claude.exe'   # (Get-Command claude).Source 的结果
@@ -23,7 +25,9 @@ font_path = 'C:\Windows\Fonts\msyh.ttc'
 x = -1
 y = -1
 width = 1100
-height = 170
+height = 120              # 最小高度；实际随内容在 [height, max_height] 内伸缩（下边缘固定向上长）
+max_height = 480
+lines = 2                 # 同时显示最近几段（悬停按钮 行+ / 行- 可调）
 
 [paths]
 transcripts_dir = "transcripts"

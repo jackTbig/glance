@@ -55,7 +55,13 @@ fn main() -> anyhow::Result<()> {
         tx_ui.clone(),
     );
     spawn_asr(
-        AsrConfig { model_path: cfg.asr.model_path.clone(), language: cfg.asr.language.clone(), threads: cfg.asr.threads },
+        AsrConfig {
+            model_path: cfg.asr.model_path.clone(),
+            language: cfg.asr.language.clone(),
+            threads: cfg.asr.threads,
+            flash_attn: cfg.asr.flash_attn,
+            min_audio_ctx: cfg.asr.min_audio_ctx,
+        },
         rx_seg,
         tx_ui.clone(),
         tx_tr,

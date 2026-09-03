@@ -32,6 +32,9 @@ pub struct AsrCfg {
     pub model_path: String,
     pub language: String,
     pub threads: i32,
+    pub flash_attn: bool,
+    /// audio_ctx 下限（1500 = 30 s 全窗；越小越快、越容易漏字）
+    pub min_audio_ctx: i32,
 }
 impl Default for AsrCfg {
     fn default() -> Self {
@@ -39,6 +42,8 @@ impl Default for AsrCfg {
             model_path: r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(),
             language: "en".into(),
             threads: 4,
+            flash_attn: true,
+            min_audio_ctx: 512,
         }
     }
 }
@@ -75,7 +80,11 @@ pub struct UiCfg {
     pub x: i32,
     pub y: i32,
     pub width: u32,
+    /// 最小高度；实际高度随内容在 [height, max_height] 内自动伸缩（下边缘固定向上长）
     pub height: u32,
+    pub max_height: u32,
+    /// 同时显示的最近段数
+    pub lines: usize,
 }
 impl Default for UiCfg {
     fn default() -> Self {
@@ -86,7 +95,9 @@ impl Default for UiCfg {
             x: -1,
             y: -1,
             width: 1100,
-            height: 170,
+            height: 120,
+            max_height: 480,
+            lines: 2,
         }
     }
 }
