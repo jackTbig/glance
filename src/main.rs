@@ -4,12 +4,11 @@ use crossbeam_channel::bounded;
 use live_caption::asr::{spawn_asr, AsrConfig};
 use live_caption::audio::capture::spawn_capture;
 use live_caption::config::Config;
-use live_caption::segmenter::{spawn_segmenter, SegmenterConfig};
+use live_caption::segmenter::{spawn_segmenter, SegMsg, SegmenterConfig};
 use live_caption::translate::{spawn_translator, TranslatorConfig};
 use live_caption::ui::CaptionApp;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Duration;
 
 fn init_logging(dir: &str) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     std::fs::create_dir_all(dir)?;
@@ -34,10 +33,12 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("启动，配置文件 {}", Config::path().display());
 
     let (tx_audio, rx_audio) = bounded::<Vec<f32>>(256);
-    let (tx_seg, rx_seg) = bounded::<Vec<f32>>(8);
+    let (tx_seg, rx_seg) = bounded::<SegMsg>(16);
     let (tx_tr, rx_tr) = bounded(64);
-    let (tx_ui, rx_ui) = bounded(256);
+    let (tx_ui, rx_ui) = bounded(1024);
+    let (tx_cfg, rx_cfg) = bounded::<TranslatorConfig>(4);
     let paused = Arc::new(AtomicBool::new(false));
+    let final_pending = Arc::new(AtomicBool::new(false));
 
     spawn_capture(tx_audio, tx_ui.clone());
     spawn_segmenter(
@@ -48,10 +49,12 @@ fn main() -> anyhow::Result<()> {
             silence_ms: cfg.audio.silence_ms,
             min_segment_ms: cfg.audio.min_segment_ms,
             max_segment_ms: cfg.audio.max_segment_ms,
+            partial_every_ms: cfg.audio.partial_every_ms,
         },
         rx_audio,
         tx_seg,
         paused.clone(),
+        final_pending.clone(),
         tx_ui.clone(),
     );
     spawn_asr(
@@ -65,18 +68,9 @@ fn main() -> anyhow::Result<()> {
         rx_seg,
         tx_ui.clone(),
         tx_tr,
+        final_pending,
     );
-    spawn_translator(
-        TranslatorConfig {
-            command: vec![cfg.translate.claude_bin.clone()],
-            model: cfg.translate.model.clone(),
-            timeout: Duration::from_secs(cfg.translate.timeout_secs),
-            rotate_every: cfg.translate.rotate_every,
-            max_backlog: cfg.translate.max_backlog,
-        },
-        rx_tr,
-        tx_ui.clone(),
-    );
+    spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone());
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("live-caption")
@@ -93,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "live-caption",
         options,
-        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui)))),
+        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui, tx_cfg)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())

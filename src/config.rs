@@ -11,7 +11,7 @@ pub struct Config {
     pub paths: PathsCfg,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AudioCfg {
     /// RMS 能量门限（0–1）
@@ -19,17 +19,21 @@ pub struct AudioCfg {
     pub silence_ms: u32,
     pub min_segment_ms: u32,
     pub max_segment_ms: u32,
+    /// 说话过程中每累积多少毫秒发一次中间识别（0 = 关闭逐字上屏）
+    pub partial_every_ms: u32,
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { energy_threshold: 0.01, silence_ms: 500, min_segment_ms: 1000, max_segment_ms: 8000 }
+        Self { energy_threshold: 0.01, silence_ms: 500, min_segment_ms: 1000, max_segment_ms: 8000, partial_every_ms: 1500 }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AsrCfg {
     pub model_path: String,
+    /// 设置界面列出这个目录下的 *.bin 供选择
+    pub models_dir: String,
     pub language: String,
     pub threads: i32,
     pub flash_attn: bool,
@@ -40,20 +44,33 @@ impl Default for AsrCfg {
     fn default() -> Self {
         Self {
             model_path: r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(),
+            models_dir: r"D:\models\whisper".into(),
             language: "en".into(),
             threads: 4,
-            flash_attn: true,
+            flash_attn: false,
             min_audio_ctx: 512,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TranslateCfg {
+    /// claude | codex | openai
+    pub backend: String,
     /// claude 可执行文件完整路径
     pub claude_bin: String,
-    pub model: String,
+    #[serde(alias = "model")]
+    pub claude_model: String,
+    /// codex 可执行文件（PATH 里的 codex 或完整路径）
+    pub codex_bin: String,
+    /// 留空用 codex 默认模型
+    pub codex_model: String,
+    /// OpenAI 兼容接口：base_url 后拼 /chat/completions；DeepSeek 填 https://api.deepseek.com，
+    /// 通义千问填 https://dashscope.aliyuncs.com/compatible-mode/v1
+    pub openai_base_url: String,
+    pub openai_api_key: String,
+    pub openai_model: String,
     pub timeout_secs: u64,
     pub rotate_every: u32,
     pub max_backlog: usize,
@@ -61,8 +78,14 @@ pub struct TranslateCfg {
 impl Default for TranslateCfg {
     fn default() -> Self {
         Self {
+            backend: "claude".into(),
             claude_bin: r"C:\Users\13601\.local\bin\claude.exe".into(),
-            model: "sonnet".into(),
+            claude_model: "sonnet".into(),
+            codex_bin: "codex".into(),
+            codex_model: String::new(),
+            openai_base_url: "https://api.deepseek.com".into(),
+            openai_api_key: String::new(),
+            openai_model: "deepseek-chat".into(),
             timeout_secs: 15,
             rotate_every: 60,
             max_backlog: 10,
@@ -70,7 +93,7 @@ impl Default for TranslateCfg {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct UiCfg {
     pub font_size: f32,
@@ -85,6 +108,8 @@ pub struct UiCfg {
     pub max_height: u32,
     /// 同时显示的最近段数
     pub lines: usize,
+    /// 打字机效果：每秒显示多少字符（0 = 整句直接出现）
+    pub typewriter_cps: f32,
 }
 impl Default for UiCfg {
     fn default() -> Self {
@@ -98,11 +123,12 @@ impl Default for UiCfg {
             height: 120,
             max_height: 480,
             lines: 2,
+            typewriter_cps: 60.0,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PathsCfg {
     pub transcripts_dir: String,
@@ -158,6 +184,7 @@ mod tests {
         assert_eq!(back.audio.silence_ms, 500);
         assert_eq!(back.asr.language, "en");
         assert_eq!(back.translate.rotate_every, 60);
+        assert_eq!(back.translate.backend, "claude");
         assert!((back.ui.opacity - 0.75).abs() < 1e-6);
     }
 
@@ -166,5 +193,11 @@ mod tests {
         let cfg: Config = toml::from_str("[ui]\nfont_size = 30.0\n").unwrap();
         assert_eq!(cfg.ui.font_size, 30.0);
         assert_eq!(cfg.audio.max_segment_ms, 8000);
+    }
+
+    #[test]
+    fn old_model_key_still_reads_into_claude_model() {
+        let cfg: Config = toml::from_str("[translate]\nmodel = \"haiku\"\n").unwrap();
+        assert_eq!(cfg.translate.claude_model, "haiku");
     }
 }

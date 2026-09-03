@@ -1,6 +1,9 @@
 use crate::messages::{SegId, Stage, StageState, UiMsg};
+use crate::segmenter::SegMsg;
 use chrono::Local;
 use crossbeam_channel::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 #[derive(Debug, Clone)]
@@ -67,7 +70,21 @@ impl Asr {
         Ok(asr)
     }
 
+    /// 最终段识别：结果进入下一段的提示词
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
+        let text = self.run(pcm, None)?;
+        if text.chars().any(|c| c.is_alphanumeric()) {
+            self.prev_text = prompt_tail(&text);
+        }
+        Ok(text)
+    }
+
+    /// 中间快照识别：不更新提示词；abort 置真时尽快中止（返回 Err）
+    pub fn transcribe_partial(&mut self, pcm: &[f32], abort: Arc<AtomicBool>) -> anyhow::Result<String> {
+        self.run(pcm, Some(abort))
+    }
+
+    fn run(&mut self, pcm: &[f32], abort: Option<Arc<AtomicBool>>) -> anyhow::Result<String> {
         let mut audio = pcm.to_vec();
         if audio.len() < MIN_SAMPLES {
             audio.resize(MIN_SAMPLES, 0.0);
@@ -87,8 +104,14 @@ impl Asr {
         if !self.prev_text.is_empty() {
             params.set_initial_prompt(&self.prev_text);
         }
+        if let Some(flag) = abort.clone() {
+            params.set_abort_callback_safe(move || flag.load(Ordering::Relaxed));
+        }
 
         self.state.full(params, &audio).map_err(|e| anyhow::anyhow!("full: {e:?}"))?;
+        if abort.map_or(false, |f| f.load(Ordering::Relaxed)) {
+            anyhow::bail!("已中止");
+        }
         let n = self.state.full_n_segments();
         let mut parts = Vec::new();
         for i in 0..n {
@@ -96,20 +119,22 @@ impl Asr {
                 parts.push(seg.to_str_lossy().map_err(|e| anyhow::anyhow!("{e:?}"))?.trim().to_string());
             }
         }
-        let text = parts.join(" ").trim().to_string();
-        if text.chars().any(|c| c.is_alphanumeric()) {
-            self.prev_text = prompt_tail(&text);
-        }
-        Ok(text)
+        Ok(parts.join(" ").trim().to_string())
     }
 }
 
-/// 识别线程：rx_seg 收音频段；ui 收英文；tx_tr 送翻译队列
+fn has_words(t: &str) -> bool {
+    t.chars().any(|c| c.is_alphanumeric())
+}
+
+/// 识别线程：rx_seg 收切句消息；ui 收英文（中间/最终）；tx_tr 送翻译队列。
+/// 队列里同时有 Final 与 Partial 时只处理 Final（Partial 作废）；只有 Partial 时取最新的一份。
 pub fn spawn_asr(
     cfg: AsrConfig,
-    rx_seg: Receiver<Vec<f32>>,
+    rx_seg: Receiver<SegMsg>,
     ui: Sender<UiMsg>,
     tx_tr: Sender<(SegId, String)>,
+    final_pending: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("asr".into())
@@ -125,25 +150,44 @@ pub fn spawn_asr(
             };
             let _ = ui.send(UiMsg::Status { stage: Stage::Asr, state: StageState::Ok });
             let mut next_id: SegId = 1;
-            while let Ok(seg) = rx_seg.recv() {
-                let at = Local::now();
-                let t0 = std::time::Instant::now();
-                match asr.transcribe(&seg) {
-                    Ok(text) if text.chars().any(|c| c.is_alphanumeric()) => {
-                        tracing::info!(
-                            "asr {}ms audio={:.1}s text={text:?}",
-                            t0.elapsed().as_millis(),
-                            seg.len() as f32 / 16000.0
-                        );
-                        let id = next_id;
-                        next_id += 1;
-                        let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
-                        // 满了由翻译线程按积压规则处理；这里不阻塞
-                        let _ = tx_tr.try_send((id, text));
+            while let Ok(first) = rx_seg.recv() {
+                let mut batch = vec![first];
+                while let Ok(m) = rx_seg.try_recv() {
+                    batch.push(m);
+                }
+                let finals: Vec<Vec<f32>> = batch.iter().filter_map(|m| if let SegMsg::Final(v) = m { Some(v.clone()) } else { None }).collect();
+                if finals.is_empty() {
+                    // 只有中间快照：识别最新的一份，期间来了 Final 就中止
+                    let Some(SegMsg::Partial(pcm)) = batch.pop() else { continue };
+                    final_pending.store(false, Ordering::Relaxed);
+                    let t0 = std::time::Instant::now();
+                    match asr.transcribe_partial(&pcm, final_pending.clone()) {
+                        Ok(text) if has_words(&text) => {
+                            tracing::debug!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
+                            let _ = ui.send(UiMsg::EnglishPartial { text });
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::debug!("中间识别放弃：{e}"),
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!("识别失败，跳过：{e}");
+                    continue;
+                }
+                for seg in finals {
+                    let at = Local::now();
+                    let t0 = std::time::Instant::now();
+                    match asr.transcribe(&seg) {
+                        Ok(text) if has_words(&text) => {
+                            tracing::info!("asr {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
+                            let id = next_id;
+                            next_id += 1;
+                            let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
+                            // 满了由翻译线程按积压规则处理；这里不阻塞
+                            let _ = tx_tr.try_send((id, text));
+                        }
+                        Ok(_) => {
+                            // 这句识别为空（多半是噪声）：把可能挂着的中间结果清掉
+                            let _ = ui.send(UiMsg::EnglishPartial { text: String::new() });
+                        }
+                        Err(e) => tracing::warn!("识别失败，跳过：{e}"),
                     }
                 }
             }

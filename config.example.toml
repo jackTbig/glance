@@ -3,19 +3,27 @@ energy_threshold = 0.01   # RMS 门限，越小越灵敏
 silence_ms = 500          # 静音多久算一句结束
 min_segment_ms = 1000     # 短于此丢弃
 max_segment_ms = 8000     # 长于此强制切
+partial_every_ms = 1500   # 逐字上屏：说话中每隔这么久识别一次中间结果，0 关闭
 
 [asr]
 model_path = 'D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin'
+models_dir = 'D:\models\whisper'   # 设置界面列出这里的 *.bin（已有 base.en / small.en / large-v3-turbo q8 与 fp16）
 language = "en"
 threads = 4
-flash_attn = true
+flash_attn = false        # 本机 Arc 核显实测开了反而慢
 min_audio_ctx = 512       # whisper 编码窗下限（1500 = 30 s 全窗）；越小越快、越容易漏字
 
 [translate]
+backend = "claude"        # claude | codex | openai（设置界面可切，立即生效）
 claude_bin = 'C:\Users\13601\.local\bin\claude.exe'   # (Get-Command claude).Source 的结果
-model = "sonnet"          # 或 haiku
-timeout_secs = 15         # 首句冷启动约 10 s，故不能设太短
-rotate_every = 60         # 会话每 60 句轮换（提前 5 句预热备用会话，无感）
+claude_model = "sonnet"   # 或 haiku / opus
+codex_bin = "codex"
+codex_model = ""          # 留空用 codex 默认
+openai_base_url = "https://api.deepseek.com"   # 通义千问：https://dashscope.aliyuncs.com/compatible-mode/v1
+openai_api_key = ""
+openai_model = "deepseek-chat"
+timeout_secs = 15         # claude 首句冷启动约 10 s，故不能设太短
+rotate_every = 60         # claude 会话每 60 句轮换（提前 5 句预热备用会话，无感）
 max_backlog = 10
 
 [ui]
@@ -28,6 +36,7 @@ width = 1100
 height = 120              # 最小高度；实际随内容在 [height, max_height] 内伸缩（下边缘固定向上长）
 max_height = 480
 lines = 2                 # 同时显示最近几段（悬停按钮 行+ / 行- 可调）
+typewriter_cps = 60.0     # 打字机效果，每秒字符数；0 = 整句直出
 
 [paths]
 transcripts_dir = "transcripts"
