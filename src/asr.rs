@@ -29,6 +29,26 @@ fn audio_ctx_for(samples: usize) -> i32 {
     ctx.clamp(512, 1500)
 }
 
+/// 上一段文本作提示词时，whisper 会模仿它的风格：没标点、全小写的提示会让后面的段也丢标点。
+/// 这里只留末尾约 200 字符，首字母大写、末尾补句号，把风格拉回"有标点的书面句"。
+fn prompt_tail(text: &str) -> String {
+    let tail: String = text.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail = tail.trim();
+    if tail.is_empty() {
+        return String::new();
+    }
+    let mut s = String::with_capacity(tail.len() + 1);
+    let mut chars = tail.chars();
+    if let Some(first) = chars.next() {
+        s.extend(first.to_uppercase());
+        s.push_str(chars.as_str());
+    }
+    if !s.ends_with(['.', '!', '?']) {
+        s.push('.');
+    }
+    s
+}
+
 impl Asr {
     pub fn load(cfg: &AsrConfig) -> anyhow::Result<Self> {
         let mut cparams = WhisperContextParameters::default();
@@ -36,7 +56,13 @@ impl Asr {
         let ctx = WhisperContext::new_with_params(&cfg.model_path, cparams)
             .map_err(|e| anyhow::anyhow!("加载模型失败 {}: {e:?}", cfg.model_path))?;
         let state = ctx.create_state().map_err(|e| anyhow::anyhow!("create_state: {e:?}"))?;
-        Ok(Self { _ctx: ctx, state, cfg: cfg.clone(), prev_text: String::new() })
+        let mut asr = Self { _ctx: ctx, state, cfg: cfg.clone(), prev_text: String::new() };
+        // 预热：首次推理要编译 Vulkan shader、分配显存，实测比稳态慢 5 s 以上，提前在加载阶段付掉
+        let t0 = std::time::Instant::now();
+        let _ = asr.transcribe(&vec![0.0f32; MIN_SAMPLES])?;
+        asr.prev_text.clear();
+        tracing::info!("asr 预热完成 {}ms", t0.elapsed().as_millis());
+        Ok(asr)
     }
 
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
@@ -70,9 +96,7 @@ impl Asr {
         }
         let text = parts.join(" ").trim().to_string();
         if text.chars().any(|c| c.is_alphanumeric()) {
-            // 只留最后约 200 个字符做下一段的提示词
-            let tail: String = text.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-            self.prev_text = tail;
+            self.prev_text = prompt_tail(&text);
         }
         Ok(text)
     }
@@ -88,6 +112,7 @@ pub fn spawn_asr(
     std::thread::Builder::new()
         .name("asr".into())
         .spawn(move || {
+            let _ = ui.send(UiMsg::Status { stage: Stage::Asr, state: StageState::Warn("模型加载中".into()) });
             let mut asr = match Asr::load(&cfg) {
                 Ok(a) => a,
                 Err(e) => {
@@ -126,12 +151,21 @@ pub fn spawn_asr(
 
 #[cfg(test)]
 mod tests {
-    use super::audio_ctx_for;
+    use super::{audio_ctx_for, prompt_tail};
 
     #[test]
     fn audio_ctx_scales_with_length_and_clamps() {
         assert_eq!(audio_ctx_for(16000 * 2), 512, "2 s 取下限");
         assert_eq!(audio_ctx_for(16000 * 15), 750, "15 s 取一半");
         assert_eq!(audio_ctx_for(16000 * 40), 1500, "超 30 s 封顶");
+    }
+
+    #[test]
+    fn prompt_tail_restores_sentence_style() {
+        assert_eq!(prompt_tail("good morning everyone"), "Good morning everyone.");
+        assert_eq!(prompt_tail("Already fine!"), "Already fine!");
+        assert_eq!(prompt_tail("   "), "");
+        let long = "a".repeat(300);
+        assert_eq!(prompt_tail(&long).chars().count(), 201, "200 字符 + 句号");
     }
 }

@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
     if cfg.ui.x >= 0 && cfg.ui.y >= 0 {
         viewport = viewport.with_position([cfg.ui.x as f32, cfg.ui.y as f32]);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
     let paused_ui = paused.clone();
     eframe::run_native(
         "live-caption",

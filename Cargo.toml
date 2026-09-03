@@ -12,7 +12,8 @@ name = "live-caption"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.36"
+# glow（OpenGL）渲染器：wgpu 在本机 Arc 上不给带 alpha 的合成模式，透明窗会变成不透明黑底
+eframe = { version = "0.36", features = ["glow"] }
 egui = "0.36"
 wasapi = "0.24"
 whisper-rs = { version = "0.16", features = ["vulkan"] }
