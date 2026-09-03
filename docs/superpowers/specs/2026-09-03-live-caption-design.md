@@ -93,6 +93,20 @@
 
 **判定**：Vulkan 耗时 ≤ 2 × OpenVINO → 进程内 whisper-rs；否则识别走 OpenVINO 侧车。
 
-## 附录 A：基准结果（待第 0 步填写）
+## 附录 A：基准结果（2026-09-03 实测，Intel Arc 140T，同一段 14.8 s 英文 TTS 音频 `tests/fixtures/en-10s.wav`）
 
-（空）
+| 项目 | 结果 |
+|---|---|
+| Vulkan large-v3-turbo q5_0（whisper-rs 0.16，进程内） | load 1.8–2.4 s · infer 3.5–4.1 s · rtf 0.24–0.28 · 文本与原句一字不差 |
+| OpenVINO large-v3 int8（local-asr 8080，CPU 空闲时） | 墙钟 4.9–5.1 s · rtf ≈ 0.34 · 文本与原句一字不差 |
+| claude sonnet 单句往返（默认参数） | 14.6 s（冷启动）/ 4.3 s / 5.3 s |
+| claude haiku 单句往返（默认参数） | 22.0 s（冷启动）/ 7.3 s / 6.2 s |
+| claude sonnet + `--strict-mcp-config --mcp-config {} --setting-sources ""` | 9.8 s（冷启动）/ 1.6 s / 1.5 s |
+| 工具关闭参数 | `--disallowedTools "*"`（实测有效，译文干净无工具痕迹） |
+| loopback 采集冒烟 | 混音格式 48 kHz / 2 ch / 32 bit float；播放测试音频时 5 s 采到 peak 0.52 |
+
+**判定**：Vulkan infer（3.5–4.1 s）< OpenVINO（5.0 s），且不到 2 倍阈值 → **进程内 whisper-rs（Task 5）**，不走侧车。
+
+**翻译延迟结论**：claude CLI 的每句开销主要来自 MCP 服务器与设置源加载；关掉后单句约 1.5 s，达到设计目标（中文 ≤ 4 s）。冷启动约 10 s 只在进程起动与会话轮换时发生，故翻译线程启动即预热、轮换前 5 句预起备用会话。haiku 并不比 sonnet 快，默认用 sonnet。
+
+**工具链附注**：Vulkan SDK 官方安装器在本机无法下载（sdk.lunarg.com TLS 握手失败），改为 GitHub Vulkan-Headers + conda-forge（清华镜像）的 loader/shaderc 自拼；whisper.cpp 的 vulkan-shaders-gen 嵌套 CMake 在 Visual Studio 生成器下因路径超 260 字符崩溃，改用 Ninja + 短 target 目录（`scripts/env.sh`）。

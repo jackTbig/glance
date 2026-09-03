@@ -1,4 +1,4 @@
-//! 用法：cargo run --release --example asr_bench -- <模型.bin> <wav 16k mono>
+//! 用法：cargo run --release --example asr_bench -- <模型.bin> <wav 16k mono，16 位整型或 32 位浮点>
 use live_caption::asr::{Asr, AsrConfig};
 use std::time::Instant;
 
@@ -11,7 +11,10 @@ fn main() -> anyhow::Result<()> {
     let spec = reader.spec();
     assert_eq!(spec.sample_rate, 16000, "基准音频必须 16 kHz");
     assert_eq!(spec.channels, 1, "基准音频必须单声道");
-    let pcm: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect();
+    let pcm: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Int => reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect(),
+        hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+    };
     let audio_sec = pcm.len() as f32 / 16000.0;
 
     let t0 = Instant::now();
