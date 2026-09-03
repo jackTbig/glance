@@ -1,0 +1,30 @@
+[audio]
+energy_threshold = 0.01   # RMS 门限，越小越灵敏
+silence_ms = 500          # 静音多久算一句结束
+min_segment_ms = 1000     # 短于此丢弃
+max_segment_ms = 8000     # 长于此强制切
+
+[asr]
+model_path = 'D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin'
+language = "en"
+threads = 4
+
+[translate]
+claude_bin = 'C:\Users\13601\.local\bin\claude.exe'   # (Get-Command claude).Source 的结果
+model = "sonnet"          # 或 haiku
+timeout_secs = 15         # 首句冷启动约 10 s，故不能设太短
+rotate_every = 60         # 会话每 60 句轮换（提前 5 句预热备用会话，无感）
+max_backlog = 10
+
+[ui]
+font_size = 22.0
+opacity = 0.75
+font_path = 'C:\Windows\Fonts\msyh.ttc'
+x = -1
+y = -1
+width = 1100
+height = 170
+
+[paths]
+transcripts_dir = "transcripts"
+logs_dir = "logs"
