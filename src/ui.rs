@@ -3,7 +3,8 @@ use crate::messages::{SegId, Stage, StageState, UiMsg};
 use crate::transcript::{Transcript, TranscriptFile};
 use crate::translate::TranslatorConfig;
 use chrono::{DateTime, Local};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
+use std::path::PathBuf;
 use egui::{Align, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, Id, Layout, ResizeDirection, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
 use tray_icon::{MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use global_hotkey::{
@@ -81,6 +82,9 @@ pub struct CaptionApp {
     draft: Config,
     models: Vec<String>,
     settings_note: String,
+    settings_tab: usize,
+    test_rx: Option<Receiver<Result<String, String>>>,
+    test_msg: String,
 }
 
 impl CaptionApp {
@@ -161,6 +165,9 @@ impl CaptionApp {
             draft,
             models: Vec::new(),
             settings_note: String::new(),
+            settings_tab: 0,
+            test_rx: None,
+            test_msg: String::new(),
         }
     }
 
@@ -290,196 +297,339 @@ impl CaptionApp {
     fn open_settings(&mut self) {
         self.draft = self.cfg.clone();
         self.settings_note.clear();
+        self.test_msg.clear();
         self.models = list_models(&self.cfg.asr.models_dir, &self.cfg.asr.model_path);
         self.show_settings = true;
     }
 
-    fn apply_settings(&mut self) {
-        let asr_changed = self.draft.asr != self.cfg.asr || self.draft.audio != self.cfg.audio;
+    /// 草稿里有没有必须重启才生效的改动（识别 / 切句 / 热键）
+    fn needs_restart(&self) -> bool {
+        self.draft.asr != self.cfg.asr
+            || self.draft.audio != self.cfg.audio
+            || self.draft.ui.hotkey_clickable != self.cfg.ui.hotkey_clickable
+            || self.draft.ui.hotkey_passthrough != self.cfg.ui.hotkey_passthrough
+    }
+
+    fn apply_settings(&mut self) -> bool {
+        let restart = self.needs_restart();
         self.cfg = self.draft.clone();
         match self.cfg.save() {
             Ok(()) => {
                 let _ = self.tx_cfg.send(TranslatorConfig::from(&self.cfg.translate));
-                self.settings_note = if asr_changed {
-                    "已保存。翻译后端已切换；识别/音频参数改动需重启应用生效。".into()
+                self.settings_note = if restart {
+                    "已保存。识别 / 切句 / 热键的改动要重启后生效。".into()
                 } else {
                     "已保存并应用。".into()
                 };
             }
             Err(e) => self.settings_note = format!("保存失败：{e}"),
         }
+        restart
     }
 
-    fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        let d = &mut self.draft;
-        ui.heading("翻译");
-        egui::ComboBox::from_label("后端")
-            .selected_text(match d.translate.backend.as_str() {
-                "codex" => "Codex CLI（OpenAI 订阅）",
-                "openai" => "OpenAI 兼容接口（DeepSeek / 通义千问 / 网关 / Ollama）",
-                _ => "Claude Code CLI（Anthropic 订阅）",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut d.translate.backend, "claude".into(), "Claude Code CLI（Anthropic 订阅）");
-                ui.selectable_value(&mut d.translate.backend, "codex".into(), "Codex CLI（OpenAI 订阅）");
-                ui.selectable_value(&mut d.translate.backend, "openai".into(), "OpenAI 兼容接口（DeepSeek / 通义千问 / 网关 / Ollama）");
-            });
-        match d.translate.backend.as_str() {
-            "codex" => {
-                ui.horizontal(|ui| {
-                    ui.label("codex 命令");
-                    ui.text_edit_singleline(&mut d.translate.codex_bin);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("模型（留空用默认）");
-                    ui.text_edit_singleline(&mut d.translate.codex_model);
-                });
-                ui.label(RichText::new("每句起一个 codex exec 进程，延迟通常 3 秒以上；适合不在乎速度只想用订阅的场景。").size(12.0).color(Color32::GRAY));
-            }
-            "openai" => {
-                ui.horizontal(|ui| {
-                    ui.label("预设：");
-                    if ui.small_button("DeepSeek").clicked() {
-                        d.translate.openai_base_url = "https://api.deepseek.com".into();
-                        d.translate.openai_model = "deepseek-chat".into();
-                    }
-                    if ui.small_button("通义千问").clicked() {
-                        d.translate.openai_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
-                        d.translate.openai_model = "qwen-turbo".into();
-                    }
-                    if ui.small_button("自建网关").clicked() {
-                        d.translate.openai_base_url = "https://gateway.example.com/v1".into();
-                        d.translate.openai_model = "deepseek-v4-flash".into();
-                    }
-                    if ui.small_button("Ollama 本地").clicked() {
-                        d.translate.openai_base_url = "http://127.0.0.1:11434/v1".into();
-                        d.translate.openai_model = "qwen2.5:7b".into();
-                        d.translate.openai_api_key = "ollama".into();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Base URL");
-                    ui.add(egui::TextEdit::singleline(&mut d.translate.openai_base_url).desired_width(360.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("API Key");
-                    ui.add(egui::TextEdit::singleline(&mut d.translate.openai_api_key).password(true).desired_width(360.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("模型");
-                    ui.text_edit_singleline(&mut d.translate.openai_model);
-                });
-                ui.label(RichText::new("请求发到 {Base URL}/chat/completions，流式返回。Key 只存在本机 config.toml。").size(12.0).color(Color32::GRAY));
-            }
-            _ => {
-                ui.horizontal(|ui| {
-                    ui.label("claude 路径");
-                    ui.add(egui::TextEdit::singleline(&mut d.translate.claude_bin).desired_width(360.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("模型");
-                    ui.text_edit_singleline(&mut d.translate.claude_model);
-                    ui.label(RichText::new("sonnet / haiku / opus").size(12.0).color(Color32::GRAY));
-                });
+    /// 重启：起一个延迟 2 秒的启动器再退出自己（等本进程释放热键与托盘）
+    fn restart_app(&self, ctx: &egui::Context) {
+        if let Ok(exe) = std::env::current_exe() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let cmd = format!("ping -n 3 127.0.0.1 >nul & start \"\" /D \"{}\" \"{}\"", cwd.display(), exe.display());
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("cmd").args(["/C", &cmd]).creation_flags(0x0800_0000).spawn();
+        }
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+    }
+
+    fn start_translate_test(&mut self) {
+        let cfg = TranslatorConfig::from(&self.draft.translate);
+        let (tx, rx) = bounded(1);
+        self.test_rx = Some(rx);
+        self.test_msg = "测试中…（Claude 首句含冷启动，约 10 秒）".into();
+        std::thread::spawn(move || {
+            let r = crate::translate::test_translate(&cfg, "Good morning everyone, let's get started with today's meeting.")
+                .map(|(zh, d)| format!("{zh}　（{:.1} 秒）", d.as_secs_f32()))
+                .map_err(|e| e.to_string());
+            let _ = tx.send(r);
+        });
+    }
+
+    fn settings_window(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(rx) = &self.test_rx {
+            if let Ok(r) = rx.try_recv() {
+                self.test_msg = match r {
+                    Ok(s) => format!("✓ {s}"),
+                    Err(e) => format!("✗ {e}"),
+                };
+                self.test_rx = None;
             }
         }
-        ui.horizontal(|ui| {
-            ui.label("单句超时（秒）");
-            ui.add(egui::Slider::new(&mut d.translate.timeout_secs, 3..=60));
+        ui.style_mut().spacing.slider_width = 260.0;
+        ui.style_mut().spacing.item_spacing = egui::vec2(10.0, 8.0);
+
+        egui::Panel::left("settings_tabs").resizable(false).exact_size(150.0).show(ui, |ui| {
+            ui.add_space(10.0);
+            let tabs = [("翻译", false), ("识别", true), ("切句", true), ("界面", false), ("热键", true)];
+            for (i, (name, restart)) in tabs.iter().enumerate() {
+                let text = if *restart { format!("{name}   ·重启") } else { name.to_string() };
+                let sel = self.settings_tab == i;
+                if ui.add_sized([130.0, 34.0], egui::Button::selectable(sel, RichText::new(text).size(15.0))).clicked() {
+                    self.settings_tab = i;
+                }
+            }
+            ui.add_space(14.0);
+            ui.label(RichText::new("·重启 = 改动要重启后生效").size(11.0).color(Color32::GRAY));
         });
 
-        ui.separator();
-        ui.heading("识别（改动需重启）");
-        let cur_model = d.asr.model_path.clone();
-        egui::ComboBox::from_label("模型")
-            .selected_text(std::path::Path::new(&cur_model).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(cur_model.clone()))
-            .width(360.0)
-            .show_ui(ui, |ui| {
-                for m in &self.models {
-                    let name = std::path::Path::new(m).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(m.clone());
-                    ui.selectable_value(&mut d.asr.model_path, m.clone(), name);
+        egui::Panel::bottom("settings_bar").show(ui, |ui| {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let restart = self.needs_restart();
+                if ui.add_sized([120.0, 32.0], egui::Button::new(RichText::new("保存并应用").strong())).clicked() {
+                    self.apply_settings();
+                }
+                if restart && ui.add_sized([120.0, 32.0], egui::Button::new("保存并重启")).clicked() {
+                    self.apply_settings();
+                    self.restart_app(ctx);
+                }
+                if ui.add_sized([80.0, 32.0], egui::Button::new("关闭")).clicked() {
+                    self.show_settings = false;
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(&self.settings_note).color(Color32::from_rgb(70, 150, 70)));
+            });
+            ui.add_space(8.0);
+        });
+
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(6.0);
+                match self.settings_tab {
+                    0 => self.tab_translate(ui),
+                    1 => self.tab_asr(ui),
+                    2 => self.tab_audio(ui),
+                    3 => self.tab_ui(ui),
+                    _ => self.tab_hotkeys(ui),
                 }
             });
-        ui.horizontal(|ui| {
-            ui.label("模型目录");
-            ui.add(egui::TextEdit::singleline(&mut d.asr.models_dir).desired_width(360.0));
         });
-        ui.label(RichText::new("large-v3-turbo 最准（每段约 1.5–3 s）；small.en 约 1 s；base.en 约 0.4 s 但更容易听错。").size(12.0).color(Color32::GRAY));
-        ui.checkbox(&mut d.asr.flash_attn, "flash attention（本机 Arc 核显实测反而更慢，默认关）");
+    }
+
+    fn section(ui: &mut egui::Ui, title: &str, sub: &str) {
+        ui.label(RichText::new(title).size(19.0).strong());
+        if !sub.is_empty() {
+            ui.label(RichText::new(sub).size(12.0).color(Color32::GRAY));
+        }
+        ui.add_space(8.0);
+    }
+
+    fn grid(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+        egui::Grid::new(id).num_columns(2).spacing([18.0, 12.0]).min_col_width(120.0).show(ui, add);
+    }
+
+    fn tab_translate(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "翻译后端", "字幕的中文由哪个服务翻译；点“保存并应用”立即切换，不用重启。");
+        let d = &mut self.draft;
+        let backend_name = |b: &str| match b {
+            "codex" => "Codex CLI（OpenAI 订阅）",
+            "openai" => "OpenAI 兼容接口（DeepSeek / 通义千问 / 网关 / Ollama）",
+            _ => "Claude Code CLI（Anthropic 订阅）",
+        };
+        Self::grid(ui, "g_tr", |ui| {
+            ui.label("后端");
+            egui::ComboBox::from_id_salt("backend")
+                .width(420.0)
+                .selected_text(backend_name(&d.translate.backend))
+                .show_ui(ui, |ui| {
+                    for b in ["claude", "codex", "openai"] {
+                        ui.selectable_value(&mut d.translate.backend, b.to_string(), backend_name(b));
+                    }
+                });
+            ui.end_row();
+            match d.translate.backend.as_str() {
+                "codex" => {
+                    ui.label("codex 命令");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.codex_bin).desired_width(420.0));
+                    ui.end_row();
+                    ui.label("模型");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.codex_model).desired_width(220.0).hint_text("留空用 codex 默认"));
+                    ui.end_row();
+                }
+                "openai" => {
+                    ui.label("预设");
+                    ui.horizontal(|ui| {
+                        if ui.button("DeepSeek").clicked() {
+                            d.translate.openai_base_url = "https://api.deepseek.com".into();
+                            d.translate.openai_model = "deepseek-chat".into();
+                        }
+                        if ui.button("通义千问").clicked() {
+                            d.translate.openai_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
+                            d.translate.openai_model = "qwen-turbo".into();
+                        }
+                        if ui.button("自建网关").clicked() {
+                            d.translate.openai_base_url = "https://gateway.example.com/v1".into();
+                            d.translate.openai_model = "deepseek-v4-flash".into();
+                        }
+                        if ui.button("Ollama 本地").clicked() {
+                            d.translate.openai_base_url = "http://127.0.0.1:11434/v1".into();
+                            d.translate.openai_model = "qwen2.5:7b".into();
+                            d.translate.openai_api_key = "ollama".into();
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Base URL");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.openai_base_url).desired_width(420.0));
+                    ui.end_row();
+                    ui.label("API Key");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.openai_api_key).password(true).desired_width(420.0));
+                    ui.end_row();
+                    ui.label("模型");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.openai_model).desired_width(220.0));
+                    ui.end_row();
+                }
+                _ => {
+                    ui.label("claude 路径");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.claude_bin).desired_width(420.0).hint_text("写 claude 即按 PATH 自动找"));
+                    ui.end_row();
+                    ui.label("模型");
+                    ui.add(egui::TextEdit::singleline(&mut d.translate.claude_model).desired_width(220.0).hint_text("sonnet / haiku / opus"));
+                    ui.end_row();
+                }
+            }
+            ui.label("单句超时");
+            ui.add(egui::Slider::new(&mut d.translate.timeout_secs, 3..=60).suffix(" 秒"));
+            ui.end_row();
+        });
+        ui.add_space(6.0);
+        let hint = match d.translate.backend.as_str() {
+            "codex" => "每句起一个 codex exec 进程，延迟通常 3 秒以上；适合只想用订阅、不在乎速度的场景。",
+            "openai" => "请求发到 {Base URL}/chat/completions，流式返回。Key 只存在本机 config.toml。走公网服务意味着会议文本会出本机。",
+            _ => "常驻 claude 子进程，每句约 1.5 秒；首句冷启动约 10 秒，已在启动时预热。",
+        };
+        ui.label(RichText::new(hint).size(12.0).color(Color32::GRAY));
+        ui.add_space(10.0);
         ui.horizontal(|ui| {
+            let busy = self.test_rx.is_some();
+            if ui.add_enabled(!busy, egui::Button::new("测试翻译")).clicked() {
+                self.start_translate_test();
+            }
+            ui.label(RichText::new(&self.test_msg).size(13.0));
+        });
+    }
+
+    fn tab_asr(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "语音识别（本机 GPU）", "改动要重启后生效；底部有“保存并重启”。");
+        let models = self.models.clone();
+        let d = &mut self.draft;
+        let pretty = |p: &str| -> String {
+            let name = std::path::Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(p.to_string());
+            match std::fs::metadata(p) {
+                Ok(m) => format!("{name}  ({} MB)", m.len() / 1_000_000),
+                Err(_) => format!("{name}  (找不到文件)"),
+            }
+        };
+        Self::grid(ui, "g_asr", |ui| {
+            ui.label("模型");
+            egui::ComboBox::from_id_salt("asr_model")
+                .width(420.0)
+                .selected_text(pretty(&d.asr.model_path))
+                .show_ui(ui, |ui| {
+                    for m in &models {
+                        ui.selectable_value(&mut d.asr.model_path, m.clone(), pretty(m));
+                    }
+                });
+            ui.end_row();
+            ui.label("模型目录");
+            ui.add(egui::TextEdit::singleline(&mut d.asr.models_dir).desired_width(420.0));
+            ui.end_row();
+            ui.label("flash attention");
+            ui.checkbox(&mut d.asr.flash_attn, "开启（本机 Arc 核显实测反而慢 2.5 倍，默认关）");
+            ui.end_row();
             ui.label("audio_ctx 下限");
             ui.add(egui::Slider::new(&mut d.asr.min_audio_ctx, 128..=1500));
-        });
-        ui.horizontal(|ui| {
+            ui.end_row();
             ui.label("CPU 线程");
             ui.add(egui::Slider::new(&mut d.asr.threads, 1..=16));
+            ui.end_row();
         });
+        ui.add_space(6.0);
+        if ui.button("重新扫描模型目录").clicked() {
+            self.models = list_models(&self.draft.asr.models_dir, &self.draft.asr.model_path);
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("large-v3-turbo 最准（3 秒一句约 0.9 秒）；small.en 约 0.45 秒；base.en 约 0.4 秒但更容易听错。audio_ctx 越小越快、越容易漏字。").size(12.0).color(Color32::GRAY));
+    }
 
-        ui.separator();
-        ui.heading("切句（改动需重启）");
-        ui.horizontal(|ui| {
+    fn tab_audio(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "切句与逐字上屏", "改动要重启后生效。");
+        let d = &mut self.draft;
+        Self::grid(ui, "g_audio", |ui| {
             ui.label("能量门限");
             ui.add(egui::Slider::new(&mut d.audio.energy_threshold, 0.001..=0.1).logarithmic(true));
+            ui.end_row();
+            ui.label("停顿多久算一句");
+            ui.add(egui::Slider::new(&mut d.audio.silence_ms, 200..=1500).suffix(" ms"));
+            ui.end_row();
+            ui.label("逐字上屏间隔");
+            ui.add(egui::Slider::new(&mut d.audio.partial_every_ms, 0..=4000).suffix(" ms"));
+            ui.end_row();
+            ui.label("单段最长");
+            ui.add(egui::Slider::new(&mut d.audio.max_segment_ms, 3000..=15000).suffix(" ms"));
+            ui.end_row();
+            ui.label("单段最短");
+            ui.add(egui::Slider::new(&mut d.audio.min_segment_ms, 300..=3000).suffix(" ms"));
+            ui.end_row();
         });
-        ui.horizontal(|ui| {
-            ui.label("停顿多久算一句结束（ms）");
-            ui.add(egui::Slider::new(&mut d.audio.silence_ms, 200..=1500));
-        });
-        ui.horizontal(|ui| {
-            ui.label("逐字上屏：说话中每隔（ms）识别一次，0 关闭");
-            ui.add(egui::Slider::new(&mut d.audio.partial_every_ms, 0..=4000));
-        });
-        ui.horizontal(|ui| {
-            ui.label("单段最长（ms）");
-            ui.add(egui::Slider::new(&mut d.audio.max_segment_ms, 3000..=15000));
-        });
+        ui.add_space(6.0);
+        ui.label(RichText::new("能量门限越小越灵敏（背景音乐大时调高）；逐字上屏间隔 0 = 关闭中间结果；长句无停顿会在“单段最长”处硬切。").size(12.0).color(Color32::GRAY));
+    }
 
-        ui.separator();
-        ui.heading("界面（立即生效）");
-        ui.horizontal(|ui| {
+    fn tab_ui(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "字幕窗外观", "立即生效。");
+        let d = &mut self.draft;
+        Self::grid(ui, "g_ui", |ui| {
             ui.label("字号");
-            ui.add(egui::Slider::new(&mut d.ui.font_size, 12.0..=60.0));
-        });
-        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut d.ui.font_size, 12.0..=60.0).fixed_decimals(0));
+            ui.end_row();
             ui.label("不透明度");
-            ui.add(egui::Slider::new(&mut d.ui.opacity, 0.1..=1.0));
-        });
-        ui.horizontal(|ui| {
+            ui.add(egui::Slider::new(&mut d.ui.opacity, 0.1..=1.0).fixed_decimals(2));
+            ui.end_row();
             ui.label("同时显示段数");
             ui.add(egui::Slider::new(&mut d.ui.lines, 1..=8));
-        });
-        ui.horizontal(|ui| {
-            ui.label("打字机速度（字/秒，0 = 整句直出）");
-            ui.add(egui::Slider::new(&mut d.ui.typewriter_cps, 0.0..=300.0));
-        });
-        ui.horizontal(|ui| {
+            ui.end_row();
+            ui.label("打字机速度");
+            ui.add(egui::Slider::new(&mut d.ui.typewriter_cps, 0.0..=300.0).fixed_decimals(0).suffix(" 字/秒"));
+            ui.end_row();
+            ui.label("最小高度");
+            ui.add(egui::Slider::new(&mut d.ui.height, 60..=600).suffix(" px"));
+            ui.end_row();
             ui.label("最大高度");
-            ui.add(egui::Slider::new(&mut d.ui.max_height, 120..=1200));
+            ui.add(egui::Slider::new(&mut d.ui.max_height, 120..=1200).suffix(" px"));
+            ui.end_row();
         });
-        ui.separator();
-        ui.heading("全局热键（改后重启生效；被别的程序占用时换一个组合）");
-        ui.horizontal(|ui| {
-            ui.label("切回可点击");
-            ui.text_edit_singleline(&mut d.ui.hotkey_clickable);
-        });
-        ui.horizontal(|ui| {
-            ui.label("切换穿透");
-            ui.text_edit_singleline(&mut d.ui.hotkey_passthrough);
-        });
-        ui.label(RichText::new("写法：Ctrl+Alt+C、Ctrl+Shift+F9、Alt+Shift+Space；托盘图标点开的面板不依赖热键。").size(12.0).color(Color32::GRAY));
+        ui.add_space(6.0);
+        ui.label(RichText::new("打字机速度 0 = 整句直出。窗口位置拖动后自动记住；拖边缘可改宽高。").size(12.0).color(Color32::GRAY));
+    }
 
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("保存并应用").clicked() {
-                self.apply_settings();
+    fn tab_hotkeys(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "全局热键", "改动要重启后生效。被别的程序占用时换一个组合。");
+        let d = &mut self.draft;
+        let valid = |s: &str| -> (bool, String) {
+            match s.parse::<HotKey>() {
+                Ok(_) => (true, "✓".into()),
+                Err(e) => (false, format!("✗ {e}")),
             }
-            if ui.button("关闭").clicked() {
-                self.show_settings = false;
-            }
-            if !self.settings_note.is_empty() {
-                ui.label(RichText::new(&self.settings_note).color(Color32::from_rgb(120, 200, 120)));
+        };
+        Self::grid(ui, "g_hk", |ui| {
+            for (label, field) in [("切回可点击", &mut d.ui.hotkey_clickable), ("切换穿透", &mut d.ui.hotkey_passthrough)] {
+                ui.label(label);
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(field).desired_width(220.0));
+                    let (ok, msg) = valid(field);
+                    ui.label(RichText::new(msg).color(if ok { Color32::from_rgb(70, 150, 70) } else { Color32::from_rgb(200, 80, 80) }));
+                });
+                ui.end_row();
             }
         });
+        ui.add_space(6.0);
+        ui.label(RichText::new("写法：Ctrl+Alt+C、Ctrl+Shift+F9、Alt+Shift+Space。托盘图标的菜单不依赖热键，穿透后也能用。").size(12.0).color(Color32::GRAY));
     }
 }
 
@@ -874,14 +1024,16 @@ impl eframe::App for CaptionApp {
             self.open_settings();
         }
         if self.show_settings {
-            let vb = ViewportBuilder::default().with_title("live-caption 设置").with_inner_size([620.0, 760.0]);
+            let vb = ViewportBuilder::default()
+                .with_title("live-caption 设置")
+                .with_inner_size([780.0, 560.0])
+                .with_min_inner_size([640.0, 460.0]);
             ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |ui, _class| {
                 if ui.input(|i| i.viewport().close_requested()) {
                     self.show_settings = false;
                 }
-                egui::CentralPanel::default().show(ui, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.settings_panel(ui));
-                });
+                let c = ui.ctx().clone();
+                self.settings_window(ui, &c);
             });
         }
 

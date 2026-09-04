@@ -396,6 +396,14 @@ impl Engine {
     }
 }
 
+/// 设置窗"测试翻译"：按给定配置起一次引擎，翻一句，返回译文与耗时（含冷启动）
+pub fn test_translate(cfg: &TranslatorConfig, text: &str) -> anyhow::Result<(String, Duration)> {
+    let mut engine = Engine::new(cfg)?;
+    let t0 = Instant::now();
+    let zh = engine.translate(cfg, text, &mut |_| {})?;
+    Ok((zh, t0.elapsed()))
+}
+
 /// 翻译线程。cfg_rx 收到新配置即热切换后端；claude 会话启动即预热，轮换前 5 句预起备用会话。
 pub fn spawn_translator(
     initial: TranslatorConfig,

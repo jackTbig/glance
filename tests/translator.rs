@@ -103,6 +103,13 @@ fn streams_partials_before_final() {
 }
 
 #[test]
+fn settings_test_translate_roundtrip() {
+    let (zh, took) = live_caption::translate::test_translate(&base_cfg(), "ping").expect("测试翻译应成功");
+    assert!(zh.ends_with("zh=ping"), "{zh}");
+    assert!(took < Duration::from_secs(10));
+}
+
+#[test]
 fn hot_switch_to_openai_backend_via_cfg_channel() {
     // 起假的 OpenAI 服务
     let port = 18931;
