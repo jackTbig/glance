@@ -54,6 +54,20 @@ impl Line {
     }
 }
 
+struct HistEntry {
+    path: PathBuf,
+    name: String,
+    size: u64,
+    modified: DateTime<Local>,
+}
+
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 fn head(s: &str, n: f32) -> String {
     s.chars().take(n as usize).collect()
 }
@@ -83,6 +97,11 @@ pub struct CaptionApp {
     models: Vec<String>,
     settings_note: String,
     settings_tab: usize,
+    hist: Vec<HistEntry>,
+    hist_sel: Option<usize>,
+    hist_preview: String,
+    hist_confirm: Option<usize>,
+    hist_note: String,
     test_rx: Option<Receiver<Result<String, String>>>,
     test_msg: String,
 }
@@ -144,7 +163,7 @@ impl CaptionApp {
                 None
             }
         };
-        Self {
+        let mut app = Self {
             rx,
             cfg,
             lines: VecDeque::new(),
@@ -166,9 +185,19 @@ impl CaptionApp {
             models: Vec::new(),
             settings_note: String::new(),
             settings_tab: 0,
+            hist: Vec::new(),
+            hist_sel: None,
+            hist_preview: String::new(),
+            hist_confirm: None,
+            hist_note: String::new(),
             test_rx: None,
             test_msg: String::new(),
+        };
+        // 调试钩子：LC_OPEN_SETTINGS=1 启动即打开设置窗（截图脚本用）
+        if std::env::var_os("LC_OPEN_SETTINGS").is_some() {
+            app.open_settings();
         }
+        app
     }
 
     fn drain(&mut self) {
@@ -299,6 +328,11 @@ impl CaptionApp {
         self.settings_note.clear();
         self.test_msg.clear();
         self.models = list_models(&self.cfg.asr.models_dir, &self.cfg.asr.model_path);
+        self.scan_history();
+        // 调试钩子：LC_SETTINGS_TAB=5 之类，让截图脚本直接落到指定页
+        if let Some(t) = std::env::var("LC_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            self.settings_tab = t.min(5);
+        }
         self.show_settings = true;
     }
 
@@ -366,7 +400,7 @@ impl CaptionApp {
 
         egui::Panel::left("settings_tabs").resizable(false).exact_size(150.0).show(ui, |ui| {
             ui.add_space(10.0);
-            let tabs = [("翻译", false), ("识别", true), ("切句", true), ("界面", false), ("热键", true)];
+            let tabs = [("翻译", false), ("识别", true), ("切句", true), ("界面", false), ("热键", true), ("记录", false)];
             for (i, (name, restart)) in tabs.iter().enumerate() {
                 let text = if *restart { format!("{name}   ·重启") } else { name.to_string() };
                 let sel = self.settings_tab == i;
@@ -406,7 +440,169 @@ impl CaptionApp {
                     1 => self.tab_asr(ui),
                     2 => self.tab_audio(ui),
                     3 => self.tab_ui(ui),
-                    _ => self.tab_hotkeys(ui),
+                    4 => self.tab_hotkeys(ui),
+                    _ => self.tab_history(ui),
+                }
+            });
+        });
+    }
+
+    fn transcripts_dir(&self) -> PathBuf {
+        Config::resolve(&self.cfg.paths.transcripts_dir)
+    }
+
+    fn scan_history(&mut self) {
+        let dir = self.transcripts_dir();
+        let mut v: Vec<HistEntry> = std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().map_or(false, |x| x == "md"))
+                    .filter_map(|p| {
+                        let m = std::fs::metadata(&p).ok()?;
+                        let modified: DateTime<Local> = m.modified().ok()?.into();
+                        Some(HistEntry { name: p.file_name()?.to_string_lossy().into_owned(), path: p, size: m.len(), modified })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by(|a, b| b.name.cmp(&a.name));
+        self.hist = v;
+        self.hist_confirm = None;
+        if let Some(i) = self.hist_sel {
+            if i >= self.hist.len() {
+                self.hist_sel = None;
+                self.hist_preview.clear();
+            }
+        }
+    }
+
+    fn load_preview(&mut self, i: usize) {
+        self.hist_sel = Some(i);
+        let p = &self.hist[i].path;
+        self.hist_preview = match std::fs::read(p) {
+            Ok(bytes) => {
+                let cut = bytes.len().min(200_000);
+                let mut s = String::from_utf8_lossy(&bytes[..cut]).into_owned();
+                if bytes.len() > cut {
+                    s.push_str("\n…（文件较大，只显示前 200 KB）");
+                }
+                s
+            }
+            Err(e) => format!("读取失败：{e}"),
+        };
+    }
+
+    fn is_current_file(&self, p: &std::path::Path) -> bool {
+        self.file.as_ref().map_or(false, |f| same_file(&f.path, p))
+    }
+
+    fn tab_history(&mut self, ui: &mut egui::Ui) {
+        Self::section(ui, "历史记录", "每次启动一个文件，逐句写入；当前会话正在写的文件不能删。");
+        let dir = self.transcripts_dir();
+        ui.horizontal(|ui| {
+            if ui.button("刷新").clicked() {
+                self.scan_history();
+            }
+            if ui.button("打开文件夹").clicked() {
+                let _ = std::fs::create_dir_all(&dir);
+                open_path(&dir);
+            }
+            let others = self.hist.iter().filter(|h| !self.is_current_file(&h.path)).count();
+            if others > 0 {
+                if self.hist_confirm == Some(usize::MAX) {
+                    if ui.button(RichText::new(format!("确认清空 {others} 个文件？")).color(Color32::from_rgb(200, 80, 80))).clicked() {
+                        let mut n = 0;
+                        for h in &self.hist {
+                            if !self.is_current_file(&h.path) && std::fs::remove_file(&h.path).is_ok() {
+                                n += 1;
+                            }
+                        }
+                        self.hist_note = format!("已删除 {n} 个文件");
+                        self.hist_sel = None;
+                        self.hist_preview.clear();
+                        self.scan_history();
+                    }
+                    if ui.button("取消").clicked() {
+                        self.hist_confirm = None;
+                    }
+                } else if ui.button("清空历史…").clicked() {
+                    self.hist_confirm = Some(usize::MAX);
+                }
+            }
+            ui.label(RichText::new(&self.hist_note).size(12.0).color(Color32::GRAY));
+        });
+        ui.label(RichText::new(dir.to_string_lossy()).size(11.0).color(Color32::GRAY));
+        ui.add_space(6.0);
+        if self.hist.is_empty() {
+            ui.label("还没有记录文件。");
+            return;
+        }
+        let total_h = ui.available_height().max(200.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(300.0);
+                egui::ScrollArea::vertical().id_salt("hist_list").max_height(total_h).show(ui, |ui| {
+                    let mut click: Option<usize> = None;
+                    let mut delete: Option<usize> = None;
+                    let mut confirm: Option<usize> = None;
+                    for (i, h) in self.hist.iter().enumerate() {
+                        let current = self.is_current_file(&h.path);
+                        let sel = self.hist_sel == Some(i);
+                        let title = format!("{}{}", h.name.trim_end_matches(".md"), if current { "  ·当前" } else { "" });
+                        let sub = format!("{}  {:.1} KB", h.modified.format("%m-%d %H:%M"), h.size as f32 / 1024.0);
+                        ui.horizontal(|ui| {
+                            let r = ui.add_sized([210.0, 40.0], egui::Button::selectable(sel, RichText::new(format!("{title}\n{sub}")).size(12.5)));
+                            if r.clicked() {
+                                click = Some(i);
+                            }
+                            if !current {
+                                if self.hist_confirm == Some(i) {
+                                    if ui.button(RichText::new("确认").color(Color32::from_rgb(200, 80, 80))).clicked() {
+                                        delete = Some(i);
+                                    }
+                                } else if ui.button("删除").clicked() {
+                                    confirm = Some(i);
+                                }
+                            }
+                        });
+                    }
+                    if let Some(i) = delete {
+                        let name = self.hist[i].name.clone();
+                        self.hist_note = match std::fs::remove_file(&self.hist[i].path) {
+                            Ok(()) => format!("已删除 {name}"),
+                            Err(e) => format!("删除失败：{e}"),
+                        };
+                        self.hist_sel = None;
+                        self.hist_preview.clear();
+                        self.scan_history();
+                    } else if let Some(i) = confirm {
+                        self.load_preview(i);
+                        self.hist_confirm = Some(i);
+                    } else if let Some(i) = click {
+                        self.load_preview(i);
+                        self.hist_confirm = None;
+                    }
+                });
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                match self.hist_sel {
+                    Some(i) if i < self.hist.len() => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&self.hist[i].name).strong());
+                            if ui.button("用外部程序打开").clicked() {
+                                open_path(&self.hist[i].path);
+                            }
+                        });
+                        egui::ScrollArea::vertical().id_salt("hist_preview").max_height(total_h - 30.0).show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(&self.hist_preview).size(13.0)).wrap());
+                        });
+                    }
+                    _ => {
+                        ui.label(RichText::new("在左侧选一个文件查看内容").color(Color32::GRAY));
+                    }
                 }
             });
         });
@@ -787,7 +983,7 @@ fn cursor_for(d: ResizeDirection) -> CursorIcon {
 }
 
 /// 用系统关联程序打开记录文件（ShellExecute，无控制台闪屏）；没有关联程序（SE_ERR_NOASSOC=31）就退回记事本
-fn open_transcript(path: &std::path::Path) {
+fn open_path(path: &std::path::Path) {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // canonicalize 会带 \\?\ 长路径前缀，有的编辑器不认，去掉
@@ -795,7 +991,7 @@ fn open_transcript(path: &std::path::Path) {
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let (op, file) = (wide("open"), wide(&shown));
     let rc = unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) } as isize;
-    tracing::info!("open transcript {shown} rc={rc}");
+    tracing::info!("open {shown} rc={rc}");
     if rc <= 32 {
         let _ = std::process::Command::new("notepad.exe").arg(&shown).spawn();
     }
@@ -902,8 +1098,9 @@ impl eframe::App for CaptionApp {
                         MENU_PAUSE => self.paused.store(!paused_now, Ordering::Relaxed),
                         MENU_SETTINGS => want_settings = true,
                         MENU_TRANSCRIPT => {
-                            if let Some(f) = &self.file {
-                                open_transcript(&f.path);
+                            if let Some(f) = self.file.as_mut() {
+                                f.ensure_created();
+                                open_path(&f.path);
                             }
                         }
                         MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
@@ -969,8 +1166,9 @@ impl eframe::App for CaptionApp {
                             ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
                         }
                         if ui.small_button("记录").on_hover_text("打开记录文件").clicked() {
-                            if let Some(f) = &self.file {
-                                open_transcript(&f.path);
+                            if let Some(f) = self.file.as_mut() {
+                                f.ensure_created();
+                                open_path(&f.path);
                             }
                         }
                         if ui.small_button("透-").clicked() {
