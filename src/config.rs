@@ -28,6 +28,26 @@ impl Default for AudioCfg {
     }
 }
 
+/// exe 所在目录（安装版的模型放在 exe 旁的 models\ 里）
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn first_model_in(dir: &Path) -> Option<PathBuf> {
+    let mut bins: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map_or(false, |x| x == "bin"))
+        .collect();
+    bins.sort();
+    // 优先 turbo（最准），其次任意一个
+    bins.iter().find(|p| p.to_string_lossy().contains("turbo")).cloned().or_else(|| bins.first().cloned())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AsrCfg {
@@ -42,14 +62,13 @@ pub struct AsrCfg {
 }
 impl Default for AsrCfg {
     fn default() -> Self {
-        Self {
-            model_path: r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(),
-            models_dir: r"D:\models\whisper".into(),
-            language: "en".into(),
-            threads: 4,
-            flash_attn: false,
-            min_audio_ctx: 512,
-        }
+        // 安装版：exe\models\ 里有模型就用它；开发机：退回 local-asr 的 q5 与 D:\models\whisper
+        let bundled = exe_dir().join("models");
+        let (model_path, models_dir) = match first_model_in(&bundled) {
+            Some(m) => (m.to_string_lossy().into_owned(), bundled.to_string_lossy().into_owned()),
+            None => (r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(), r"D:\models\whisper".into()),
+        };
+        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512 }
     }
 }
 
@@ -58,7 +77,7 @@ impl Default for AsrCfg {
 pub struct TranslateCfg {
     /// claude | codex | openai
     pub backend: String,
-    /// claude 可执行文件完整路径
+    /// claude 可执行文件；写 "claude" 即按 PATH 与常见安装位置自动找
     pub claude_bin: String,
     #[serde(alias = "model")]
     pub claude_model: String,
@@ -79,7 +98,7 @@ impl Default for TranslateCfg {
     fn default() -> Self {
         Self {
             backend: "claude".into(),
-            claude_bin: r"C:\Users\13601\.local\bin\claude.exe".into(),
+            claude_bin: "claude".into(),
             claude_model: "sonnet".into(),
             codex_bin: "codex".into(),
             codex_model: String::new(),
@@ -98,6 +117,7 @@ impl Default for TranslateCfg {
 pub struct UiCfg {
     pub font_size: f32,
     pub opacity: f32,
+    /// 中文字体；找不到时依次退回微软雅黑 / 黑体 / 宋体
     pub font_path: String,
     /// 窗口外框位置与大小（屏幕像素）；x/y 为 -1 表示首次启动用系统默认位置
     pub x: i32,
@@ -131,6 +151,7 @@ impl Default for UiCfg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PathsCfg {
+    /// 相对路径以配置文件所在目录为基准
     pub transcripts_dir: String,
     pub logs_dir: String,
 }
@@ -141,17 +162,28 @@ impl Default for PathsCfg {
 }
 
 impl Config {
-    /// 工作目录下的 config.toml 优先（cargo run 时），否则 exe 同目录
-    pub fn path() -> PathBuf {
-        let cwd = PathBuf::from("config.toml");
-        if cwd.exists() {
-            return cwd;
+    /// 数据目录：开发模式（工作目录有 config.toml）就是工作目录；
+    /// 安装版用 %APPDATA%\live-caption（Program Files 不可写）
+    pub fn dir() -> PathBuf {
+        if Path::new("config.toml").exists() {
+            return PathBuf::from(".");
         }
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
-        exe_dir.join("config.toml")
+        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        base.join("live-caption")
+    }
+
+    pub fn path() -> PathBuf {
+        Self::dir().join("config.toml")
+    }
+
+    /// 把配置里的相对路径解析到数据目录下
+    pub fn resolve(p: &str) -> PathBuf {
+        let pb = PathBuf::from(p);
+        if pb.is_absolute() {
+            pb
+        } else {
+            Self::dir().join(pb)
+        }
     }
 
     pub fn load() -> anyhow::Result<Config> {
@@ -167,6 +199,7 @@ impl Config {
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
+        std::fs::create_dir_all(Self::dir())?;
         std::fs::write(Self::path(), toml::to_string_pretty(self)?)?;
         Ok(())
     }
@@ -199,5 +232,11 @@ mod tests {
     fn old_model_key_still_reads_into_claude_model() {
         let cfg: Config = toml::from_str("[translate]\nmodel = \"haiku\"\n").unwrap();
         assert_eq!(cfg.translate.claude_model, "haiku");
+    }
+
+    #[test]
+    fn resolve_keeps_absolute_and_anchors_relative() {
+        assert_eq!(Config::resolve(r"D:\x\y"), PathBuf::from(r"D:\x\y"));
+        assert!(Config::resolve("logs").ends_with("logs"));
     }
 }

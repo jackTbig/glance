@@ -94,7 +94,7 @@ impl CaptionApp {
         if hotkeys.is_none() {
             tracing::warn!("全局热键 Ctrl+Alt+C 注册失败");
         }
-        let file = match TranscriptFile::create(&cfg.paths.transcripts_dir) {
+        let file = match TranscriptFile::create(&Config::resolve(&cfg.paths.transcripts_dir).to_string_lossy()) {
             Ok(f) => Some(f),
             Err(e) => {
                 tracing::warn!("建记录文件失败：{e}");
@@ -454,7 +454,21 @@ fn list_models(dir: &str, current: &str) -> Vec<String> {
 }
 
 fn install_fonts(ctx: &egui::Context, path: &str) -> anyhow::Result<()> {
-    let bytes = std::fs::read(path)?;
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+    let fallbacks = ["msyh.ttc", "msyhl.ttc", "simhei.ttf", "simsun.ttc", "Deng.ttf"];
+    let mut candidates = vec![path.to_string()];
+    candidates.extend(fallbacks.iter().map(|f| format!(r"{windir}\Fonts\{f}")));
+    let mut bytes = None;
+    for c in &candidates {
+        if let Ok(b) = std::fs::read(c) {
+            if c != path {
+                tracing::warn!("字体 {path} 不可用，改用 {c}");
+            }
+            bytes = Some(b);
+            break;
+        }
+    }
+    let bytes = bytes.ok_or_else(|| anyhow::anyhow!("没有找到任何中文字体：{candidates:?}"))?;
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
     fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "cjk".into());

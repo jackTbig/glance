@@ -29,7 +29,7 @@ fn init_logging(dir: &str) -> anyhow::Result<tracing_appender::non_blocking::Wor
 
 fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
-    let _guard = init_logging(&cfg.paths.logs_dir)?;
+    let _guard = init_logging(&Config::resolve(&cfg.paths.logs_dir).to_string_lossy())?;
     tracing::info!("启动，配置文件 {}", Config::path().display());
 
     let (tx_audio, rx_audio) = bounded::<Vec<f32>>(256);

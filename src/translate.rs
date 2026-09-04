@@ -108,6 +108,22 @@ pub fn resolve_bin(name: &str) -> String {
             }
         }
     }
+    // PATH 里没有：再看 claude 原生安装器与 npm 全局的常见位置
+    let mut extra: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        extra.push(PathBuf::from(&home).join(".local").join("bin").join(format!("{name}.exe")));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        extra.push(PathBuf::from(&appdata).join("npm").join(format!("{name}.cmd")));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        extra.push(PathBuf::from(&local).join("Programs").join(name).join(format!("{name}.exe")));
+    }
+    for cand in extra {
+        if cand.is_file() {
+            return cand.to_string_lossy().into_owned();
+        }
+    }
     name.to_string()
 }
 
