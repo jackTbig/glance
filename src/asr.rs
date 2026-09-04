@@ -2,8 +2,6 @@ use crate::messages::{SegId, Stage, StageState, UiMsg};
 use crate::segmenter::SegMsg;
 use chrono::Local;
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 #[derive(Debug, Clone)]
@@ -72,19 +70,21 @@ impl Asr {
 
     /// 最终段识别：结果进入下一段的提示词
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
-        let text = self.run(pcm, None)?;
+        let text = self.run(pcm)?;
         if text.chars().any(|c| c.is_alphanumeric()) {
             self.prev_text = prompt_tail(&text);
         }
         Ok(text)
     }
 
-    /// 中间快照识别：不更新提示词；abort 置真时尽快中止（返回 Err）
-    pub fn transcribe_partial(&mut self, pcm: &[f32], abort: Arc<AtomicBool>) -> anyhow::Result<String> {
-        self.run(pcm, Some(abort))
+    /// 中间快照识别：不更新提示词。
+    /// 注意不能挂 whisper 的 abort 回调：Vulkan 后端只要设了回调解码就返回 -6（实测，与返回值无关）；
+    /// 中间识别本身只要 0.3–0.5 s，最终段最多多等这么久，不值得中止。
+    pub fn transcribe_partial(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
+        self.run(pcm)
     }
 
-    fn run(&mut self, pcm: &[f32], abort: Option<Arc<AtomicBool>>) -> anyhow::Result<String> {
+    fn run(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
         let mut audio = pcm.to_vec();
         if audio.len() < MIN_SAMPLES {
             audio.resize(MIN_SAMPLES, 0.0);
@@ -104,14 +104,8 @@ impl Asr {
         if !self.prev_text.is_empty() {
             params.set_initial_prompt(&self.prev_text);
         }
-        if let Some(flag) = abort.clone() {
-            params.set_abort_callback_safe(move || flag.load(Ordering::Relaxed));
-        }
 
         self.state.full(params, &audio).map_err(|e| anyhow::anyhow!("full: {e:?}"))?;
-        if abort.map_or(false, |f| f.load(Ordering::Relaxed)) {
-            anyhow::bail!("已中止");
-        }
         let n = self.state.full_n_segments();
         let mut parts = Vec::new();
         for i in 0..n {
@@ -134,7 +128,6 @@ pub fn spawn_asr(
     rx_seg: Receiver<SegMsg>,
     ui: Sender<UiMsg>,
     tx_tr: Sender<(SegId, String)>,
-    final_pending: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("asr".into())
@@ -157,17 +150,16 @@ pub fn spawn_asr(
                 }
                 let finals: Vec<Vec<f32>> = batch.iter().filter_map(|m| if let SegMsg::Final(v) = m { Some(v.clone()) } else { None }).collect();
                 if finals.is_empty() {
-                    // 只有中间快照：识别最新的一份，期间来了 Final 就中止
+                    // 只有中间快照：识别最新的一份
                     let Some(SegMsg::Partial(pcm)) = batch.pop() else { continue };
-                    final_pending.store(false, Ordering::Relaxed);
                     let t0 = std::time::Instant::now();
-                    match asr.transcribe_partial(&pcm, final_pending.clone()) {
+                    match asr.transcribe_partial(&pcm) {
                         Ok(text) if has_words(&text) => {
-                            tracing::debug!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
+                            tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
                             let _ = ui.send(UiMsg::EnglishPartial { text });
                         }
                         Ok(_) => {}
-                        Err(e) => tracing::debug!("中间识别放弃：{e}"),
+                        Err(e) => tracing::info!("asr partial 放弃 {}ms：{e}", t0.elapsed().as_millis()),
                     }
                     continue;
                 }

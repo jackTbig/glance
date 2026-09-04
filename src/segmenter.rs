@@ -116,26 +116,19 @@ impl Segmenter {
     }
 }
 
-/// 切句线程：rx_audio 收 16 kHz 单声道块；tx_seg 发消息；paused 为真时丢弃音频；
-/// 每发出一个 Final 就把 final_pending 置真，识别线程据此中止正在跑的中间识别
+/// 切句线程：rx_audio 收 16 kHz 单声道块；tx_seg 发消息；paused 为真时丢弃音频
 pub fn spawn_segmenter(
     cfg: SegmenterConfig,
     rx_audio: Receiver<Vec<f32>>,
     tx_seg: Sender<SegMsg>,
     paused: Arc<AtomicBool>,
-    final_pending: Arc<AtomicBool>,
     ui: Sender<UiMsg>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("segmenter".into())
         .spawn(move || {
             let mut seg = Segmenter::new(cfg);
-            let send = |m: SegMsg| -> bool {
-                if matches!(m, SegMsg::Final(_)) {
-                    final_pending.store(true, Ordering::Relaxed);
-                }
-                tx_seg.send(m).is_ok()
-            };
+            let send = |m: SegMsg| -> bool { tx_seg.send(m).is_ok() };
             loop {
                 match rx_audio.recv_timeout(Duration::from_millis(100)) {
                     Ok(chunk) => {

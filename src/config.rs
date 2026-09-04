@@ -24,7 +24,7 @@ pub struct AudioCfg {
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { energy_threshold: 0.01, silence_ms: 500, min_segment_ms: 1000, max_segment_ms: 8000, partial_every_ms: 1500 }
+        Self { energy_threshold: 0.01, silence_ms: 500, min_segment_ms: 1000, max_segment_ms: 8000, partial_every_ms: 800 }
     }
 }
 

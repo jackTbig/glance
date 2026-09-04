@@ -38,7 +38,6 @@ fn main() -> anyhow::Result<()> {
     let (tx_ui, rx_ui) = bounded(1024);
     let (tx_cfg, rx_cfg) = bounded::<TranslatorConfig>(4);
     let paused = Arc::new(AtomicBool::new(false));
-    let final_pending = Arc::new(AtomicBool::new(false));
 
     spawn_capture(tx_audio, tx_ui.clone());
     spawn_segmenter(
@@ -54,7 +53,6 @@ fn main() -> anyhow::Result<()> {
         rx_audio,
         tx_seg,
         paused.clone(),
-        final_pending.clone(),
         tx_ui.clone(),
     );
     spawn_asr(
@@ -68,7 +66,6 @@ fn main() -> anyhow::Result<()> {
         rx_seg,
         tx_ui.clone(),
         tx_tr,
-        final_pending,
     );
     spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone());
 
