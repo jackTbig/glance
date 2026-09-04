@@ -130,6 +130,9 @@ pub struct UiCfg {
     pub lines: usize,
     /// 打字机效果：每秒显示多少字符（0 = 整句直接出现）
     pub typewriter_cps: f32,
+    /// 全局热键（改后重启生效）：切回可点击 / 切换穿透。写法如 "Ctrl+Alt+C"、"Ctrl+Shift+F9"
+    pub hotkey_clickable: String,
+    pub hotkey_passthrough: String,
 }
 impl Default for UiCfg {
     fn default() -> Self {
@@ -144,6 +147,8 @@ impl Default for UiCfg {
             max_height: 480,
             lines: 2,
             typewriter_cps: 60.0,
+            hotkey_clickable: "Ctrl+Alt+C".into(),
+            hotkey_passthrough: "Ctrl+Alt+P".into(),
         }
     }
 }

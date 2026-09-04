@@ -5,8 +5,7 @@ use crate::translate::TranslatorConfig;
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
 use egui::{Align, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, Id, Layout, ResizeDirection, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -68,11 +67,15 @@ pub struct CaptionApp {
     transcript: Transcript,
     file: Option<TranscriptFile>,
     _hotkeys: Option<GlobalHotKeyManager>,
+    hotkey_toggle_id: u32,
     last_cfg_save: Instant,
     last_resize: Instant,
     last_frame: Instant,
     /// 托盘图标（穿透后鼠标点不到窗口，靠它兜底）
     tray: Option<TrayIcon>,
+    /// 点托盘弹出的控制面板（独立小窗，不受主窗穿透影响）
+    show_panel: bool,
+    panel_pos: Option<egui::Pos2>,
     /// 正在用鼠标拖边缘调大小
     resizing: bool,
     // 设置窗
@@ -94,12 +97,37 @@ impl CaptionApp {
         if let Err(e) = install_fonts(&cc.egui_ctx, &cfg.ui.font_path) {
             tracing::warn!("加载中文字体失败：{e}");
         }
-        let hotkeys = GlobalHotKeyManager::new()
-            .ok()
-            .and_then(|m| m.register(HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC)).ok().map(|_| m));
-        if hotkeys.is_none() {
-            tracing::warn!("全局热键 Ctrl+Alt+C 注册失败");
-        }
+        let parse = |s: &str, fallback: HotKey| -> HotKey {
+            match s.parse::<HotKey>() {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("热键 {s:?} 解析失败（{e}），用默认");
+                    fallback
+                }
+            }
+        };
+        let hk_clickable = parse(&cfg.ui.hotkey_clickable, HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC));
+        let hk_toggle = parse(&cfg.ui.hotkey_passthrough, HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP));
+        let hotkey_toggle_id = hk_toggle.id();
+        let hotkeys = match GlobalHotKeyManager::new() {
+            Ok(m) => {
+                let mut ok = true;
+                for (hk, name) in [(hk_clickable, cfg.ui.hotkey_clickable.as_str()), (hk_toggle, cfg.ui.hotkey_passthrough.as_str())] {
+                    if let Err(e) = m.register(hk) {
+                        tracing::warn!("全局热键 {name} 注册失败（多半被别的程序占了，可在设置里换一个）：{e}");
+                        ok = false;
+                    }
+                }
+                if ok {
+                    tracing::info!("全局热键已注册：{} 切回可点击，{} 切换穿透", cfg.ui.hotkey_clickable, cfg.ui.hotkey_passthrough);
+                }
+                Some(m)
+            }
+            Err(e) => {
+                tracing::warn!("全局热键管理器创建失败：{e}");
+                None
+            }
+        };
         let file = match TranscriptFile::create(&Config::resolve(&cfg.paths.transcripts_dir).to_string_lossy()) {
             Ok(f) => Some(f),
             Err(e) => {
@@ -125,10 +153,13 @@ impl CaptionApp {
             transcript: Transcript::default(),
             file,
             _hotkeys: hotkeys,
+            hotkey_toggle_id,
             last_cfg_save: Instant::now(),
             last_resize: Instant::now(),
             last_frame: Instant::now(),
             tray,
+            show_panel: false,
+            panel_pos: None,
             resizing: false,
             tx_cfg,
             show_settings: false,
@@ -430,6 +461,17 @@ impl CaptionApp {
             ui.label("最大高度");
             ui.add(egui::Slider::new(&mut d.ui.max_height, 120..=1200));
         });
+        ui.separator();
+        ui.heading("全局热键（改后重启生效；被别的程序占用时换一个组合）");
+        ui.horizontal(|ui| {
+            ui.label("切回可点击");
+            ui.text_edit_singleline(&mut d.ui.hotkey_clickable);
+        });
+        ui.horizontal(|ui| {
+            ui.label("切换穿透");
+            ui.text_edit_singleline(&mut d.ui.hotkey_passthrough);
+        });
+        ui.label(RichText::new("写法：Ctrl+Alt+C、Ctrl+Shift+F9、Alt+Shift+Space；托盘图标点开的面板不依赖热键。").size(12.0).color(Color32::GRAY));
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -445,13 +487,6 @@ impl CaptionApp {
         });
     }
 }
-
-const TRAY_CLICKABLE: &str = "tray.clickable";
-const TRAY_PASSTHROUGH: &str = "tray.passthrough";
-const TRAY_PAUSE: &str = "tray.pause";
-const TRAY_SETTINGS: &str = "tray.settings";
-const TRAY_TRANSCRIPT: &str = "tray.transcript";
-const TRAY_QUIT: &str = "tray.quit";
 
 /// 32×32 的图标：深色圆角底 + 两条白色字幕线，程序内生成，不依赖外部文件
 fn tray_icon_image() -> tray_icon::Icon {
@@ -479,25 +514,14 @@ fn tray_icon_image() -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(rgba, w, h).expect("icon")
 }
 
+/// 托盘只放图标不挂原生菜单：原生菜单走 TrackPopupMenu 模态循环 + 窗口子类化，
+/// 实测在这套 winit/egui 组合里事件时有时无；改为点图标弹一个 egui 控制面板小窗，链路全在自己手里。
 fn build_tray() -> anyhow::Result<TrayIcon> {
-    let menu = Menu::new();
-    let items = [
-        (TRAY_CLICKABLE, "切回可点击（Ctrl+Alt+C）"),
-        (TRAY_PASSTHROUGH, "鼠标穿透"),
-        (TRAY_PAUSE, "暂停 / 继续"),
-        (TRAY_SETTINGS, "设置…"),
-        (TRAY_TRANSCRIPT, "打开记录文件"),
-    ];
-    for (id, text) in items {
-        menu.append(&MenuItem::with_id(id, text, true, None)).map_err(|e| anyhow::anyhow!("{e}"))?;
-    }
-    menu.append(&PredefinedMenuItem::separator()).map_err(|e| anyhow::anyhow!("{e}"))?;
-    menu.append(&MenuItem::with_id(TRAY_QUIT, "退出", true, None)).map_err(|e| anyhow::anyhow!("{e}"))?;
     TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("live-caption 实时字幕（左键：切回可点击）")
+        .with_tooltip("live-caption 实时字幕：点击打开控制面板")
         .with_icon(tray_icon_image())
         .with_menu_on_left_click(false)
+        .with_menu_on_right_click(false)
         .build()
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -595,46 +619,103 @@ impl eframe::App for CaptionApp {
             animating |= l.advance(dt, cps);
         }
 
-        // 全局热键：切回可点击
-        if let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
-            if ev.state == HotKeyState::Pressed && self.passthrough {
-                self.passthrough = false;
-                ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+        // 全局热键：Ctrl+Alt+C 切回可点击；Ctrl+Alt+P 切换穿透
+        while let Ok(ev) = GlobalHotKeyEvent::receiver().try_recv() {
+            if ev.state != HotKeyState::Pressed {
+                continue;
             }
+            let want = if ev.id == self.hotkey_toggle_id { !self.passthrough } else { false };
+            tracing::info!("hotkey id={} -> passthrough={want}", ev.id);
+            self.passthrough = want;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(want));
         }
-        // 托盘：左键 = 切回可点击；菜单项按 id 分发
+        // 托盘：任意键松开 = 打开/关闭控制面板（面板是独立小窗，主窗穿透时也能点）
         let mut want_settings = false;
         if self.tray.is_some() {
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-                if let TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = ev {
-                    self.passthrough = false;
-                    ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
-                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                if let TrayIconEvent::Click { button_state: MouseButtonState::Up, position, .. } = ev {
+                    tracing::info!("tray click at {:?}", position);
+                    let ppp = ctx.pixels_per_point().max(0.5);
+                    let (x, y) = ((position.x as f32) / ppp, (position.y as f32) / ppp);
+                    // 面板放在图标上方偏左，不超出屏幕
+                    self.panel_pos = Some(egui::pos2((x - 240.0).max(0.0), (y - 330.0).max(0.0)));
+                    self.show_panel = !self.show_panel;
                 }
             }
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                match ev.id.0.as_str() {
-                    TRAY_CLICKABLE => {
+        }
+        if self.show_panel {
+            let mut vb = ViewportBuilder::default()
+                .with_title("live-caption 控制")
+                .with_always_on_top()
+                .with_resizable(false)
+                .with_inner_size([240.0, 300.0]);
+            if let Some(p) = self.panel_pos {
+                vb = vb.with_position(p);
+            }
+            let mut close_panel = false;
+            let paused_now = self.paused.load(Ordering::Relaxed);
+            let mut act: Option<&str> = None;
+            ctx.show_viewport_immediate(ViewportId::from_hash_of("panel"), vb, |ui, _class| {
+                if ui.input(|i| i.viewport().close_requested()) {
+                    close_panel = true;
+                }
+                egui::CentralPanel::default().show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    let full = egui::vec2(ui.available_width(), 30.0);
+                    if ui.add_sized(full, egui::Button::new("切回可点击（Ctrl+Alt+C）")).clicked() {
+                        act = Some("clickable");
+                    }
+                    if ui.add_sized(full, egui::Button::new("鼠标穿透")).clicked() {
+                        act = Some("passthrough");
+                    }
+                    if ui.add_sized(full, egui::Button::new(if paused_now { "▶ 继续识别" } else { "⏸ 暂停识别" })).clicked() {
+                        act = Some("pause");
+                    }
+                    if ui.add_sized(full, egui::Button::new("设置…")).clicked() {
+                        act = Some("settings");
+                    }
+                    if ui.add_sized(full, egui::Button::new("打开记录文件")).clicked() {
+                        act = Some("transcript");
+                    }
+                    ui.separator();
+                    if ui.add_sized(full, egui::Button::new("退出 live-caption")).clicked() {
+                        act = Some("quit");
+                    }
+                    if ui.add_sized(full, egui::Button::new("关闭面板")).clicked() {
+                        close_panel = true;
+                    }
+                });
+            });
+            if let Some(a) = act {
+                tracing::info!("tray panel: {a}");
+                match a {
+                    "clickable" => {
                         self.passthrough = false;
                         ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+                        close_panel = true;
                     }
-                    TRAY_PASSTHROUGH => {
+                    "passthrough" => {
                         self.passthrough = true;
                         ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+                        close_panel = true;
                     }
-                    TRAY_PAUSE => {
-                        let p = self.paused.load(Ordering::Relaxed);
-                        self.paused.store(!p, Ordering::Relaxed);
+                    "pause" => self.paused.store(!paused_now, Ordering::Relaxed),
+                    "settings" => {
+                        want_settings = true;
+                        close_panel = true;
                     }
-                    TRAY_SETTINGS => want_settings = true,
-                    TRAY_TRANSCRIPT => {
+                    "transcript" => {
                         if let Some(f) = &self.file {
                             let _ = std::process::Command::new("cmd").args(["/C", "start", "", &f.path.to_string_lossy()]).spawn();
                         }
+                        close_panel = true;
                     }
-                    TRAY_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
+                    "quit" => ctx.send_viewport_cmd(ViewportCommand::Close),
                     _ => {}
                 }
+            }
+            if close_panel {
+                self.show_panel = false;
             }
         }
 
