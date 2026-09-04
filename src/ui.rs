@@ -786,6 +786,21 @@ fn cursor_for(d: ResizeDirection) -> CursorIcon {
     }
 }
 
+/// 用系统关联程序打开记录文件（ShellExecute，无控制台闪屏）；没有关联程序（SE_ERR_NOASSOC=31）就退回记事本
+fn open_transcript(path: &std::path::Path) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // canonicalize 会带 \\?\ 长路径前缀，有的编辑器不认，去掉
+    let shown = abs.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (op, file) = (wide("open"), wide(&shown));
+    let rc = unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) } as isize;
+    tracing::info!("open transcript {shown} rc={rc}");
+    if rc <= 32 {
+        let _ = std::process::Command::new("notepad.exe").arg(&shown).spawn();
+    }
+}
+
 fn list_models(dir: &str, current: &str) -> Vec<String> {
     let mut v = Vec::new();
     if !current.is_empty() {
@@ -888,7 +903,7 @@ impl eframe::App for CaptionApp {
                         MENU_SETTINGS => want_settings = true,
                         MENU_TRANSCRIPT => {
                             if let Some(f) = &self.file {
-                                let _ = std::process::Command::new("cmd").args(["/C", "start", "", &f.path.to_string_lossy()]).spawn();
+                                open_transcript(&f.path);
                             }
                         }
                         MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
@@ -955,9 +970,7 @@ impl eframe::App for CaptionApp {
                         }
                         if ui.small_button("记录").on_hover_text("打开记录文件").clicked() {
                             if let Some(f) = &self.file {
-                                let _ = std::process::Command::new("cmd")
-                                    .args(["/C", "start", "", &f.path.to_string_lossy()])
-                                    .spawn();
+                                open_transcript(&f.path);
                             }
                         }
                         if ui.small_button("透-").clicked() {
