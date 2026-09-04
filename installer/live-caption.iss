@@ -1,7 +1,7 @@
 ; live-caption 安装包（Inno Setup 7）
 ; 由 scripts/build_installer.sh 编译；本文件带 BOM 的 UTF-8 由构建脚本生成到 build/ 下再喂给 ISCC
 #define AppName "live-caption"
-#define AppVer "0.2.0"
+#define AppVer "1.0.0"
 #define ExeSrc "D:\DevCache\lc-target\release\live-caption.exe"
 #define ModelTurbo "D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin"
 #define ModelSmall "D:\models\whisper\ggml-small.en.bin"
@@ -33,15 +33,15 @@ ShowLanguageDialog=no
 Name: "chs"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Types]
-Name: "full"; Description: "完整安装（准确模型 + 快速模型）"
-Name: "compact"; Description: "精简安装（只装准确模型）"
+Name: "full"; Description: "完整安装（最终句模型 + 逐字上屏模型，推荐）"
+Name: "compact"; Description: "精简安装（只装最终句模型，逐字上屏也用它，稍慢）"
 Name: "custom"; Description: "自定义"; Flags: iscustom
 
 [Components]
 Name: "app"; Description: "主程序"; Types: full compact custom; Flags: fixed
 Name: "models"; Description: "识别模型（至少装一个）"; Types: full compact custom
-Name: "models\turbo"; Description: "large-v3-turbo（最准，574 MB，默认）"; Types: full compact custom
-Name: "models\small"; Description: "small.en（更快约一倍，488 MB，口音重时容易听错）"; Types: full
+Name: "models\turbo"; Description: "large-v3-turbo（最终句定稿，最准，574 MB）"; Types: full compact custom
+Name: "models\small"; Description: "small.en（说话过程中逐字上屏用，最快，488 MB）"; Types: full custom
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
