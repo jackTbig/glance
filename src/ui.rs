@@ -1018,14 +1018,23 @@ fn open_path(path: &std::path::Path) {
     }
 }
 
-/// 注册表里 HKCR\.<ext> 有默认值才算有关联程序
+/// 按 Shell 的实际"打开方式"解析出可执行程序（含用户级 UserChoice），解析不出才算无关联
 fn has_file_association(path: &std::path::Path) -> bool {
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_REG_SZ};
+    use windows_sys::Win32::UI::Shell::{AssocQueryStringW, ASSOCF_NONE, ASSOCSTR_EXECUTABLE};
     let Some(ext) = path.extension().map(|e| e.to_string_lossy().into_owned()) else { return false };
     let key: Vec<u16> = format!(".{ext}").encode_utf16().chain(std::iter::once(0)).collect();
-    let mut size: u32 = 0;
-    let rc = unsafe { RegGetValueW(HKEY_CLASSES_ROOT, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
-    rc == 0 && size > 2
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buf = [0u16; 1024];
+    let mut len: u32 = buf.len() as u32;
+    let hr = unsafe { AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, key.as_ptr(), verb.as_ptr(), buf.as_mut_ptr(), &mut len) };
+    if hr == 0 && len > 1 {
+        let exe = String::from_utf16_lossy(&buf[..(len as usize - 1)]);
+        tracing::info!(".{ext} 的打开程序：{exe}");
+        true
+    } else {
+        tracing::info!(".{ext} 无关联程序（hr=0x{hr:X}）");
+        false
+    }
 }
 
 fn list_models(dir: &str, current: &str) -> Vec<String> {
