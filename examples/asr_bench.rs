@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     let audio_sec = pcm.len() as f32 / 16000.0;
 
     let t0 = Instant::now();
-    let mut asr = Asr::load(&AsrConfig { model_path: model.clone(), language: "en".into(), threads, flash_attn, min_audio_ctx })?;
+    let mut asr = Asr::load(&AsrConfig { model_path: model.clone(), language: "en".into(), threads, flash_attn, min_audio_ctx, partial_model_path: None })?;
     let load_ms = t0.elapsed().as_millis();
 
     let mut times = Vec::new();

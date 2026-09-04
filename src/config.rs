@@ -24,7 +24,7 @@ pub struct AudioCfg {
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { energy_threshold: 0.01, silence_ms: 500, min_segment_ms: 1000, max_segment_ms: 8000, partial_every_ms: 800 }
+        Self { energy_threshold: 0.01, silence_ms: 400, min_segment_ms: 600, max_segment_ms: 8000, partial_every_ms: 400 }
     }
 }
 
@@ -59,6 +59,8 @@ pub struct AsrCfg {
     pub flash_attn: bool,
     /// audio_ctx 下限（1500 = 30 s 全窗；越小越快、越容易漏字）
     pub min_audio_ctx: i32,
+    /// 中间识别（逐字上屏）用的小模型，空 = 同主模型
+    pub partial_model_path: String,
 }
 impl Default for AsrCfg {
     fn default() -> Self {
@@ -68,7 +70,10 @@ impl Default for AsrCfg {
             Some(m) => (m.to_string_lossy().into_owned(), bundled.to_string_lossy().into_owned()),
             None => (r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(), r"D:\models\whisper".into()),
         };
-        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512 }
+        // 中间识别默认用 small.en（约 0.2 s 一次）；找不到就空着（复用主模型）
+        let small = Path::new(&models_dir).join("ggml-small.en.bin");
+        let partial_model_path = if small.is_file() { small.to_string_lossy().into_owned() } else { String::new() };
+        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_model_path }
     }
 }
 
@@ -225,7 +230,7 @@ mod tests {
         let cfg = Config::default();
         let s = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
-        assert_eq!(back.audio.silence_ms, 500);
+        assert_eq!(back.audio.silence_ms, 400);
         assert_eq!(back.asr.language, "en");
         assert_eq!(back.translate.rotate_every, 60);
         assert_eq!(back.translate.backend, "claude");

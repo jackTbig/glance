@@ -9,7 +9,7 @@ fn main() -> anyhow::Result<()> {
         hound::SampleFormat::Int => reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect(),
         hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
     };
-    let mut asr = Asr::load(&AsrConfig { model_path: args[1].clone(), language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512 })?;
+    let mut asr = Asr::load(&AsrConfig { model_path: args[1].clone(), language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_model_path: std::env::args().nth(3) })?;
     for i in 0..3 {
         let t = std::time::Instant::now();
         match asr.transcribe_partial(&pcm) {

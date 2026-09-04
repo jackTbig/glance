@@ -346,10 +346,14 @@ impl CaptionApp {
             return;
         }
         self.last_cfg_save = Instant::now();
-        if self.mini {
+        // 迷你条期间、以及切换后两秒内窗口还没变回来时，都不能把尺寸记进配置
+        if self.mini || self.mini_since.elapsed() < Duration::from_secs(2) {
             return;
         }
         let Some(r) = ctx.input(|i| i.viewport().outer_rect) else { return };
+        if (r.width() - MINI_W).abs() < 3.0 {
+            return;
+        }
         let (x, y, w) = (r.min.x as i32, r.min.y as i32, r.width() as u32);
         if (x, y, w) != (self.cfg.ui.x, self.cfg.ui.y, self.cfg.ui.width) {
             self.cfg.ui.x = x;
@@ -785,6 +789,18 @@ impl CaptionApp {
                     }
                 });
             ui.end_row();
+            ui.label("中间识别模型");
+            let cur_p = d.asr.partial_model_path.clone();
+            egui::ComboBox::from_id_salt("asr_partial_model")
+                .width(420.0)
+                .selected_text(if cur_p.trim().is_empty() { "同主模型".to_string() } else { pretty(&cur_p) })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.asr.partial_model_path, String::new(), "同主模型");
+                    for m in &models {
+                        ui.selectable_value(&mut d.asr.partial_model_path, m.clone(), pretty(m));
+                    }
+                });
+            ui.end_row();
             ui.label("模型目录");
             ui.add(egui::TextEdit::singleline(&mut d.asr.models_dir).desired_width(420.0));
             ui.end_row();
@@ -803,7 +819,7 @@ impl CaptionApp {
             self.models = list_models(&self.draft.asr.models_dir, &self.draft.asr.model_path);
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("large-v3-turbo 最准（3 秒一句约 0.9 秒）；small.en 约 0.45 秒；base.en 约 0.4 秒但更容易听错。audio_ctx 越小越快、越容易漏字。").size(12.0).color(Color32::GRAY));
+        ui.label(RichText::new("主模型出最终句：large-v3-turbo 最准（约 0.35 秒一句）。中间识别模型只管说话过程中的临时英文，越小越快：small.en 约 0.2 秒，最终句仍由主模型定稿。").size(12.0).color(Color32::GRAY));
     }
 
     fn tab_audio(&mut self, ui: &mut egui::Ui) {

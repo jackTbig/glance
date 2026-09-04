@@ -12,11 +12,15 @@ pub struct AsrConfig {
     pub flash_attn: bool,
     /// audio_ctx 下限（whisper 编码窗 1500 = 30 s；越小越快、越容易漏字）
     pub min_audio_ctx: i32,
+    /// 中间识别专用的小模型（如 small.en）；None 或与主模型相同则复用主模型
+    pub partial_model_path: Option<String>,
 }
 
 pub struct Asr {
     _ctx: WhisperContext,
     state: WhisperState,
+    /// 中间识别用的第二套模型（更小更快）
+    partial: Option<(WhisperContext, WhisperState)>,
     cfg: AsrConfig,
     prev_text: String,
 }
@@ -59,10 +63,34 @@ impl Asr {
         let ctx = WhisperContext::new_with_params(&cfg.model_path, cparams)
             .map_err(|e| anyhow::anyhow!("加载模型失败 {}: {e:?}", cfg.model_path))?;
         let state = ctx.create_state().map_err(|e| anyhow::anyhow!("create_state: {e:?}"))?;
-        let mut asr = Self { _ctx: ctx, state, cfg: cfg.clone(), prev_text: String::new() };
+        let partial = match cfg.partial_model_path.as_deref().map(str::trim).filter(|p| !p.is_empty() && *p != cfg.model_path.as_str()) {
+            Some(p) => {
+                let mut cp = WhisperContextParameters::default();
+                cp.flash_attn = cfg.flash_attn;
+                match WhisperContext::new_with_params(p, cp) {
+                    Ok(c) => match c.create_state() {
+                        Ok(st) => {
+                            tracing::info!("中间识别模型：{p}");
+                            Some((c, st))
+                        }
+                        Err(e) => {
+                            tracing::warn!("中间识别模型 create_state 失败，改用主模型：{e:?}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("中间识别模型 {p} 加载失败，改用主模型：{e:?}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut asr = Self { _ctx: ctx, state, partial, cfg: cfg.clone(), prev_text: String::new() };
         // 预热：首次推理要编译 Vulkan shader、分配显存，实测比稳态慢 5 s 以上，提前在加载阶段付掉
         let t0 = std::time::Instant::now();
         let _ = asr.transcribe(&vec![0.0f32; MIN_SAMPLES])?;
+        let _ = asr.transcribe_partial(&vec![0.0f32; MIN_SAMPLES]);
         asr.prev_text.clear();
         tracing::info!("asr 预热完成 {}ms", t0.elapsed().as_millis());
         Ok(asr)
@@ -70,7 +98,7 @@ impl Asr {
 
     /// 最终段识别：结果进入下一段的提示词
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
-        let text = self.run(pcm)?;
+        let text = run_with(&mut self.state, &self.cfg, &self.prev_text, pcm)?;
         if text.chars().any(|c| c.is_alphanumeric()) {
             self.prev_text = prompt_tail(&text);
         }
@@ -81,17 +109,22 @@ impl Asr {
     /// 注意不能挂 whisper 的 abort 回调：Vulkan 后端只要设了回调解码就返回 -6（实测，与返回值无关）；
     /// 中间识别本身只要 0.3–0.5 s，最终段最多多等这么久，不值得中止。
     pub fn transcribe_partial(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
-        self.run(pcm)
+        match self.partial.as_mut() {
+            Some((_, st)) => run_with(st, &self.cfg, &self.prev_text, pcm),
+            None => run_with(&mut self.state, &self.cfg, &self.prev_text, pcm),
+        }
     }
+}
 
-    fn run(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
+fn run_with(state: &mut WhisperState, cfg: &AsrConfig, prev_text: &str, pcm: &[f32]) -> anyhow::Result<String> {
+    {
         let mut audio = pcm.to_vec();
         if audio.len() < MIN_SAMPLES {
             audio.resize(MIN_SAMPLES, 0.0);
         }
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some(&self.cfg.language));
+        params.set_language(Some(&cfg.language));
         params.set_translate(false);
         params.set_no_timestamps(true);
         params.set_print_special(false);
@@ -99,17 +132,17 @@ impl Asr {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
-        params.set_n_threads(self.cfg.threads);
-        params.set_audio_ctx(audio_ctx_for(audio.len(), self.cfg.min_audio_ctx));
-        if !self.prev_text.is_empty() {
-            params.set_initial_prompt(&self.prev_text);
+        params.set_n_threads(cfg.threads);
+        params.set_audio_ctx(audio_ctx_for(audio.len(), cfg.min_audio_ctx));
+        if !prev_text.is_empty() {
+            params.set_initial_prompt(prev_text);
         }
 
-        self.state.full(params, &audio).map_err(|e| anyhow::anyhow!("full: {e:?}"))?;
-        let n = self.state.full_n_segments();
+        state.full(params, &audio).map_err(|e| anyhow::anyhow!("full: {e:?}"))?;
+        let n = state.full_n_segments();
         let mut parts = Vec::new();
         for i in 0..n {
-            if let Some(seg) = self.state.get_segment(i) {
+            if let Some(seg) = state.get_segment(i) {
                 parts.push(seg.to_str_lossy().map_err(|e| anyhow::anyhow!("{e:?}"))?.trim().to_string());
             }
         }

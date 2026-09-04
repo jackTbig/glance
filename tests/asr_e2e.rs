@@ -7,7 +7,7 @@ const MODEL: &str = r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-
 static GPU_LOCK: Mutex<()> = Mutex::new(());
 
 fn cfg() -> AsrConfig {
-    AsrConfig { model_path: MODEL.into(), language: "en".into(), threads: 4, flash_attn: true, min_audio_ctx: 512 }
+    AsrConfig { model_path: MODEL.into(), language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_model_path: None }
 }
 
 #[test]
