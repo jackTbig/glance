@@ -2418,6 +2418,7 @@ dependencies = [
  "egui",
  "global-hotkey",
  "hound",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
@@ -2428,6 +2429,7 @@ dependencies = [
  "tray-icon",
  "wasapi",
  "whisper-rs",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

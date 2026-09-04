@@ -73,9 +73,6 @@ pub struct CaptionApp {
     last_frame: Instant,
     /// 托盘图标（穿透后鼠标点不到窗口，靠它兜底）
     tray: Option<TrayIcon>,
-    /// 点托盘弹出的控制面板（独立小窗，不受主窗穿透影响）
-    show_panel: bool,
-    panel_pos: Option<egui::Pos2>,
     /// 正在用鼠标拖边缘调大小
     resizing: bool,
     // 设置窗
@@ -158,8 +155,6 @@ impl CaptionApp {
             last_resize: Instant::now(),
             last_frame: Instant::now(),
             tray,
-            show_panel: false,
-            panel_pos: None,
             resizing: false,
             tx_cfg,
             show_settings: false,
@@ -514,11 +509,85 @@ fn tray_icon_image() -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(rgba, w, h).expect("icon")
 }
 
-/// 托盘只放图标不挂原生菜单：原生菜单走 TrackPopupMenu 模态循环 + 窗口子类化，
-/// 实测在这套 winit/egui 组合里事件时有时无；改为点图标弹一个 egui 控制面板小窗，链路全在自己手里。
+/// 托盘菜单项 id（TrackPopupMenu 直接返回）
+const MENU_CLICKABLE: u32 = 1;
+const MENU_PASSTHROUGH: u32 = 2;
+const MENU_PAUSE: u32 = 3;
+const MENU_SETTINGS: u32 = 4;
+const MENU_TRANSCRIPT: u32 = 5;
+const MENU_QUIT: u32 = 9;
+
+/// 自己弹 Windows 原生托盘菜单：`TPM_RETURNCMD` 让 TrackPopupMenu 同步返回所选项，
+/// 不经过 muda 那条 "WM_COMMAND → 窗口子类 → 全局通道" 的转发（实测在 winit 消息循环里时有时无）。
+/// 必须在 UI 线程调用；调用期间会阻塞到菜单关闭。
+fn show_native_tray_menu(hwnd: isize, x: i32, y: i32, paused: bool, passthrough: bool) -> Option<u32> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, PostMessageW, SetForegroundWindow, TrackPopupMenu, MF_CHECKED,
+        MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let items: [(u32, String, bool); 7] = [
+        (MENU_CLICKABLE, "切回可点击".into(), !passthrough),
+        (MENU_PASSTHROUGH, "鼠标穿透".into(), passthrough),
+        (0, String::new(), false),
+        (MENU_PAUSE, (if paused { "继续识别" } else { "暂停识别" }).into(), paused),
+        (MENU_SETTINGS, "设置…".into(), false),
+        (MENU_TRANSCRIPT, "打开记录文件".into(), false),
+        (MENU_QUIT, "退出 live-caption".into(), false),
+    ];
+    unsafe {
+        let hmenu = CreatePopupMenu();
+        if hmenu.is_null() {
+            return None;
+        }
+        // 文本缓冲要活到 TrackPopupMenu 之后（AppendMenuW 会拷贝，但保险起见一起持有）
+        let mut bufs: Vec<Vec<u16>> = Vec::new();
+        for (id, text, checked) in items.iter() {
+            if *id == 0 {
+                AppendMenuW(hmenu, MF_SEPARATOR, 0, std::ptr::null());
+            } else {
+                let w = wide(text);
+                let flags = MF_STRING | if *checked { MF_CHECKED } else { 0 };
+                AppendMenuW(hmenu, flags, *id as usize, w.as_ptr());
+                bufs.push(w);
+            }
+        }
+        let h = hwnd as *mut core::ffi::c_void;
+        // 托盘菜单惯例：先把自己设为前台，否则点菜单外面不会自动收起
+        SetForegroundWindow(h);
+        let cmd = TrackPopupMenu(
+            hmenu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+            x,
+            y,
+            0,
+            h,
+            std::ptr::null(),
+        );
+        PostMessageW(h, WM_NULL, 0, 0);
+        DestroyMenu(hmenu);
+        drop(bufs);
+        if cmd > 0 {
+            Some(cmd as u32)
+        } else {
+            None
+        }
+    }
+}
+
+/// 主窗口 HWND（拿来做 TrackPopupMenu 的宿主）
+fn main_hwnd(frame: &eframe::Frame) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match frame.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+/// 托盘只放图标；菜单由 `show_native_tray_menu` 自己弹
 fn build_tray() -> anyhow::Result<TrayIcon> {
     TrayIconBuilder::new()
-        .with_tooltip("live-caption 实时字幕：点击打开控制面板")
+        .with_tooltip("live-caption 实时字幕：点击打开菜单")
         .with_icon(tray_icon_image())
         .with_menu_on_left_click(false)
         .with_menu_on_right_click(false)
@@ -605,7 +674,7 @@ impl eframe::App for CaptionApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.drain();
 
@@ -629,93 +698,41 @@ impl eframe::App for CaptionApp {
             self.passthrough = want;
             ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(want));
         }
-        // 托盘：任意键松开 = 打开/关闭控制面板（面板是独立小窗，主窗穿透时也能点）
+        // 托盘：任意键松开 = 弹原生菜单（同步拿回所选项）
         let mut want_settings = false;
         if self.tray.is_some() {
+            let mut click: Option<(i32, i32)> = None;
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
                 if let TrayIconEvent::Click { button_state: MouseButtonState::Up, position, .. } = ev {
-                    tracing::info!("tray click at {:?}", position);
-                    let ppp = ctx.pixels_per_point().max(0.5);
-                    let (x, y) = ((position.x as f32) / ppp, (position.y as f32) / ppp);
-                    // 面板放在图标上方偏左，不超出屏幕
-                    self.panel_pos = Some(egui::pos2((x - 240.0).max(0.0), (y - 330.0).max(0.0)));
-                    self.show_panel = !self.show_panel;
+                    click = Some((position.x as i32, position.y as i32));
                 }
             }
-        }
-        if self.show_panel {
-            let mut vb = ViewportBuilder::default()
-                .with_title("live-caption 控制")
-                .with_always_on_top()
-                .with_resizable(false)
-                .with_inner_size([240.0, 300.0]);
-            if let Some(p) = self.panel_pos {
-                vb = vb.with_position(p);
-            }
-            let mut close_panel = false;
-            let paused_now = self.paused.load(Ordering::Relaxed);
-            let mut act: Option<&str> = None;
-            ctx.show_viewport_immediate(ViewportId::from_hash_of("panel"), vb, |ui, _class| {
-                if ui.input(|i| i.viewport().close_requested()) {
-                    close_panel = true;
-                }
-                egui::CentralPanel::default().show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    let full = egui::vec2(ui.available_width(), 30.0);
-                    if ui.add_sized(full, egui::Button::new("切回可点击（Ctrl+Alt+C）")).clicked() {
-                        act = Some("clickable");
-                    }
-                    if ui.add_sized(full, egui::Button::new("鼠标穿透")).clicked() {
-                        act = Some("passthrough");
-                    }
-                    if ui.add_sized(full, egui::Button::new(if paused_now { "▶ 继续识别" } else { "⏸ 暂停识别" })).clicked() {
-                        act = Some("pause");
-                    }
-                    if ui.add_sized(full, egui::Button::new("设置…")).clicked() {
-                        act = Some("settings");
-                    }
-                    if ui.add_sized(full, egui::Button::new("打开记录文件")).clicked() {
-                        act = Some("transcript");
-                    }
-                    ui.separator();
-                    if ui.add_sized(full, egui::Button::new("退出 live-caption")).clicked() {
-                        act = Some("quit");
-                    }
-                    if ui.add_sized(full, egui::Button::new("关闭面板")).clicked() {
-                        close_panel = true;
-                    }
-                });
-            });
-            if let Some(a) = act {
-                tracing::info!("tray panel: {a}");
-                match a {
-                    "clickable" => {
-                        self.passthrough = false;
-                        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
-                        close_panel = true;
-                    }
-                    "passthrough" => {
-                        self.passthrough = true;
-                        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
-                        close_panel = true;
-                    }
-                    "pause" => self.paused.store(!paused_now, Ordering::Relaxed),
-                    "settings" => {
-                        want_settings = true;
-                        close_panel = true;
-                    }
-                    "transcript" => {
-                        if let Some(f) = &self.file {
-                            let _ = std::process::Command::new("cmd").args(["/C", "start", "", &f.path.to_string_lossy()]).spawn();
+            if let Some((x, y)) = click {
+                tracing::info!("tray click at ({x}, {y})");
+                let paused_now = self.paused.load(Ordering::Relaxed);
+                let chosen = main_hwnd(frame).and_then(|h| show_native_tray_menu(h, x, y, paused_now, self.passthrough));
+                if let Some(cmd) = chosen {
+                    tracing::info!("tray menu: {cmd}");
+                    match cmd {
+                        MENU_CLICKABLE => {
+                            self.passthrough = false;
+                            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
                         }
-                        close_panel = true;
+                        MENU_PASSTHROUGH => {
+                            self.passthrough = true;
+                            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+                        }
+                        MENU_PAUSE => self.paused.store(!paused_now, Ordering::Relaxed),
+                        MENU_SETTINGS => want_settings = true,
+                        MENU_TRANSCRIPT => {
+                            if let Some(f) = &self.file {
+                                let _ = std::process::Command::new("cmd").args(["/C", "start", "", &f.path.to_string_lossy()]).spawn();
+                            }
+                        }
+                        MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
+                        _ => {}
                     }
-                    "quit" => ctx.send_viewport_cmd(ViewportCommand::Close),
-                    _ => {}
                 }
-            }
-            if close_panel {
-                self.show_panel = false;
             }
         }
 
