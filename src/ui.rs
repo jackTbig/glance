@@ -4,7 +4,9 @@ use crate::transcript::{Transcript, TranscriptFile};
 use crate::translate::TranslatorConfig;
 use chrono::{DateTime, Local};
 use crossbeam_channel::{Receiver, Sender};
-use egui::{Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Id, Layout, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
+use egui::{Align, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, Id, Layout, ResizeDirection, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
@@ -69,6 +71,10 @@ pub struct CaptionApp {
     last_cfg_save: Instant,
     last_resize: Instant,
     last_frame: Instant,
+    /// 托盘图标（穿透后鼠标点不到窗口，靠它兜底）
+    tray: Option<TrayIcon>,
+    /// 正在用鼠标拖边缘调大小
+    resizing: bool,
     // 设置窗
     tx_cfg: Sender<TranslatorConfig>,
     show_settings: bool,
@@ -102,6 +108,13 @@ impl CaptionApp {
             }
         };
         let draft = cfg.clone();
+        let tray = match build_tray() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("托盘图标创建失败：{e}");
+                None
+            }
+        };
         Self {
             rx,
             cfg,
@@ -115,6 +128,8 @@ impl CaptionApp {
             last_cfg_save: Instant::now(),
             last_resize: Instant::now(),
             last_frame: Instant::now(),
+            tray,
+            resizing: false,
             tx_cfg,
             show_settings: false,
             draft,
@@ -211,7 +226,7 @@ impl CaptionApp {
 
     /// 窗口高度随内容伸缩：下边缘固定，向上长；范围 [height, max_height]
     fn fit_height(&mut self, ctx: &egui::Context, inner: egui::Rect, content_h: f32) {
-        if self.last_resize.elapsed() < Duration::from_millis(150) {
+        if self.resizing || self.last_resize.elapsed() < Duration::from_millis(150) {
             return;
         }
         let cur = inner.height();
@@ -431,6 +446,91 @@ impl CaptionApp {
     }
 }
 
+const TRAY_CLICKABLE: &str = "tray.clickable";
+const TRAY_PASSTHROUGH: &str = "tray.passthrough";
+const TRAY_PAUSE: &str = "tray.pause";
+const TRAY_SETTINGS: &str = "tray.settings";
+const TRAY_TRANSCRIPT: &str = "tray.transcript";
+const TRAY_QUIT: &str = "tray.quit";
+
+/// 32×32 的图标：深色圆角底 + 两条白色字幕线，程序内生成，不依赖外部文件
+fn tray_icon_image() -> tray_icon::Icon {
+    let (w, h) = (32u32, 32u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            // 圆角矩形（半径 7）
+            let (cx, cy) = (fx.clamp(7.0, 25.0), fy.clamp(7.0, 25.0));
+            let inside = (fx - cx).powi(2) + (fy - cy).powi(2) <= 49.0;
+            if !inside {
+                continue;
+            }
+            let bar1 = (9..=13).contains(&y) && (6..=25).contains(&x);
+            let bar2 = (18..=22).contains(&y) && (6..=19).contains(&x);
+            let (r, g, b) = if bar1 || bar2 { (255, 255, 255) } else { (30, 34, 48) };
+            rgba[i] = r;
+            rgba[i + 1] = g;
+            rgba[i + 2] = b;
+            rgba[i + 3] = 255;
+        }
+    }
+    tray_icon::Icon::from_rgba(rgba, w, h).expect("icon")
+}
+
+fn build_tray() -> anyhow::Result<TrayIcon> {
+    let menu = Menu::new();
+    let items = [
+        (TRAY_CLICKABLE, "切回可点击（Ctrl+Alt+C）"),
+        (TRAY_PASSTHROUGH, "鼠标穿透"),
+        (TRAY_PAUSE, "暂停 / 继续"),
+        (TRAY_SETTINGS, "设置…"),
+        (TRAY_TRANSCRIPT, "打开记录文件"),
+    ];
+    for (id, text) in items {
+        menu.append(&MenuItem::with_id(id, text, true, None)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    menu.append(&PredefinedMenuItem::separator()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    menu.append(&MenuItem::with_id(TRAY_QUIT, "退出", true, None)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("live-caption 实时字幕（左键：切回可点击）")
+        .with_icon(tray_icon_image())
+        .with_menu_on_left_click(false)
+        .build()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// 指针落在窗口边缘 8 px 内时给出拉伸方向
+fn edge_direction(rect: egui::Rect, p: egui::Pos2) -> Option<ResizeDirection> {
+    const E: f32 = 8.0;
+    let left = p.x - rect.min.x < E;
+    let right = rect.max.x - p.x < E;
+    let top = p.y - rect.min.y < E;
+    let bottom = rect.max.y - p.y < E;
+    Some(match (left, right, top, bottom) {
+        (true, _, true, _) => ResizeDirection::NorthWest,
+        (_, true, true, _) => ResizeDirection::NorthEast,
+        (true, _, _, true) => ResizeDirection::SouthWest,
+        (_, true, _, true) => ResizeDirection::SouthEast,
+        (true, _, _, _) => ResizeDirection::West,
+        (_, true, _, _) => ResizeDirection::East,
+        (_, _, true, _) => ResizeDirection::North,
+        (_, _, _, true) => ResizeDirection::South,
+        _ => return None,
+    })
+}
+
+fn cursor_for(d: ResizeDirection) -> CursorIcon {
+    match d {
+        ResizeDirection::North | ResizeDirection::South => CursorIcon::ResizeVertical,
+        ResizeDirection::East | ResizeDirection::West => CursorIcon::ResizeHorizontal,
+        ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::ResizeNeSw,
+        ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::ResizeNwSe,
+    }
+}
+
 fn list_models(dir: &str, current: &str) -> Vec<String> {
     let mut v = Vec::new();
     if !current.is_empty() {
@@ -502,20 +602,76 @@ impl eframe::App for CaptionApp {
                 ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
             }
         }
+        // 托盘：左键 = 切回可点击；菜单项按 id 分发
+        let mut want_settings = false;
+        if self.tray.is_some() {
+            while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+                if let TrayIconEvent::Click { button: tray_icon::MouseButton::Left, button_state: tray_icon::MouseButtonState::Up, .. } = ev {
+                    self.passthrough = false;
+                    ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
+            }
+            while let Ok(ev) = MenuEvent::receiver().try_recv() {
+                match ev.id.0.as_str() {
+                    TRAY_CLICKABLE => {
+                        self.passthrough = false;
+                        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+                    }
+                    TRAY_PASSTHROUGH => {
+                        self.passthrough = true;
+                        ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
+                    }
+                    TRAY_PAUSE => {
+                        let p = self.paused.load(Ordering::Relaxed);
+                        self.paused.store(!p, Ordering::Relaxed);
+                    }
+                    TRAY_SETTINGS => want_settings = true,
+                    TRAY_TRANSCRIPT => {
+                        if let Some(f) = &self.file {
+                            let _ = std::process::Command::new("cmd").args(["/C", "start", "", &f.path.to_string_lossy()]).spawn();
+                        }
+                    }
+                    TRAY_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
+                    _ => {}
+                }
+            }
+        }
 
         let rect = ui.max_rect();
         let alpha = (self.cfg.ui.opacity.clamp(0.0, 1.0) * 255.0) as u8;
         ui.painter().rect_filled(rect, CornerRadius::same(14), Color32::from_rgba_unmultiplied(12, 12, 16, alpha));
 
-        // 拖动整窗
+        // 边缘拉伸：指针在边缘 8 px 内按下即交给系统调大小；松手后把新高度记为最小高度
+        let pointer = ctx.input(|i| i.pointer.latest_pos());
+        let edge = pointer.and_then(|p| edge_direction(rect, p));
+        let pressed = ctx.input(|i| i.pointer.primary_pressed());
+        let any_down = ctx.input(|i| i.pointer.any_down());
+        if let Some(d) = edge {
+            ctx.set_cursor_icon(cursor_for(d));
+            if pressed {
+                self.resizing = true;
+                ctx.send_viewport_cmd(ViewportCommand::BeginResize(d));
+            }
+        }
+        if self.resizing && !any_down {
+            self.resizing = false;
+            let h = rect.height().round() as u32;
+            self.cfg.ui.height = h.max(60);
+            if self.cfg.ui.max_height < self.cfg.ui.height {
+                self.cfg.ui.max_height = self.cfg.ui.height;
+            }
+            self.last_resize = Instant::now();
+        }
+
+        // 拖动整窗（边缘以外）
         let drag = ui.interact(rect, Id::new("window-drag"), Sense::drag());
-        if drag.drag_started() {
+        if drag.drag_started() && edge.is_none() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
 
         let hovered = ui.rect_contains_pointer(rect);
         let mut content_h = 0.0f32;
-        let mut want_settings = false;
         egui::Frame::NONE.inner_margin(MARGIN).show(ui, |ui| {
             ui.set_width(rect.width() - MARGIN * 2.0);
             let top = ui.horizontal(|ui| {

@@ -14,7 +14,8 @@ AppPublisher=JackT
 DefaultDirName={code:DefaultDir}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-OutputDir=..\dist
+; 相对路径以本脚本的编译位置 installer\build\ 为基准
+OutputDir=..\..\dist
 OutputBaseFilename=live-caption-setup-{#AppVer}
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -22,6 +23,8 @@ LZMAUseSeparateProcess=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
+; 允许用 /CURRENTUSER 装到用户目录（不提权；此时 VC++ 运行库若缺失需自行安装），或安装时弹框选择
+PrivilegesRequiredOverridesAllowed=commandline dialog
 UninstallDisplayIcon={app}\live-caption.exe
 WizardStyle=modern
 ShowLanguageDialog=no
@@ -46,11 +49,11 @@ Name: "installclaude"; Description: "安装 Claude Code CLI（翻译默认走它
 
 [Files]
 Source: "{#ExeSrc}"; DestDir: "{app}"; Flags: ignoreversion; Components: app
-Source: "..\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion; Components: app
-Source: "..\README-安装版.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme; Components: app
+Source: "..\..\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion; Components: app
+Source: "..\..\README-安装版.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme; Components: app
 Source: "{#ModelTurbo}"; DestDir: "{app}\models"; Flags: ignoreversion; Components: models\turbo
 Source: "{#ModelSmall}"; DestDir: "{app}\models"; Flags: ignoreversion; Components: models\small
-Source: "deps\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeedsInstall
+Source: "..\deps\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: VCRedistNeedsInstall
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\live-caption.exe"; WorkingDir: "{app}"
@@ -68,7 +71,9 @@ Type: filesandordirs; Name: "{app}\models"
 [Code]
 function DefaultDir(Param: String): String;
 begin
-  if DirExists('D:\') then
+  if not IsAdminInstallMode then
+    Result := ExpandConstant('{userpf}\live-caption')
+  else if DirExists('D:\') then
     Result := 'D:\Program Files\live-caption'
   else
     Result := ExpandConstant('{autopf}\live-caption');

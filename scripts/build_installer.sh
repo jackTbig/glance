@@ -12,5 +12,6 @@ src = io.open("installer/live-caption.iss", encoding="utf-8").read()
 io.open("installer/build/live-caption.iss", "w", encoding="utf-8-sig", newline="\r\n").write(src)
 EOF
 ISCC="D:/Tools/InnoSetup/ISCC.exe"
-"$ISCC" /Q "installer/build/live-caption.iss"
+# ISCC（Inno 7）用 -q；脚本路径必须给 Windows 形式，否则 /d/... 会被 ISCC 当成 /d 选项
+"$ISCC" -q "$(cygpath -w "$ROOT/installer/build/live-caption.iss")"
 ls -la dist/
