@@ -553,8 +553,20 @@ fn show_native_tray_menu(hwnd: isize, x: i32, y: i32, paused: bool, passthrough:
             }
         }
         let h = hwnd as *mut core::ffi::c_void;
-        // 托盘菜单惯例：先把自己设为前台，否则点菜单外面不会自动收起
-        SetForegroundWindow(h);
+        // 托盘菜单惯例：先把自己设为前台，否则点菜单外面不会自动收起、键盘也到不了菜单。
+        // 进程没有前台权限时 SetForegroundWindow 会被拒，按惯例先把输入队列挂到当前前台线程上再设。
+        {
+            use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+            let fg = GetForegroundWindow();
+            let fg_tid = if fg.is_null() { 0 } else { GetWindowThreadProcessId(fg, std::ptr::null_mut()) };
+            let my_tid = GetCurrentThreadId();
+            let attached = fg_tid != 0 && fg_tid != my_tid && AttachThreadInput(fg_tid, my_tid, 1) != 0;
+            SetForegroundWindow(h);
+            if attached {
+                AttachThreadInput(fg_tid, my_tid, 0);
+            }
+        }
         let cmd = TrackPopupMenu(
             hmenu,
             TPM_RETURNCMD | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
