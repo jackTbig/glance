@@ -133,6 +133,10 @@ pub struct UiCfg {
     /// 全局热键（改后重启生效）：切回可点击 / 切换穿透。写法如 "Ctrl+Alt+C"、"Ctrl+Shift+F9"
     pub hotkey_clickable: String,
     pub hotkey_passthrough: String,
+    /// 多少秒没有语音就缩成迷你条（0 = 不自动）
+    pub auto_mini_secs: u32,
+    /// 有新语音时自动从迷你条展开
+    pub auto_restore: bool,
 }
 impl Default for UiCfg {
     fn default() -> Self {
@@ -149,6 +153,8 @@ impl Default for UiCfg {
             typewriter_cps: 60.0,
             hotkey_clickable: "Ctrl+Alt+C".into(),
             hotkey_passthrough: "Ctrl+Alt+P".into(),
+            auto_mini_secs: 20,
+            auto_restore: true,
         }
     }
 }

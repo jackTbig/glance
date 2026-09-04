@@ -5,7 +5,7 @@ use crate::translate::TranslatorConfig;
 use chrono::{DateTime, Local};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::path::PathBuf;
-use egui::{Align, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, Id, Layout, ResizeDirection, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, Id, Layout, ResizeDirection, RichText, Sense, ViewportBuilder, ViewportCommand, ViewportId};
 use tray_icon::{MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MARGIN: f32 = 14.0;
+/// 待机迷你条尺寸
+const MINI_W: f32 = 260.0;
+const MINI_H: f32 = 44.0;
 
 struct Line {
     id: SegId,
@@ -90,6 +93,11 @@ pub struct CaptionApp {
     tray: Option<TrayIcon>,
     /// 正在用鼠标拖边缘调大小
     resizing: bool,
+    /// 待机迷你条模式
+    mini: bool,
+    mini_since: Instant,
+    /// 最近一次有字幕活动（中间/最终英文、译文）的时间
+    last_activity: Instant,
     // 设置窗
     tx_cfg: Sender<TranslatorConfig>,
     show_settings: bool,
@@ -181,6 +189,9 @@ impl CaptionApp {
             last_frame: Instant::now(),
             tray,
             resizing: false,
+            mini: false,
+            mini_since: Instant::now(),
+            last_activity: Instant::now(),
             tx_cfg,
             show_settings: false,
             draft,
@@ -208,6 +219,7 @@ impl CaptionApp {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 UiMsg::EnglishPartial { text } => {
+                    self.last_activity = Instant::now();
                     if text.is_empty() {
                         if self.lines.back().map_or(false, |l| l.partial) {
                             self.lines.pop_back();
@@ -226,6 +238,7 @@ impl CaptionApp {
                     }
                 }
                 UiMsg::English { id, at, text } => {
+                    self.last_activity = Instant::now();
                     match self.lines.back_mut() {
                         Some(l) if l.partial => {
                             l.id = id;
@@ -289,23 +302,42 @@ impl CaptionApp {
         worst
     }
 
+    /// 收起成待机迷你条 / 展开成完整字幕条
+    fn set_mini(&mut self, on: bool) {
+        if self.mini == on {
+            return;
+        }
+        self.mini = on;
+        self.mini_since = Instant::now();
+        if !on {
+            self.last_activity = Instant::now();
+        }
+        // 让 fit_height 立刻执行
+        self.last_resize = Instant::now() - Duration::from_secs(1);
+        tracing::info!("mini={on}");
+    }
+
     /// 窗口高度随内容伸缩：下边缘固定，向上长；范围 [height, max_height]
     fn fit_height(&mut self, ctx: &egui::Context, inner: egui::Rect, content_h: f32) {
         if self.resizing || self.last_resize.elapsed() < Duration::from_millis(150) {
             return;
         }
         let cur = inner.height();
-        let min_h = self.cfg.ui.height as f32;
-        let max_h = self.cfg.ui.max_height.max(self.cfg.ui.height) as f32;
-        let want = (content_h + MARGIN * 2.0 + 4.0).clamp(min_h, max_h);
-        if (want - cur).abs() < 2.0 {
+        let (want_w, want) = if self.mini {
+            (MINI_W, MINI_H)
+        } else {
+            let min_h = self.cfg.ui.height as f32;
+            let max_h = self.cfg.ui.max_height.max(self.cfg.ui.height) as f32;
+            (self.cfg.ui.width as f32, (content_h + MARGIN * 2.0 + 4.0).clamp(min_h, max_h))
+        };
+        if (want - cur).abs() < 2.0 && (want_w - inner.width()).abs() < 2.0 {
             return;
         }
         let delta = want - cur;
         if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(outer.min.x, (outer.min.y - delta).max(0.0))));
         }
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(inner.width(), want)));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(want_w, want)));
         self.last_resize = Instant::now();
     }
 
@@ -314,6 +346,9 @@ impl CaptionApp {
             return;
         }
         self.last_cfg_save = Instant::now();
+        if self.mini {
+            return;
+        }
         let Some(r) = ctx.input(|i| i.viewport().outer_rect) else { return };
         let (x, y, w) = (r.min.x as i32, r.min.y as i32, r.width() as u32);
         if (x, y, w) != (self.cfg.ui.x, self.cfg.ui.y, self.cfg.ui.width) {
@@ -817,6 +852,12 @@ impl CaptionApp {
             ui.label("最大高度");
             ui.add(egui::Slider::new(&mut d.ui.max_height, 120..=1200).suffix(" px"));
             ui.end_row();
+            ui.label("自动收起");
+            ui.add(egui::Slider::new(&mut d.ui.auto_mini_secs, 0..=300).suffix(" 秒无语音").text("（0 = 不自动收起）"));
+            ui.end_row();
+            ui.label("自动展开");
+            ui.checkbox(&mut d.ui.auto_restore, "有新语音时自动从迷你条展开");
+            ui.end_row();
         });
         ui.add_space(6.0);
         ui.label(RichText::new("打字机速度 0 = 整句直出。窗口位置拖动后自动记住；拖边缘可改宽高。").size(12.0).color(Color32::GRAY));
@@ -879,22 +920,24 @@ const MENU_PASSTHROUGH: u32 = 2;
 const MENU_PAUSE: u32 = 3;
 const MENU_SETTINGS: u32 = 4;
 const MENU_TRANSCRIPT: u32 = 5;
+const MENU_MINI: u32 = 6;
 const MENU_QUIT: u32 = 9;
 
 /// 自己弹 Windows 原生托盘菜单：`TPM_RETURNCMD` 让 TrackPopupMenu 同步返回所选项，
 /// 不经过 muda 那条 "WM_COMMAND → 窗口子类 → 全局通道" 的转发（实测在 winit 消息循环里时有时无）。
 /// 必须在 UI 线程调用；调用期间会阻塞到菜单关闭。
-fn show_native_tray_menu(hwnd: isize, x: i32, y: i32, paused: bool, passthrough: bool) -> Option<u32> {
+fn show_native_tray_menu(hwnd: isize, x: i32, y: i32, paused: bool, passthrough: bool, mini: bool) -> Option<u32> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, PostMessageW, SetForegroundWindow, TrackPopupMenu, MF_CHECKED,
         MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
     };
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-    let items: [(u32, String, bool); 7] = [
+    let items: [(u32, String, bool); 8] = [
         (MENU_CLICKABLE, "切回可点击".into(), !passthrough),
         (MENU_PASSTHROUGH, "鼠标穿透".into(), passthrough),
         (0, String::new(), false),
         (MENU_PAUSE, (if paused { "继续识别" } else { "暂停识别" }).into(), paused),
+        (MENU_MINI, (if mini { "展开字幕条" } else { "收起为迷你条" }).into(), mini),
         (MENU_SETTINGS, "设置…".into(), false),
         (MENU_TRANSCRIPT, "打开记录文件".into(), false),
         (MENU_QUIT, "退出 live-caption".into(), false),
@@ -1128,7 +1171,8 @@ impl eframe::App for CaptionApp {
             if let Some((x, y)) = click {
                 tracing::info!("tray click at ({x}, {y})");
                 let paused_now = self.paused.load(Ordering::Relaxed);
-                let chosen = main_hwnd(frame).and_then(|h| show_native_tray_menu(h, x, y, paused_now, self.passthrough));
+                let mini_now = self.mini;
+                let chosen = main_hwnd(frame).and_then(|h| show_native_tray_menu(h, x, y, paused_now, self.passthrough, mini_now));
                 if let Some(cmd) = chosen {
                     tracing::info!("tray menu: {cmd}");
                     match cmd {
@@ -1145,6 +1189,7 @@ impl eframe::App for CaptionApp {
                         MENU_TRANSCRIPT => {
                             want_records = true;
                         }
+                        MENU_MINI => self.set_mini(!mini_now),
                         MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
                         _ => {}
                     }
@@ -1178,13 +1223,35 @@ impl eframe::App for CaptionApp {
             self.last_resize = Instant::now();
         }
 
-        // 拖动整窗（边缘以外）
-        let drag = ui.interact(rect, Id::new("window-drag"), Sense::drag());
+        // 拖动整窗（边缘以外）；迷你条上单击 = 展开
+        let drag = ui.interact(rect, Id::new("window-drag"), Sense::click_and_drag());
         if drag.drag_started() && edge.is_none() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
-
         let hovered = ui.rect_contains_pointer(rect);
+
+        // 自动收起 / 自动展开
+        if self.mini && self.cfg.ui.auto_restore && self.last_activity > self.mini_since {
+            self.set_mini(false);
+        }
+        let idle_limit = self.cfg.ui.auto_mini_secs;
+        if !self.mini && idle_limit > 0 && !hovered && !self.show_settings && self.last_activity.elapsed() > Duration::from_secs(idle_limit as u64) {
+            self.set_mini(true);
+        }
+        if self.mini {
+            if drag.clicked() {
+                self.set_mini(false);
+            }
+            let (color, _) = self.status_color_and_text();
+            let paused = self.paused.load(Ordering::Relaxed);
+            ui.painter().circle_filled(rect.left_center() + egui::vec2(16.0, 0.0), 5.0, color);
+            let text = if paused { "已暂停 · 点击展开" } else { "待机中 · 有语音自动展开，点击也可" };
+            ui.painter().text(rect.left_center() + egui::vec2(30.0, 0.0), Align2::LEFT_CENTER, text, egui::FontId::proportional(13.0), Color32::from_gray(210));
+            self.fit_height(&ctx, rect, 0.0);
+            ctx.request_repaint_after(Duration::from_millis(200));
+            return;
+        }
+
         let mut content_h = 0.0f32;
         egui::Frame::NONE.inner_margin(MARGIN).show(ui, |ui| {
             ui.set_width(rect.width() - MARGIN * 2.0);
@@ -1202,6 +1269,9 @@ impl eframe::App for CaptionApp {
                         }
                         if ui.small_button("设置").clicked() {
                             want_settings = true;
+                        }
+                        if ui.small_button("收起").on_hover_text("缩成待机迷你条；有语音自动展开").clicked() {
+                            self.set_mini(true);
                         }
                         if ui.small_button("穿透").on_hover_text("鼠标穿透，Ctrl+Alt+C 切回").clicked() {
                             self.passthrough = true;

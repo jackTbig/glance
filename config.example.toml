@@ -37,6 +37,10 @@ height = 120              # 最小高度；实际随内容在 [height, max_heigh
 max_height = 480
 lines = 2                 # 同时显示最近几段（悬停按钮 行+ / 行- 可调）
 typewriter_cps = 60.0     # 打字机效果，每秒字符数；0 = 整句直出
+auto_mini_secs = 20       # 多少秒没语音就缩成待机迷你条，0 = 不自动（悬停按钮"收起"/托盘菜单可手动）
+auto_restore = true       # 有新语音时自动展开
+hotkey_clickable = "Ctrl+Alt+C"
+hotkey_passthrough = "Ctrl+Alt+P"
 
 [paths]
 transcripts_dir = "transcripts"
