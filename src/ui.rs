@@ -336,6 +336,20 @@ impl CaptionApp {
         self.show_settings = true;
     }
 
+    /// "打开记录"：进设置窗的记录页，选中当前会话文件并预览（外部程序打开在页内另有按钮）
+    fn open_records(&mut self) {
+        if let Some(f) = self.file.as_mut() {
+            f.ensure_created();
+        }
+        self.open_settings();
+        self.settings_tab = 5;
+        if let Some(cur) = self.file.as_ref().map(|f| f.path.clone()) {
+            if let Some(i) = self.hist.iter().position(|h| same_file(&h.path, &cur)) {
+                self.load_preview(i);
+            }
+        }
+    }
+
     /// 草稿里有没有必须重启才生效的改动（识别 / 切句 / 热键）
     fn needs_restart(&self) -> bool {
         self.draft.asr != self.cfg.asr
@@ -990,11 +1004,28 @@ fn open_path(path: &std::path::Path) {
     let shown = abs.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let (op, file) = (wide("open"), wide(&shown));
+    // 文件没有关联程序时 ShellExecute 会弹"选择打开方式"（用户看到的就是一闪而过的窗口），直接改用记事本
+    let is_file = abs.is_file();
+    if is_file && !has_file_association(&abs) {
+        tracing::info!("open {shown}: 无关联程序，用记事本");
+        let _ = std::process::Command::new("notepad.exe").arg(&shown).spawn();
+        return;
+    }
     let rc = unsafe { ShellExecuteW(std::ptr::null_mut(), op.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) } as isize;
     tracing::info!("open {shown} rc={rc}");
-    if rc <= 32 {
+    if rc <= 32 && is_file {
         let _ = std::process::Command::new("notepad.exe").arg(&shown).spawn();
     }
+}
+
+/// 注册表里 HKCR\.<ext> 有默认值才算有关联程序
+fn has_file_association(path: &std::path::Path) -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_REG_SZ};
+    let Some(ext) = path.extension().map(|e| e.to_string_lossy().into_owned()) else { return false };
+    let key: Vec<u16> = format!(".{ext}").encode_utf16().chain(std::iter::once(0)).collect();
+    let mut size: u32 = 0;
+    let rc = unsafe { RegGetValueW(HKEY_CLASSES_ROOT, key.as_ptr(), std::ptr::null(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) };
+    rc == 0 && size > 2
 }
 
 fn list_models(dir: &str, current: &str) -> Vec<String> {
@@ -1073,6 +1104,7 @@ impl eframe::App for CaptionApp {
         }
         // 托盘：任意键松开 = 弹原生菜单（同步拿回所选项）
         let mut want_settings = false;
+        let mut want_records = false;
         if self.tray.is_some() {
             let mut click: Option<(i32, i32)> = None;
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
@@ -1098,10 +1130,7 @@ impl eframe::App for CaptionApp {
                         MENU_PAUSE => self.paused.store(!paused_now, Ordering::Relaxed),
                         MENU_SETTINGS => want_settings = true,
                         MENU_TRANSCRIPT => {
-                            if let Some(f) = self.file.as_mut() {
-                                f.ensure_created();
-                                open_path(&f.path);
-                            }
+                            want_records = true;
                         }
                         MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
                         _ => {}
@@ -1166,10 +1195,7 @@ impl eframe::App for CaptionApp {
                             ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
                         }
                         if ui.small_button("记录").on_hover_text("打开记录文件").clicked() {
-                            if let Some(f) = self.file.as_mut() {
-                                f.ensure_created();
-                                open_path(&f.path);
-                            }
+                            want_records = true;
                         }
                         if ui.small_button("透-").clicked() {
                             self.cfg.ui.opacity = (self.cfg.ui.opacity - 0.1).max(0.1);
@@ -1233,6 +1259,9 @@ impl eframe::App for CaptionApp {
 
         if want_settings {
             self.open_settings();
+        }
+        if want_records {
+            self.open_records();
         }
         if self.show_settings {
             let vb = ViewportBuilder::default()

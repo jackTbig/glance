@@ -28,7 +28,7 @@ tracing-appender = "0.2"
 global-hotkey = "0.8"
 tray-icon = "0.24"
 # 托盘原生菜单自己弹（TPM_RETURNCMD 同步拿结果），不走 muda 的子类化转发
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Registry"] }
 raw-window-handle = "0.6"
 chrono = "0.4"
 hound = "3.5"
