@@ -97,6 +97,8 @@ pub struct CaptionApp {
     models: Vec<String>,
     settings_note: String,
     settings_tab: usize,
+    /// 下一帧把设置窗抬到前台（每次打开/再次打开都要）
+    settings_raise: bool,
     hist: Vec<HistEntry>,
     hist_sel: Option<usize>,
     hist_preview: String,
@@ -185,6 +187,7 @@ impl CaptionApp {
             models: Vec::new(),
             settings_note: String::new(),
             settings_tab: 0,
+            settings_raise: false,
             hist: Vec::new(),
             hist_sel: None,
             hist_preview: String::new(),
@@ -334,6 +337,7 @@ impl CaptionApp {
             self.settings_tab = t.min(5);
         }
         self.show_settings = true;
+        self.settings_raise = true;
     }
 
     /// "打开记录"：进设置窗的记录页，选中当前会话文件并预览（外部程序打开在页内另有按钮）
@@ -1273,13 +1277,20 @@ impl eframe::App for CaptionApp {
             self.open_records();
         }
         if self.show_settings {
+            // 与字幕条一样置顶，否则会被别的窗口压住，第二次"打开"看不见
             let vb = ViewportBuilder::default()
                 .with_title("live-caption 设置")
+                .with_always_on_top()
                 .with_inner_size([780.0, 560.0])
                 .with_min_inner_size([640.0, 460.0]);
             ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |ui, _class| {
                 if ui.input(|i| i.viewport().close_requested()) {
                     self.show_settings = false;
+                }
+                if self.settings_raise {
+                    self.settings_raise = false;
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+                    ui.ctx().send_viewport_cmd(ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
                 }
                 let c = ui.ctx().clone();
                 self.settings_window(ui, &c);
