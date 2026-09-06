@@ -2,7 +2,7 @@
 energy_threshold = 0.01   # RMS 门限，越小越灵敏
 silence_ms = 400          # 静音多久算一句结束
 min_segment_ms = 600     # 短于此丢弃
-max_segment_ms = 8000     # 长于此强制切
+max_segment_ms = 8000     # 长于此就在最近的词间隙切开（不硬切，余下音频接着当下一段）
 partial_every_ms = 400
 device = ""              # 采集哪个播放设备（友好名，设置窗可选）；空 = 跟随系统默认，默认设备切换自动跟随    # 逐字上屏：说话中每隔这么久识别一次中间结果（每次约 0.3–0.5 s），0 关闭
 

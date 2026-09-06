@@ -36,6 +36,22 @@ pub struct Segmenter {
     since_partial: usize,
 }
 
+/// 在 `buf[from..to)` 里按帧找能量最低的一帧（词与词之间的间隙），返回该帧末尾作为切点（帧对齐）。
+/// 能量相同取靠后的，尽量让前一段长一点。找不到完整的帧就退回 `to`。
+fn quietest_frame_end(buf: &[f32], frame_len: usize, from: usize, to: usize) -> usize {
+    let to = to.min(buf.len());
+    let mut best: Option<(f32, usize)> = None;
+    let mut i = from;
+    while i + frame_len <= to {
+        let e: f32 = buf[i..i + frame_len].iter().map(|v| v * v).sum();
+        if best.map_or(true, |(be, _)| e <= be) {
+            best = Some((e, i + frame_len));
+        }
+        i += frame_len;
+    }
+    best.map_or(to, |(_, end)| end)
+}
+
 impl Segmenter {
     pub fn new(cfg: SegmenterConfig) -> Self {
         let frame_len = (cfg.sample_rate * cfg.frame_ms / 1000) as usize;
@@ -65,9 +81,14 @@ impl Segmenter {
                 self.buf.extend_from_slice(&frame);
                 self.since_partial += frame.len();
                 if self.buf.len() >= self.ms_to_samples(self.cfg.max_segment_ms) {
+                    // 超长句不硬切（硬切会把一个词劈进两段，两段各认一遍就出现跨句重复）：
+                    // 在后 60% 里找能量最低的一帧（词间隙）切开，余下的音频接着当下一段的开头，说话状态不断。
+                    let from = self.ms_to_samples(self.cfg.min_segment_ms).max(self.buf.len() * 4 / 10);
+                    let cut = quietest_frame_end(&self.buf, self.frame_len, from, self.buf.len());
+                    let rest = self.buf.split_off(cut);
                     out.push(SegMsg::Final(std::mem::take(&mut self.buf)));
-                    self.in_speech = false;
-                    self.since_partial = 0;
+                    self.buf = rest;
+                    self.since_partial = self.buf.len();
                 } else if self.cfg.partial_every_ms > 0
                     && self.buf.len() >= self.ms_to_samples(self.cfg.min_segment_ms)
                     && self.since_partial >= self.ms_to_samples(self.cfg.partial_every_ms)
@@ -212,11 +233,43 @@ mod tests {
     }
 
     #[test]
-    fn long_speech_is_force_cut_at_max() {
+    fn long_speech_is_cut_at_the_quietest_gap_not_mid_word() {
+        // 4 s 说话 + 0.1 s 词间隙（很轻但不到 silence_ms）+ 4.5 s 说话：到 8 s 该切时，切点落在间隙处
+        let mut s = Segmenter::new(cfg());
+        let mut audio = tone(4000);
+        audio.extend(vec![0.001; 1600]);
+        audio.extend(tone(4500));
+        let segs = finals(s.push(&audio));
+        assert_eq!(segs.len(), 1, "只切一次");
+        let len_ms = segs[0].len() as u32 * 1000 / 16000;
+        assert!((4000..=4120).contains(&len_ms), "切点应在间隙处，实际 {len_ms} ms");
+        // 余下的音频接着当下一段，停顿后整段出来，一个样本都不丢
+        let rest = finals(s.push(&silence(600)));
+        assert_eq!(rest.len(), 1);
+        let rest_ms = rest[0].len() as u32 * 1000 / 16000;
+        assert!((4480..=5100).contains(&rest_ms), "余下部分 {rest_ms} ms");
+        // 静音累计到 silence_ms（500 ms）就出段，所以尾巴带 500 ms 静音
+        assert_eq!(segs[0].len() + rest[0].len(), audio.len() + 16000 * 500 / 1000);
+    }
+
+    #[test]
+    fn long_speech_without_gap_still_gets_cut_before_growing_forever() {
         let mut s = Segmenter::new(cfg());
         let segs = finals(s.push(&tone(10000)));
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].len(), 16000 * 8);
+        let len_ms = segs[0].len() as u32 * 1000 / 16000;
+        assert!((3200..=8000).contains(&len_ms), "没有明显间隙也要在后 60% 里找最轻的一帧切，实际 {len_ms} ms");
+    }
+
+    #[test]
+    fn quietest_frame_end_picks_the_gap() {
+        let mut buf = vec![0.3f32; 16000 * 4];
+        buf.extend(vec![0.001; 1600]);
+        buf.extend(vec![0.3; 16000 * 4]);
+        let frame = 320;
+        let cut = quietest_frame_end(&buf, frame, 16000, buf.len());
+        assert!((16000 * 4 + frame..=16000 * 4 + 1600).contains(&cut), "cut={cut}");
+        assert_eq!(cut % frame, 0, "帧对齐");
     }
 
     #[test]
