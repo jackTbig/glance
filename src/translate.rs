@@ -2,11 +2,13 @@ use crate::config::TranslateCfg;
 use crate::messages::{SegId, Stage, StageState, UiMsg};
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender};
 use std::io::{BufRead, BufReader, Write};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const SYSTEM_PROMPT: &str = "你是英译中会议同传。用户每条消息是一句英文会议发言，你只输出对应的简体中文译文，不加解释、不加引号、不加前缀。专有名词与产品名保留原文。";
+pub const SYSTEM_PROMPT: &str = "你是英译中会议同传。用户消息里可能先给出若干句\"前文\"英中对照，只作参考、不要翻译；你只输出\"请翻译\"后面那句英文的简体中文译文，不加解释、不加引号、不加前缀。专有名词与产品名保留原文。如果注明是还没说完的半句，只译到目前为止的内容，不要补全。";
 
 /// 实测（2026-09-03）：关掉 MCP 与设置源后单句往返从 4–7 s 降到约 1.5 s；工具用 --disallowedTools "*" 关闭；
 /// --include-partial-messages 让译文按 token 流式回来
@@ -66,6 +68,10 @@ pub struct TranslatorConfig {
     pub max_backlog: usize,
     /// 测试用：整体替换 claude 命令（如 ["python", "tests/fake_claude.py"]）
     pub command_override: Vec<String>,
+    /// 临时翻译最短间隔；0 = 关闭临时翻译
+    pub partial_every: Duration,
+    pub partial_min_new_words: usize,
+    pub context_sentences: usize,
 }
 
 impl From<&TranslateCfg> for TranslatorConfig {
@@ -83,8 +89,69 @@ impl From<&TranslateCfg> for TranslatorConfig {
             rotate_every: c.rotate_every.max(1),
             max_backlog: c.max_backlog.max(1),
             command_override: Vec::new(),
+            partial_every: Duration::from_millis(c.partial_every_ms),
+            partial_min_new_words: c.partial_min_new_words.max(1),
+            context_sentences: c.context_sentences,
         }
     }
+}
+
+// ---------- 提示词与前文 ----------
+
+pub const PROVISIONAL_NOTE: &str = "下面是还没说完的半句，只译到目前为止的内容，不要补全、不要猜后文。";
+
+/// 三个后端共用的用户消息：可选前文对照 + 可选半句说明 + 请翻译的句子
+pub fn build_user_message(context: &[(String, String)], text: &str, provisional: bool) -> String {
+    let mut m = String::new();
+    if !context.is_empty() {
+        m.push_str("前文（仅供参考，不要翻译）：\n");
+        for (en, zh) in context {
+            m.push_str("EN: ");
+            m.push_str(en);
+            m.push_str("\nZH: ");
+            m.push_str(zh);
+            m.push('\n');
+        }
+        m.push('\n');
+    }
+    if provisional {
+        m.push_str(PROVISIONAL_NOTE);
+        m.push('\n');
+    }
+    m.push_str("请翻译：");
+    m.push_str(text);
+    m
+}
+
+pub fn word_count(s: &str) -> usize {
+    s.split_whitespace().count()
+}
+
+/// 临时翻译发送条件：首次要够 min_new 个词；之后距上次发出 ≥ every 且比上次多 ≥ min_new 个词
+pub fn should_send(now: Instant, last_sent_at: Option<Instant>, last_sent_words: usize, words: usize, every: Duration, min_new: usize) -> bool {
+    match last_sent_at {
+        None => words >= min_new,
+        Some(t) => now.duration_since(t) >= every && words >= last_sent_words + min_new,
+    }
+}
+
+/// 最近几句英中对照，定稿线程写、两个翻译线程读
+pub type Context = Arc<Mutex<VecDeque<(String, String)>>>;
+
+pub fn new_context() -> Context {
+    Arc::new(Mutex::new(VecDeque::new()))
+}
+
+pub fn push_context(ctx: &Context, en: &str, zh: &str, max: usize) {
+    let mut q = ctx.lock().unwrap();
+    q.push_back((en.to_string(), zh.to_string()));
+    while q.len() > max {
+        q.pop_front();
+    }
+}
+
+pub fn snapshot_context(ctx: &Context) -> Vec<(String, String)> {
+    ctx.lock().unwrap().iter().cloned().collect()
 }
 
 /// Windows 上 `Command::new("codex")` 不会找 .cmd/.bat；这里按 PATH 补全成完整路径
@@ -556,5 +623,56 @@ mod tests {
         assert_eq!(resolve_bin(r"C:\x\y.exe"), r"C:\x\y.exe");
         let p = resolve_bin("python");
         assert!(p.to_ascii_lowercase().ends_with("python.exe") || p == "python", "{p}");
+    }
+
+    #[test]
+    fn user_message_without_context_is_just_the_sentence() {
+        let m = build_user_message(&[], "Hello there.", false);
+        assert_eq!(m, "请翻译：Hello there.");
+    }
+
+    #[test]
+    fn user_message_with_context_lists_pairs_then_sentence() {
+        let ctx = vec![("We start now.".to_string(), "我们现在开始。".to_string()), ("Second.".to_string(), "第二。".to_string())];
+        let m = build_user_message(&ctx, "Third.", false);
+        assert_eq!(
+            m,
+            "前文（仅供参考，不要翻译）：\nEN: We start now.\nZH: 我们现在开始。\nEN: Second.\nZH: 第二。\n\n请翻译：Third."
+        );
+    }
+
+    #[test]
+    fn provisional_message_carries_half_sentence_note() {
+        let m = build_user_message(&[], "So when you have", true);
+        assert_eq!(m, "下面是还没说完的半句，只译到目前为止的内容，不要补全、不要猜后文。\n请翻译：So when you have");
+    }
+
+    #[test]
+    fn should_send_rules() {
+        let every = Duration::from_millis(1200);
+        let t0 = Instant::now();
+        assert!(!should_send(t0, None, 0, 2, every, 3), "首次不足 3 词不发");
+        assert!(should_send(t0, None, 0, 3, every, 3), "首次满 3 词就发");
+        let sent = Some(t0);
+        assert!(!should_send(t0 + Duration::from_millis(500), sent, 3, 9, every, 3), "间隔不足不发");
+        assert!(!should_send(t0 + Duration::from_millis(1300), sent, 3, 5, every, 3), "新词不足不发");
+        assert!(should_send(t0 + Duration::from_millis(1300), sent, 3, 6, every, 3), "间隔够且多 3 词才发");
+    }
+
+    #[test]
+    fn word_count_splits_on_whitespace() {
+        assert_eq!(word_count("  a  b\tc\n"), 3);
+        assert_eq!(word_count(""), 0);
+    }
+
+    #[test]
+    fn context_queue_keeps_last_n() {
+        let ctx = new_context();
+        push_context(&ctx, "a", "甲", 2);
+        push_context(&ctx, "b", "乙", 2);
+        push_context(&ctx, "c", "丙", 2);
+        assert_eq!(snapshot_context(&ctx), vec![("b".to_string(), "乙".to_string()), ("c".to_string(), "丙".to_string())]);
+        push_context(&ctx, "d", "丁", 0);
+        assert!(snapshot_context(&ctx).is_empty(), "上限 0 = 不保留");
     }
 }
