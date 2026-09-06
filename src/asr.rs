@@ -189,7 +189,7 @@ pub fn spawn_asr(
                     match asr.transcribe_partial(&pcm) {
                         Ok(text) if has_words(&text) => {
                             tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
-                            let _ = ui.send(UiMsg::EnglishPartial { text });
+                            let _ = ui.send(UiMsg::EnglishPartial { id: 0, text });
                         }
                         Ok(_) => {}
                         Err(e) => tracing::info!("asr partial 放弃 {}ms：{e}", t0.elapsed().as_millis()),
@@ -210,7 +210,7 @@ pub fn spawn_asr(
                         }
                         Ok(_) => {
                             // 这句识别为空（多半是噪声）：把可能挂着的中间结果清掉
-                            let _ = ui.send(UiMsg::EnglishPartial { text: String::new() });
+                            let _ = ui.send(UiMsg::EnglishPartial { id: 0, text: String::new() });
                         }
                         Err(e) => tracing::warn!("识别失败，跳过：{e}"),
                     }

@@ -144,6 +144,12 @@ pub struct TranslateCfg {
     pub timeout_secs: u64,
     pub rotate_every: u32,
     pub max_backlog: usize,
+    /// 说话过程中每隔多少毫秒把半句送去翻一次临时中文（0 = 关闭）
+    pub partial_every_ms: u64,
+    /// 半句比上次送翻时至少多这么多个词才再送
+    pub partial_min_new_words: usize,
+    /// 翻译时带最近几句英中对照当上下文（0 = 不带）
+    pub context_sentences: usize,
 }
 impl Default for TranslateCfg {
     fn default() -> Self {
@@ -159,6 +165,9 @@ impl Default for TranslateCfg {
             timeout_secs: 15,
             rotate_every: 60,
             max_backlog: 10,
+            partial_every_ms: 1200,
+            partial_min_new_words: 3,
+            context_sentences: 2,
         }
     }
 }
@@ -304,6 +313,18 @@ mod tests {
     fn old_model_key_still_reads_into_claude_model() {
         let cfg: Config = toml::from_str("[translate]\nmodel = \"haiku\"\n").unwrap();
         assert_eq!(cfg.translate.claude_model, "haiku");
+    }
+
+    #[test]
+    fn translate_partial_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.translate.partial_every_ms, 1200);
+        assert_eq!(cfg.translate.partial_min_new_words, 3);
+        assert_eq!(cfg.translate.context_sentences, 2);
+        let old: Config = toml::from_str("[translate]
+backend = \"openai\"
+").unwrap();
+        assert_eq!(old.translate.partial_every_ms, 1200, "旧配置文件没有这几项也要有默认值");
     }
 
     #[test]

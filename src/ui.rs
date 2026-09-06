@@ -220,7 +220,7 @@ impl CaptionApp {
         let keep = self.cfg.ui.lines.max(1);
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                UiMsg::EnglishPartial { text } => {
+                UiMsg::EnglishPartial { id: _, text } => {
                     self.last_activity = Instant::now();
                     if text.is_empty() {
                         if self.lines.back().map_or(false, |l| l.partial) {
@@ -255,6 +255,7 @@ impl CaptionApp {
                     }
                     self.transcript.push_en(id, at, &text);
                 }
+                UiMsg::ChineseProvisional { .. } => {}
                 UiMsg::ChinesePartial { id, text } => {
                     if let Some(l) = self.lines.iter_mut().find(|l| l.id == id) {
                         l.zh_shown = l.zh_shown.min(text.chars().count() as f32);
