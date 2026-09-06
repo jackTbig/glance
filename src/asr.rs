@@ -120,12 +120,40 @@ fn run_with(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32]) -> anyhow::R
                 parts.push(seg.to_str_lossy().map_err(|e| anyhow::anyhow!("{e:?}"))?.trim().to_string());
             }
         }
-        Ok(parts.join(" ").trim().to_string())
+        Ok(collapse_repeats(parts.join(" ").trim()))
     }
 }
 
 fn has_words(t: &str) -> bool {
     t.chars().any(|c| c.is_alphanumeric())
+}
+
+/// whisper 对重复音节会把同一子句连吐几遍（日志实例："O , that's just O ." ×3）：
+/// 按 . ! ? 切成子句，连续相同的（忽略大小写、空白与标点）只留第一句。单词级重复是正常口语，不碰。
+fn collapse_repeats(text: &str) -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in text.chars() {
+        cur.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            clauses.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.trim().is_empty() {
+        clauses.push(cur);
+    }
+    let key = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect::<String>();
+    let mut out: Vec<String> = Vec::new();
+    let mut last_key = String::new();
+    for cl in clauses {
+        let k = key(&cl);
+        if !k.is_empty() && k == last_key {
+            continue;
+        }
+        last_key = k;
+        out.push(cl);
+    }
+    out.concat().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 解一份中间快照：有词就发界面与临时翻译（临时翻译通道满了就丢，它只要最新一条）
@@ -242,6 +270,17 @@ pub fn spawn_asr(
 #[cfg(test)]
 mod tests {
     use super::audio_ctx_for;
+
+    #[test]
+    fn collapse_repeats_folds_consecutive_identical_clauses() {
+        use super::collapse_repeats;
+        assert_eq!(collapse_repeats("O , that's just O . O , that's just O . O , that's just O ."), "O , that's just O .");
+        assert_eq!(collapse_repeats("Thank you. Thank you. Thank you."), "Thank you.");
+        assert_eq!(collapse_repeats("If n is a thousand, if n is a million, it doesn't matter."), "If n is a thousand, if n is a million, it doesn't matter.", "不同的子句不动");
+        assert_eq!(collapse_repeats("Good morning everyone!"), "Good morning everyone!");
+        assert_eq!(collapse_repeats("Many, many approaches to doing this."), "Many, many approaches to doing this.", "单词级的重复是正常口语，不折叠");
+        assert_eq!(collapse_repeats("So we say fuzzy. so we say fuzzy? Because"), "So we say fuzzy. Because", "大小写与标点不同也算同一子句");
+    }
 
     #[test]
     fn id_alloc_shares_id_between_partials_and_final() {
