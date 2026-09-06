@@ -32,9 +32,35 @@ struct Line {
     /// 打字机：已显示的字符数（浮点便于按帧推进）
     en_shown: f32,
     zh_shown: f32,
+    /// 中文是说话过程中翻的半句（灰色斜体）
+    zh_provisional: bool,
+    /// 定稿译文已开始到达：之后晚到的临时中文一律忽略
+    zh_final_started: bool,
+}
+
+/// 两段文本开头相同的字符数
+fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
 impl Line {
+    /// 换中文：公共前缀部分保留已显示进度，只有变动的尾部重新打字
+    fn set_zh(&mut self, text: String, provisional: bool) {
+        let keep = self.zh.as_deref().map_or(0, |old| common_prefix_chars(old, &text)) as f32;
+        self.zh_shown = self.zh_shown.min(keep);
+        self.zh = Some(text);
+        self.zh_provisional = provisional;
+    }
+
+    /// 临时中文：定稿流开始后不再采纳。返回是否采纳
+    fn apply_provisional(&mut self, text: String) -> bool {
+        if self.zh_final_started {
+            return false;
+        }
+        self.set_zh(text, true);
+        true
+    }
+
     fn advance(&mut self, dt: f32, cps: f32) -> bool {
         let en_len = self.en.chars().count() as f32;
         let zh_len = self.zh.as_ref().map_or(0.0, |z| z.chars().count() as f32);
@@ -99,7 +125,7 @@ pub struct CaptionApp {
     /// 最近一次有字幕活动（中间/最终英文、译文）的时间
     last_activity: Instant,
     // 设置窗
-    tx_cfg: Sender<TranslatorConfig>,
+    tx_cfg: Vec<Sender<TranslatorConfig>>,
     show_settings: bool,
     draft: Config,
     models: Vec<String>,
@@ -123,7 +149,7 @@ impl CaptionApp {
         rx: Receiver<UiMsg>,
         cfg: Config,
         paused: Arc<AtomicBool>,
-        tx_cfg: Sender<TranslatorConfig>,
+        tx_cfg: Vec<Sender<TranslatorConfig>>,
     ) -> Self {
         if let Err(e) = install_fonts(&cc.egui_ctx, &cfg.ui.font_path) {
             tracing::warn!("加载中文字体失败：{e}");
@@ -220,7 +246,7 @@ impl CaptionApp {
         let keep = self.cfg.ui.lines.max(1);
         while let Ok(m) = self.rx.try_recv() {
             match m {
-                UiMsg::EnglishPartial { id: _, text } => {
+                UiMsg::EnglishPartial { id, text } => {
                     self.last_activity = Instant::now();
                     if text.is_empty() {
                         if self.lines.back().map_or(false, |l| l.partial) {
@@ -233,9 +259,10 @@ impl CaptionApp {
                             // 新快照通常是旧快照的延长；已显示的部分不回退
                             l.en_shown = l.en_shown.min(text.chars().count() as f32);
                             l.en = text;
+                            l.id = id;
                         }
                         _ => {
-                            self.lines.push_back(Line { id: 0, at: Local::now(), en: text, zh: None, partial: true, en_shown: 0.0, zh_shown: 0.0 });
+                            self.lines.push_back(Line { id, at: Local::now(), en: text, zh: None, partial: true, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false });
                         }
                     }
                 }
@@ -250,22 +277,26 @@ impl CaptionApp {
                             l.partial = false;
                         }
                         _ => {
-                            self.lines.push_back(Line { id, at, en: text.clone(), zh: None, partial: false, en_shown: 0.0, zh_shown: 0.0 });
+                            self.lines.push_back(Line { id, at, en: text.clone(), zh: None, partial: false, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false });
                         }
                     }
                     self.transcript.push_en(id, at, &text);
                 }
-                UiMsg::ChineseProvisional { .. } => {}
+                UiMsg::ChineseProvisional { id, text } => {
+                    if let Some(l) = self.lines.iter_mut().find(|l| l.id == id) {
+                        l.apply_provisional(text);
+                    }
+                }
                 UiMsg::ChinesePartial { id, text } => {
                     if let Some(l) = self.lines.iter_mut().find(|l| l.id == id) {
-                        l.zh_shown = l.zh_shown.min(text.chars().count() as f32);
-                        l.zh = Some(text);
+                        l.zh_final_started = true;
+                        l.set_zh(text, false);
                     }
                 }
                 UiMsg::Chinese { id, text } => {
                     if let Some(l) = self.lines.iter_mut().find(|l| l.id == id) {
-                        l.zh_shown = l.zh_shown.min(text.chars().count() as f32);
-                        l.zh = Some(text.clone());
+                        l.zh_final_started = true;
+                        l.set_zh(text.clone(), false);
                     }
                     if let Some(line) = self.transcript.push_zh(id, &text) {
                         if let Some(f) = self.file.as_mut() {
@@ -410,7 +441,9 @@ impl CaptionApp {
         self.cfg = self.draft.clone();
         match self.cfg.save() {
             Ok(()) => {
-                let _ = self.tx_cfg.send(TranslatorConfig::from(&self.cfg.translate));
+                for tx in &self.tx_cfg {
+                    let _ = tx.send(TranslatorConfig::from(&self.cfg.translate));
+                }
                 self.settings_note = if restart {
                     "已保存。识别 / 切句 / 热键的改动要重启后生效。".into()
                 } else {
@@ -752,6 +785,18 @@ impl CaptionApp {
             }
             ui.label("单句超时");
             ui.add(egui::Slider::new(&mut d.translate.timeout_secs, 3..=60).suffix(" 秒"));
+            ui.end_row();
+            ui.label("临时翻译间隔");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut d.translate.partial_every_ms).range(0..=5000).speed(50).suffix(" ms"));
+                ui.label(RichText::new("说话过程中每隔这么久把半句翻成灰色临时中文，0 关闭；定稿后整句重翻").small().weak());
+            });
+            ui.end_row();
+            ui.label("上下文句数");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut d.translate.context_sentences).range(0..=6));
+                ui.label(RichText::new("翻译时带最近几句英中对照，0 不带").small().weak());
+            });
             ui.end_row();
         });
         ui.add_space(6.0);
@@ -1359,7 +1404,12 @@ impl eframe::App for CaptionApp {
                         match &l.zh {
                             Some(zh) => {
                                 let zh_text = head(zh, l.zh_shown);
-                                ui.add(egui::Label::new(RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))).wrap());
+                                let rt = if l.zh_provisional {
+                                    RichText::new(zh_text).size(fs).italics().color(Color32::from_rgba_unmultiplied(215, 220, 230, 170))
+                                } else {
+                                    RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))
+                                };
+                                ui.add(egui::Label::new(rt).wrap());
                             }
                             None if !l.partial => {
                                 ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
@@ -1409,16 +1459,51 @@ impl eframe::App for CaptionApp {
 mod tests {
     use super::*;
 
+    fn line(id: SegId) -> Line {
+        Line { id, at: Local::now(), en: "x".into(), zh: None, partial: true, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false }
+    }
+
+    #[test]
+    fn common_prefix_counts_chars() {
+        assert_eq!(common_prefix_chars("你好世界", "你好吗"), 2);
+        assert_eq!(common_prefix_chars("abc", "abc"), 3);
+        assert_eq!(common_prefix_chars("abc", "xyz"), 0);
+        assert_eq!(common_prefix_chars("", "abc"), 0);
+    }
+
+    #[test]
+    fn set_zh_keeps_shown_prefix_and_retypes_tail() {
+        let mut l = line(1);
+        l.set_zh("我们现在开始会议".into(), true);
+        l.zh_shown = 6.0;
+        l.set_zh("我们现在开始今天的会议".into(), true);
+        assert_eq!(l.zh_shown, 6.0, "公共前缀 6 字保留");
+        l.set_zh("大家好".into(), false);
+        assert_eq!(l.zh_shown, 0.0, "完全不同就从头打");
+        assert!(!l.zh_provisional);
+    }
+
+    #[test]
+    fn provisional_is_ignored_once_final_stream_started() {
+        let mut l = line(3);
+        assert!(l.apply_provisional("半句".into()));
+        assert!(l.zh_provisional);
+        l.set_zh("定稿".into(), false);
+        l.zh_final_started = true;
+        assert!(!l.apply_provisional("晚到的半句".into()));
+        assert_eq!(l.zh.as_deref(), Some("定稿"));
+    }
+
     #[test]
     fn typewriter_advances_and_stops() {
-        let mut l = Line { id: 1, at: Local::now(), en: "abcdef".into(), zh: Some("你好".into()), partial: false, en_shown: 0.0, zh_shown: 0.0 };
+        let mut l = Line { id: 1, at: Local::now(), en: "abcdef".into(), zh: Some("你好".into()), partial: false, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false };
         assert!(l.advance(0.1, 20.0)); // 2 字
         assert_eq!(head(&l.en, l.en_shown), "ab");
         assert_eq!(head(l.zh.as_ref().unwrap(), l.zh_shown), "你好");
         assert!(l.advance(1.0, 20.0));
         assert!(!l.advance(1.0, 20.0), "显示完就不再推进");
         assert_eq!(head(&l.en, l.en_shown), "abcdef");
-        let mut instant = Line { id: 2, at: Local::now(), en: "xyz".into(), zh: None, partial: false, en_shown: 0.0, zh_shown: 0.0 };
+        let mut instant = Line { id: 2, at: Local::now(), en: "xyz".into(), zh: None, partial: false, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false };
         assert!(!instant.advance(0.0, 0.0), "cps=0 整句直出");
         assert_eq!(head(&instant.en, instant.en_shown), "xyz");
     }

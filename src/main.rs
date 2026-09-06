@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "live-caption",
         options,
-        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui, tx_cfg)))),
+        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui, vec![tx_cfg, tx_cfg2])))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
