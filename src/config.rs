@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// 当前配置格式版本（见 `Config::migrate`）
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -80,9 +80,14 @@ impl Default for AsrCfg {
             Some(m) => (m.to_string_lossy().into_owned(), bundled.to_string_lossy().into_owned()),
             None => (r"D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin".into(), r"D:\models\whisper".into()),
         };
-        // 中间识别默认用 small.en（约 0.2 s 一次）；找不到就空着（复用主模型）
-        let small = Path::new(&models_dir).join("ggml-small.en.bin");
-        let partial_model_path = if small.is_file() { small.to_string_lossy().into_owned() } else { String::new() };
+        // 中间识别默认用 base.en（2026-09-06 长句验收：5 s 窗 0.21 s，英文落后语音中位 245 ms；small.en 0.61 s / 791 ms，词命中率几乎相同）；
+        // 没有 base.en 退到 small.en；都没有就空着（复用主模型）
+        let partial_model_path = ["ggml-base.en.bin", "ggml-small.en.bin"]
+            .iter()
+            .map(|n| Path::new(&models_dir).join(n))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_window_ms: 5000, partial_model_path }
     }
 }
@@ -307,6 +312,16 @@ impl Config {
             self.ui.typewriter_cps = UiCfg::default().typewriter_cps;
             self.asr.partial_window_ms = AsrCfg::default().partial_window_ms;
         }
+        if self.version < 3 {
+            // 中间识别模型 small.en → base.en（快 3 倍、词命中率相同）：只在旧值是 small.en 且同目录有 base.en 时换
+            let p = Path::new(&self.asr.partial_model_path);
+            if p.file_name().map_or(false, |n| n == "ggml-small.en.bin") {
+                let base = p.with_file_name("ggml-base.en.bin");
+                if base.is_file() {
+                    self.asr.partial_model_path = base.to_string_lossy().into_owned();
+                }
+            }
+        }
         self.version = CONFIG_VERSION;
         true
     }
@@ -360,13 +375,35 @@ mod tests {
         assert_eq!(cfg.version, CONFIG_VERSION);
         assert!(!cfg.migrate(), "升级过就不再动");
         // 已是当前版本的文件，用户自己改的值保持
-        let mut newer: Config = toml::from_str("version = 2\n[audio]\nmin_segment_ms = 800\n").unwrap();
+        let mut newer: Config = toml::from_str(&format!("version = {CONFIG_VERSION}\n[audio]\nmin_segment_ms = 800\n")).unwrap();
         assert!(!newer.migrate());
         assert_eq!(newer.audio.min_segment_ms, 800);
         // 新生成的默认配置带当前版本号，写回后再读不会触发升级
         let s = toml::to_string(&Config { version: CONFIG_VERSION, ..Config::default() }).unwrap();
         let mut back: Config = toml::from_str(&s).unwrap();
         assert!(!back.migrate());
+    }
+
+    #[test]
+    fn migration_v3_swaps_small_en_for_base_en_only_when_present() {
+        let root = scratch("v3");
+        let dir = root.join("models");
+        touch(&dir.join("ggml-small.en.bin"));
+        let small = dir.join("ggml-small.en.bin").to_string_lossy().into_owned();
+        // 同目录没有 base.en：不换
+        let mut a: Config = toml::from_str(&format!("version = 2\n[asr]\npartial_model_path = '{}'\n", small)).unwrap();
+        assert!(a.migrate());
+        assert_eq!(a.asr.partial_model_path, small);
+        // 有 base.en：换过去
+        touch(&dir.join("ggml-base.en.bin"));
+        let mut b: Config = toml::from_str(&format!("version = 2\n[asr]\npartial_model_path = '{}'\n", small)).unwrap();
+        assert!(b.migrate());
+        assert_eq!(b.asr.partial_model_path, dir.join("ggml-base.en.bin").to_string_lossy());
+        // 用户指定的其他模型不动
+        let mut c: Config = toml::from_str("version = 2\n[asr]\npartial_model_path = 'D:/x/ggml-tiny.en.bin'\n").unwrap();
+        assert!(c.migrate());
+        assert_eq!(c.asr.partial_model_path, "D:/x/ggml-tiny.en.bin");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

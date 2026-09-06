@@ -1516,7 +1516,8 @@ impl eframe::App for CaptionApp {
 
         self.fit_height(&ctx, rect, content_h);
         self.maybe_save_window_rect(&ctx);
-        ctx.request_repaint_after(if animating { Duration::from_millis(16) } else { Duration::from_millis(100) });
+        // 空闲时 50 ms 一轮：消息到达后最多等 50 ms 就上屏（原 100 ms 平均多等 25 ms）；托盘事件也靠这个轮询
+        ctx.request_repaint_after(if animating { Duration::from_millis(16) } else { Duration::from_millis(50) });
     }
 }
 

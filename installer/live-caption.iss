@@ -4,7 +4,7 @@
 #define AppVer "1.0.2"
 #define ExeSrc "D:\DevCache\lc-target\release\live-caption.exe"
 #define ModelTurbo "D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin"
-#define ModelSmall "D:\models\whisper\ggml-small.en.bin"
+#define ModelSmall "D:\models\whisper\ggml-base.en.bin"
 
 [Setup]
 AppId={{7E1C2C1A-5B6E-4D8F-9C2B-4A1F0C9D2E31}
@@ -41,7 +41,7 @@ Name: "custom"; Description: "自定义"; Flags: iscustom
 Name: "app"; Description: "主程序"; Types: full compact custom; Flags: fixed
 Name: "models"; Description: "识别模型（至少装一个）"; Types: full compact custom
 Name: "models\turbo"; Description: "large-v3-turbo（最终句定稿，最准，574 MB）"; Types: full compact custom
-Name: "models\small"; Description: "small.en（说话过程中逐字上屏用，最快，488 MB）"; Types: full custom
+Name: "models\small"; Description: "base.en（说话过程中逐字上屏用，最快，148 MB）"; Types: full custom
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
