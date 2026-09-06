@@ -88,7 +88,14 @@ impl Segmenter {
                     let rest = self.buf.split_off(cut);
                     out.push(SegMsg::Final(std::mem::take(&mut self.buf)));
                     self.buf = rest;
-                    self.since_partial = self.buf.len();
+                    // 余下部分立刻当下一句的第一份中间快照发出去，和 Final 在同一批：识别线程会让它插队先解，
+                    // 余下的词不用排在约 1 s 的定稿解码后面
+                    if self.cfg.partial_every_ms > 0 && self.buf.len() >= self.ms_to_samples(self.cfg.min_segment_ms) {
+                        out.push(SegMsg::Partial(self.buf.clone()));
+                        self.since_partial = 0;
+                    } else {
+                        self.since_partial = self.buf.len();
+                    }
                 } else if self.cfg.partial_every_ms > 0
                     && self.buf.len() >= self.ms_to_samples(self.cfg.min_segment_ms)
                     && self.since_partial >= self.ms_to_samples(self.cfg.partial_every_ms)
@@ -250,6 +257,27 @@ mod tests {
         assert!((4480..=5100).contains(&rest_ms), "余下部分 {rest_ms} ms");
         // 静音累计到 silence_ms（500 ms）就出段，所以尾巴带 500 ms 静音
         assert_eq!(segs[0].len() + rest[0].len(), audio.len() + 16000 * 500 / 1000);
+    }
+
+    #[test]
+    fn soft_cut_emits_remainder_as_first_partial_in_same_batch() {
+        let mut c = cfg();
+        c.partial_every_ms = 1000;
+        let mut s = Segmenter::new(c);
+        let mut audio = tone(4000);
+        audio.extend(vec![0.001; 1600]);
+        audio.extend(tone(4500));
+        let msgs = s.push(&audio);
+        let pos_final = msgs.iter().position(|m| matches!(m, SegMsg::Final(_))).expect("应有软切定稿");
+        match msgs.get(pos_final + 1) {
+            Some(SegMsg::Partial(p)) => {
+                // 到 8 s 触发、切在 4 s 处的间隙：余下约 3.9 s
+                let ms = p.len() as u32 * 1000 / 16000;
+                assert!((3800..=4000).contains(&ms), "紧随其后的中间快照应是余下部分（约 3.9 s），实际 {ms} ms");
+            }
+            Some(SegMsg::Final(_)) => panic!("Final 之后应立刻跟余下部分的 Partial，实际是另一个 Final"),
+            None => panic!("Final 之后应立刻跟余下部分的 Partial，实际没有了"),
+        }
     }
 
     #[test]
