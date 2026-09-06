@@ -45,7 +45,7 @@ Start-Sleep -Seconds 15
 Write-Host "===== log lines (asr/translate/warn/error), this run only"
 $since = (Get-Date).AddMinutes(-2).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm")
 Get-ChildItem ".\logs" -Filter "live-caption.*" | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object {
-    Get-Content $_.FullName -Encoding utf8 | Select-String -Pattern "asr |translate |WARN|ERROR" | ForEach-Object { $_.Line } | Where-Object { $_ -ge $since }
+    Get-Content $_.FullName -Encoding utf8 | Select-String -Pattern "asr |translate|WARN|ERROR" | ForEach-Object { $_.Line } | Where-Object { $_ -ge $since }
 }
 Write-Host "===== transcript"
 $t = Get-ChildItem ".\transcripts" -Filter *.md | Sort-Object LastWriteTime | Select-Object -Last 1
