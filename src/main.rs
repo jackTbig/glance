@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     let (tx_cfg, rx_cfg) = bounded::<TranslatorConfig>(4);
     let paused = Arc::new(AtomicBool::new(false));
 
-    spawn_capture(tx_audio, tx_ui.clone());
+    spawn_capture(tx_audio, tx_ui.clone(), cfg.audio.device.clone());
     spawn_segmenter(
         SegmenterConfig {
             sample_rate: 16000,

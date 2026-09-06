@@ -21,10 +21,12 @@ pub struct AudioCfg {
     pub max_segment_ms: u32,
     /// 说话过程中每累积多少毫秒发一次中间识别（0 = 关闭逐字上屏）
     pub partial_every_ms: u32,
+    /// 采集哪个播放设备的声音（友好名）；空 = 跟随系统默认播放设备（默认设备切换会自动跟过去）
+    pub device: String,
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { energy_threshold: 0.01, silence_ms: 400, min_segment_ms: 600, max_segment_ms: 8000, partial_every_ms: 400 }
+        Self { energy_threshold: 0.01, silence_ms: 400, min_segment_ms: 600, max_segment_ms: 8000, partial_every_ms: 400, device: String::new() }
     }
 }
 

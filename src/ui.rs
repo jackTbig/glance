@@ -103,6 +103,7 @@ pub struct CaptionApp {
     show_settings: bool,
     draft: Config,
     models: Vec<String>,
+    devices: Vec<String>,
     settings_note: String,
     settings_tab: usize,
     /// 下一帧把设置窗抬到前台（每次打开/再次打开都要）
@@ -196,6 +197,7 @@ impl CaptionApp {
             show_settings: false,
             draft,
             models: Vec::new(),
+            devices: Vec::new(),
             settings_note: String::new(),
             settings_tab: 0,
             settings_raise: false,
@@ -370,6 +372,7 @@ impl CaptionApp {
         self.settings_note.clear();
         self.test_msg.clear();
         self.models = list_models(&self.cfg.asr.models_dir, &self.cfg.asr.model_path);
+        self.devices = crate::audio::capture::list_render_devices();
         self.scan_history();
         // 调试钩子：LC_SETTINGS_TAB=5 之类，让截图脚本直接落到指定页
         if let Some(t) = std::env::var("LC_SETTINGS_TAB").ok().and_then(|v| v.parse::<usize>().ok()) {
@@ -823,9 +826,21 @@ impl CaptionApp {
     }
 
     fn tab_audio(&mut self, ui: &mut egui::Ui) {
-        Self::section(ui, "切句与逐字上屏", "改动要重启后生效。");
+        Self::section(ui, "采集、切句与逐字上屏", "改动要重启后生效。");
+        let devices = self.devices.clone();
         let d = &mut self.draft;
         Self::grid(ui, "g_audio", |ui| {
+            ui.label("采集哪个播放设备");
+            egui::ComboBox::from_id_salt("audio_device")
+                .width(420.0)
+                .selected_text(if d.audio.device.trim().is_empty() { "跟随系统默认播放设备（推荐）".to_string() } else { d.audio.device.clone() })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d.audio.device, String::new(), "跟随系统默认播放设备（推荐）");
+                    for name in &devices {
+                        ui.selectable_value(&mut d.audio.device, name.clone(), name);
+                    }
+                });
+            ui.end_row();
             ui.label("能量门限");
             ui.add(egui::Slider::new(&mut d.audio.energy_threshold, 0.001..=0.1).logarithmic(true));
             ui.end_row();
@@ -843,7 +858,7 @@ impl CaptionApp {
             ui.end_row();
         });
         ui.add_space(6.0);
-        ui.label(RichText::new("能量门限越小越灵敏（背景音乐大时调高）；逐字上屏间隔 0 = 关闭中间结果；长句无停顿会在“单段最长”处硬切。").size(12.0).color(Color32::GRAY));
+        ui.label(RichText::new("视频/会议声音走哪个设备就采哪个：选“跟随默认”时系统默认播放设备切换后会自动跟过去；声音走 HDMI 显示器或蓝牙耳机而默认设备不是它时，在这里指定。能量门限越小越灵敏；逐字上屏间隔 0 = 关闭中间结果。").size(12.0).color(Color32::GRAY));
     }
 
     fn tab_ui(&mut self, ui: &mut egui::Ui) {

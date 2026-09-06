@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 fn main() -> anyhow::Result<()> {
     let (tx, rx) = bounded::<Vec<f32>>(64);
     let (ui_tx, ui_rx) = bounded(64);
-    let _h = spawn_capture(tx, ui_tx);
+    let _h = spawn_capture(tx, ui_tx, String::new());
     let mut samples = Vec::new();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(5) {
