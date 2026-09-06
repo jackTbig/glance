@@ -27,8 +27,7 @@ openai_model = "deepseek-chat"
 timeout_secs = 15         # claude 首句冷启动约 10 s，故不能设太短
 rotate_every = 60         # claude 会话每 60 句轮换（提前 5 句预热备用会话，无感）
 max_backlog = 10
-partial_every_ms = 1200   # 说话过程中每 1.2 s 把半句翻成灰色临时中文（0 关闭）；定稿后整句重翻
-partial_min_new_words = 3 # 半句至少多 3 个词才再送翻
+partial_translate = true  # 说话过程中每来一条新的中间英文就翻成灰色临时中文（一次只飞一个）；定稿后整句重翻
 context_sentences = 2     # 翻译时带最近 2 句英中对照当上下文
 
 [ui]

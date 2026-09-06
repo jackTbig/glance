@@ -43,6 +43,18 @@ fn common_prefix_chars(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
+/// 中间英文只增不缩：新快照是延长就用新的；改写了但更长也用新的（从分歧点重打）；
+/// 变短或等长的改写一律不采纳（识别器回退的字不该在屏上消失），定稿到了再整句替换。
+fn merge_partial_en(shown: &str, new: &str) -> Option<String> {
+    if new == shown {
+        return None;
+    }
+    if new.starts_with(shown) || new.chars().count() > shown.chars().count() {
+        return Some(new.to_string());
+    }
+    None
+}
+
 impl Line {
     /// 换中文：公共前缀部分保留已显示进度，只有变动的尾部重新打字
     fn set_zh(&mut self, text: String, provisional: bool) {
@@ -52,13 +64,24 @@ impl Line {
         self.zh_provisional = provisional;
     }
 
-    /// 临时中文：定稿流开始后不再采纳。返回是否采纳
+    /// 中文"只增不缩"：新文本比已显示的短（流式还没追上、临时译文被截短、识别抖动只吐一个词）就不动，
+    /// 只在更长或等长改写时才替换（公共前缀不重打）。定稿完成的整句不走这里，直接 set_zh。返回是否替换
+    fn set_zh_if_grown(&mut self, text: String, provisional: bool) -> bool {
+        if let Some(old) = self.zh.as_deref() {
+            if old == text || text.chars().count() < old.chars().count() {
+                return false;
+            }
+        }
+        self.set_zh(text, provisional);
+        true
+    }
+
+    /// 临时中文：定稿流开始后不再采纳；采纳时也遵守"只有变化才动"。返回是否采纳
     fn apply_provisional(&mut self, text: String) -> bool {
         if self.zh_final_started {
             return false;
         }
-        self.set_zh(text, true);
-        true
+        self.set_zh_if_grown(text, true)
     }
 
     fn advance(&mut self, dt: f32, cps: f32) -> bool {
@@ -256,10 +279,13 @@ impl CaptionApp {
                     }
                     match self.lines.back_mut() {
                         Some(l) if l.partial => {
-                            // 新快照通常是旧快照的延长；已显示的部分不回退
-                            l.en_shown = l.en_shown.min(text.chars().count() as f32);
-                            l.en = text;
+                            // 只增不缩：变短的快照不采纳；改写从分歧点重打，未变部分不动
                             l.id = id;
+                            if let Some(new) = merge_partial_en(&l.en, &text) {
+                                let keep = common_prefix_chars(&l.en, &new) as f32;
+                                l.en_shown = l.en_shown.min(keep);
+                                l.en = new;
+                            }
                         }
                         _ => {
                             self.lines.push_back(Line { id, at: Local::now(), en: text, zh: None, partial: true, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false });
@@ -270,9 +296,10 @@ impl CaptionApp {
                     self.last_activity = Instant::now();
                     match self.lines.back_mut() {
                         Some(l) if l.partial => {
+                            // 定稿整句替换，但与中间结果相同的开头不重打
                             l.id = id;
                             l.at = at;
-                            l.en_shown = l.en_shown.min(text.chars().count() as f32);
+                            l.en_shown = l.en_shown.min(common_prefix_chars(&l.en, &text) as f32);
                             l.en = text.clone();
                             l.partial = false;
                         }
@@ -290,7 +317,8 @@ impl CaptionApp {
                 UiMsg::ChinesePartial { id, text } => {
                     if let Some(l) = self.lines.iter_mut().find(|l| l.id == id) {
                         l.zh_final_started = true;
-                        l.set_zh(text, false);
+                        // 定稿流刚开始只有一两个字：在追上已显示的灰色中文之前不动它，分歧或延长时才替换
+                        l.set_zh_if_grown(text, false);
                     }
                 }
                 UiMsg::Chinese { id, text } => {
@@ -786,10 +814,10 @@ impl CaptionApp {
             ui.label("单句超时");
             ui.add(egui::Slider::new(&mut d.translate.timeout_secs, 3..=60).suffix(" 秒"));
             ui.end_row();
-            ui.label("临时翻译间隔");
+            ui.label("临时翻译");
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut d.translate.partial_every_ms).range(0..=5000).speed(50).suffix(" ms"));
-                ui.label(RichText::new("说话过程中每隔这么久把半句翻成灰色临时中文，0 关闭；定稿后整句重翻").small().weak());
+                ui.checkbox(&mut d.translate.partial_translate, "说话过程中先出灰色临时中文");
+                ui.label(RichText::new("英文每更新一次翻一次，一次只飞一个；定稿后整句重翻").small().weak());
             });
             ui.end_row();
             ui.label("上下文句数");
@@ -1492,6 +1520,45 @@ mod tests {
         l.zh_final_started = true;
         assert!(!l.apply_provisional("晚到的半句".into()));
         assert_eq!(l.zh.as_deref(), Some("定稿"));
+    }
+
+    #[test]
+    fn zh_only_moves_when_grown_or_diverged() {
+        let mut l = line(4);
+        assert!(l.apply_provisional("我们接着聊臭名昭著的B.I.G.".into()));
+        l.zh_shown = 8.0;
+        // 定稿流刚开始，比已显示的短：不动，哪怕开头已经不同
+        assert!(!l.set_zh_if_grown("我们".into(), false));
+        assert!(!l.set_zh_if_grown("我们接着聊大O".into(), false));
+        assert_eq!(l.zh.as_deref(), Some("我们接着聊臭名昭著的B.I.G."));
+        assert!(l.zh_provisional, "追上之前仍是灰色临时中文");
+        // 追过已显示长度且有分歧：从分歧点重打，前面 5 字保留
+        assert!(l.set_zh_if_grown("我们接着聊大O表示法，也就是复杂度".into(), false));
+        assert_eq!(l.zh.as_deref(), Some("我们接着聊大O表示法，也就是复杂度"));
+        assert_eq!(l.zh_shown, 5.0);
+        assert!(!l.zh_provisional);
+        // 延长：直接接着打
+        assert!(l.set_zh_if_grown("我们接着聊大O表示法，也就是复杂度的写法".into(), false));
+        assert_eq!(l.zh_shown, 5.0);
+        // 定稿完成的整句比显示的短也照样替换（走 set_zh）
+        l.set_zh("我们接着聊大O。".into(), false);
+        assert_eq!(l.zh.as_deref(), Some("我们接着聊大O。"));
+        // 临时译文被模型截短、或识别抖动只吐一个词译成一个字：不采纳
+        let mut p = line(5);
+        assert!(p.apply_provisional("并确认GPU服务器的预算".into()));
+        assert!(!p.apply_provisional("并确认".into()));
+        assert!(!p.apply_provisional("这".into()));
+        assert_eq!(p.zh.as_deref(), Some("并确认GPU服务器的预算"));
+    }
+
+    #[test]
+    fn partial_english_never_shrinks() {
+        assert_eq!(merge_partial_en("Please like and subscribe.", "Please"), None, "缩短不采纳");
+        assert_eq!(merge_partial_en("Please", "Please"), None, "没变不动");
+        assert_eq!(merge_partial_en("Please", "Please like").as_deref(), Some("Please like"), "延长采纳");
+        assert_eq!(merge_partial_en("notorious B.I.G.", "notorious B-I-G-O notation").as_deref(), Some("notorious B-I-G-O notation"), "更长的改写采纳");
+        assert_eq!(merge_partial_en("Many, many approaches", "Many approaches"), None, "更短的改写不采纳");
+        assert_eq!(merge_partial_en("abc", "xyz"), None, "等长改写不采纳");
     }
 
     #[test]

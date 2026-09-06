@@ -18,8 +18,7 @@ fn base_cfg() -> TranslatorConfig {
         rotate_every: 100,
         max_backlog: 10,
         command_override: vec!["python".into(), "tests/fake_claude.py".into()],
-        partial_every: Duration::from_millis(300),
-        partial_min_new_words: 3,
+        partial_translate: true,
         context_sentences: 2,
     }
 }
@@ -163,17 +162,13 @@ fn next_provisional(rx: &crossbeam_channel::Receiver<UiMsg>) -> (u64, String) {
     }
 }
 
-/// 收临时译文直到出现以 want 结尾的一条，返回它和之前收到的全部临时译文（流式增量前面会有若干截断的）
+/// 收临时译文直到出现以 want 结尾的一条，返回它和之前收到的全部临时译文（临时翻译不流式，正常情况下之前应为空）
 fn provisional_until(rx: &crossbeam_channel::Receiver<UiMsg>, want: &str) -> (u64, String, Vec<String>) {
     let t0 = Instant::now();
     let mut seen = Vec::new();
     loop {
         let (id, t) = next_provisional(rx);
         if t.ends_with(want) {
-            // 线程在流式增量之后还会把整句再发一次（内容相同），一并吃掉
-            if let Ok(UiMsg::ChineseProvisional { text, .. }) = rx.recv_timeout(Duration::from_millis(500)) {
-                assert_eq!(text, t, "紧随其后的应是同内容的定稿临时译文");
-            }
             return (id, t, seen);
         }
         assert!(t0.elapsed() < Duration::from_secs(15), "没等到 {want:?}，最后一条 {t:?}");
@@ -211,35 +206,54 @@ fn provisional_thread_translates_half_sentence_with_note_and_context() {
     let ctx = new_context();
     push_context(&ctx, "Earlier sentence.", "前一句。", 2);
     let _h = spawn_partial_translator(base_cfg(), cfg_rx, rx, ui_tx, ctx);
-    tx.send((7, "so when".into())).unwrap();
-    std::thread::sleep(Duration::from_millis(400));
-    assert!(ui_rx.try_recv().is_err(), "不足 3 词不该翻");
     tx.send((7, "so when you have".into())).unwrap();
-    let (id, t, _) = provisional_until(&ui_rx, "zh=so when you have");
+    let (id, t, earlier) = provisional_until(&ui_rx, "zh=so when you have");
     assert_eq!(id, 7);
-    assert!(t.contains(" ctx=1 ") && t.contains(" prov=1 "), "应带前文与半句标记：{t}");
+    assert!(earlier.is_empty(), "临时翻译不流式上屏，只该有一条：{earlier:?}");
+    assert!(t.contains(" ctx=1 ") && t.contains(" prov=1 ") && t.contains(" prev=0 "), "应带前文与半句标记、首次没有已译文本：{t}");
 }
 
 #[test]
-fn provisional_thread_rate_limits_and_takes_newest() {
+fn provisional_thread_translates_on_change_and_continues_previous() {
     let (tx, rx) = bounded(4);
     let (ui_tx, ui_rx) = bounded(256);
     let (_cfg_tx, cfg_rx) = bounded(4);
-    let mut cfg = base_cfg();
-    cfg.partial_every = Duration::from_millis(2000);
-    let _h = spawn_partial_translator(cfg, cfg_rx, rx, ui_tx, new_context());
+    let _h = spawn_partial_translator(base_cfg(), cfg_rx, rx, ui_tx, new_context());
     tx.send((1, "a b c".into())).unwrap();
-    let _ = provisional_until(&ui_rx, "zh=a b c");
-    // 间隔内连发两条：都不该翻；间隔过后只翻最新一条
-    tx.send((1, "a b c d e f".into())).unwrap();
-    tx.send((1, "a b c d e f g h i".into())).unwrap();
-    std::thread::sleep(Duration::from_millis(800));
-    assert!(ui_rx.try_recv().is_err(), "2 s 内不该再翻");
-    std::thread::sleep(Duration::from_millis(1500));
-    tx.send((1, "a b c d e f g h i j".into())).unwrap();
-    let (_, full, earlier) = provisional_until(&ui_rx, "zh=a b c d e f g h i j");
-    // 之前收到的全是这一次翻译的流式前缀：说明只翻了一次、翻的是最新快照，旧快照作废
-    assert!(earlier.iter().all(|t| full.starts_with(t.as_str())), "旧快照应作废：{earlier:?}");
+    let (_, t1, _) = provisional_until(&ui_rx, "zh=a b c");
+    assert!(t1.contains(" prev=0 "), "首次没有已译文本：{t1}");
+    // 同一快照重复到来：不翻
+    tx.send((1, "a b c".into())).unwrap();
+    tx.send((1, "a b c ".into())).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(ui_rx.try_recv().is_err(), "英文没变不该再翻");
+    // 英文一变就翻，且带上此前译出的临时中文让模型续写
+    tx.send((1, "a b c d".into())).unwrap();
+    let (_, t2, earlier) = provisional_until(&ui_rx, "zh=a b c d");
+    assert!(earlier.is_empty(), "{earlier:?}");
+    assert!(t2.contains(" prev=1 "), "第二次应带此前已译文本：{t2}");
+}
+
+#[test]
+fn provisional_thread_takes_newest_while_busy() {
+    // 线程忙着翻第一条时连发三条：翻完后只翻最新那条
+    let (tx, rx) = bounded(4);
+    let (ui_tx, ui_rx) = bounded(256);
+    let (_cfg_tx, cfg_rx) = bounded(4);
+    let _h = spawn_partial_translator(base_cfg(), cfg_rx, rx, ui_tx, new_context());
+    tx.send((1, "one two three four five six seven eight nine ten".into())).unwrap();
+    // 让线程先把第一条取走并进入翻译（取走是瞬间的，翻译要几百毫秒）
+    std::thread::sleep(Duration::from_millis(100));
+    tx.send((1, "x".into())).unwrap();
+    tx.send((1, "x y".into())).unwrap();
+    tx.send((1, "x y z".into())).unwrap();
+    let (_, first, _) = provisional_until(&ui_rx, "zh=one two three four five six seven eight nine ten");
+    assert!(first.contains(" prev=0 "));
+    let (_, second, earlier) = provisional_until(&ui_rx, "zh=x y z");
+    assert!(earlier.is_empty(), "中间两条应作废：{earlier:?}");
+    assert!(second.contains(" prev=1 "));
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(ui_rx.try_recv().is_err(), "没有更多翻译");
 }
 
 #[test]
@@ -250,11 +264,11 @@ fn provisional_thread_resets_counter_on_new_utterance() {
     let _h = spawn_partial_translator(base_cfg(), cfg_rx, rx, ui_tx, new_context());
     tx.send((1, "one two three four five six".into())).unwrap();
     let _ = provisional_until(&ui_rx, "zh=one two three four five six");
-    std::thread::sleep(Duration::from_millis(400));
-    // 新话轮只有 3 个词：按"首次"规则应立即翻，而不是要求比上一话轮多 3 词
+    // 新话轮：此前译出的临时中文清零，不带到下一句
     tx.send((2, "new one here".into())).unwrap();
-    let (id, _, _) = provisional_until(&ui_rx, "zh=new one here");
+    let (id, t, _) = provisional_until(&ui_rx, "zh=new one here");
     assert_eq!(id, 2);
+    assert!(t.contains(" prev=0 "), "新话轮不该带上一话轮的已译文本：{t}");
 }
 
 #[test]
@@ -263,7 +277,7 @@ fn provisional_thread_is_idle_when_disabled_or_codex() {
     let (ui_tx, ui_rx) = bounded(256);
     let (cfg_tx, cfg_rx) = bounded(4);
     let mut cfg = base_cfg();
-    cfg.partial_every = Duration::ZERO;
+    cfg.partial_translate = false;
     let _h = spawn_partial_translator(cfg, cfg_rx, rx, ui_tx, new_context());
     tx.send((1, "a b c d".into())).unwrap();
     std::thread::sleep(Duration::from_millis(600));

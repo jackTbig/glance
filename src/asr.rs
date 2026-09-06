@@ -22,7 +22,6 @@ pub struct Asr {
     /// 中间识别用的第二套模型（更小更快）
     partial: Option<(WhisperContext, WhisperState)>,
     cfg: AsrConfig,
-    prev_text: String,
 }
 
 /// whisper.cpp 要求输入 ≥ 1 s，不足补零到 1.2 s
@@ -36,25 +35,8 @@ fn audio_ctx_for(samples: usize, min_ctx: i32) -> i32 {
     ctx.clamp(min_ctx.clamp(64, 1500), 1500)
 }
 
-/// 上一段文本作提示词时，whisper 会模仿它的风格：没标点、全小写的提示会让后面的段也丢标点。
-/// 这里只留末尾约 200 字符，首字母大写、末尾补句号，把风格拉回"有标点的书面句"。
-fn prompt_tail(text: &str) -> String {
-    let tail: String = text.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-    let tail = tail.trim();
-    if tail.is_empty() {
-        return String::new();
-    }
-    let mut s = String::with_capacity(tail.len() + 1);
-    let mut chars = tail.chars();
-    if let Some(first) = chars.next() {
-        s.extend(first.to_uppercase());
-        s.push_str(chars.as_str());
-    }
-    if !s.ends_with(['.', '!', '?']) {
-        s.push('.');
-    }
-    s
-}
+// 不再把上一句当 initial_prompt 喂给 whisper（2026-09-06 日志坐实：提示词让 small.en 的中间识别 6 s 音频只吐一个
+// "Please"、让 turbo 定稿吞掉开头几个词甚至 8 s 音频只出 "So."）。两个模型都裸跑，标点与大小写靠模型自身。
 
 impl Asr {
     pub fn load(cfg: &AsrConfig) -> anyhow::Result<Self> {
@@ -86,37 +68,32 @@ impl Asr {
             }
             None => None,
         };
-        let mut asr = Self { _ctx: ctx, state, partial, cfg: cfg.clone(), prev_text: String::new() };
+        let mut asr = Self { _ctx: ctx, state, partial, cfg: cfg.clone() };
         // 预热：首次推理要编译 Vulkan shader、分配显存，实测比稳态慢 5 s 以上，提前在加载阶段付掉
         let t0 = std::time::Instant::now();
         let _ = asr.transcribe(&vec![0.0f32; MIN_SAMPLES])?;
         let _ = asr.transcribe_partial(&vec![0.0f32; MIN_SAMPLES]);
-        asr.prev_text.clear();
         tracing::info!("asr 预热完成 {}ms", t0.elapsed().as_millis());
         Ok(asr)
     }
 
-    /// 最终段识别：结果进入下一段的提示词
+    /// 最终段识别（主模型）
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
-        let text = run_with(&mut self.state, &self.cfg, &self.prev_text, pcm)?;
-        if text.chars().any(|c| c.is_alphanumeric()) {
-            self.prev_text = prompt_tail(&text);
-        }
-        Ok(text)
+        run_with(&mut self.state, &self.cfg, pcm)
     }
 
-    /// 中间快照识别：不更新提示词。
+    /// 中间快照识别（小模型，没有就用主模型）。
     /// 注意不能挂 whisper 的 abort 回调：Vulkan 后端只要设了回调解码就返回 -6（实测，与返回值无关）；
     /// 中间识别本身只要 0.3–0.5 s，最终段最多多等这么久，不值得中止。
     pub fn transcribe_partial(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
         match self.partial.as_mut() {
-            Some((_, st)) => run_with(st, &self.cfg, &self.prev_text, pcm),
-            None => run_with(&mut self.state, &self.cfg, &self.prev_text, pcm),
+            Some((_, st)) => run_with(st, &self.cfg, pcm),
+            None => run_with(&mut self.state, &self.cfg, pcm),
         }
     }
 }
 
-fn run_with(state: &mut WhisperState, cfg: &AsrConfig, prev_text: &str, pcm: &[f32]) -> anyhow::Result<String> {
+fn run_with(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32]) -> anyhow::Result<String> {
     {
         let mut audio = pcm.to_vec();
         if audio.len() < MIN_SAMPLES {
@@ -134,9 +111,6 @@ fn run_with(state: &mut WhisperState, cfg: &AsrConfig, prev_text: &str, pcm: &[f
         params.set_suppress_blank(true);
         params.set_n_threads(cfg.threads);
         params.set_audio_ctx(audio_ctx_for(audio.len(), cfg.min_audio_ctx));
-        if !prev_text.is_empty() {
-            params.set_initial_prompt(prev_text);
-        }
 
         state.full(params, &audio).map_err(|e| anyhow::anyhow!("full: {e:?}"))?;
         let n = state.full_n_segments();
@@ -257,7 +231,7 @@ pub fn spawn_asr(
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_ctx_for, prompt_tail};
+    use super::audio_ctx_for;
 
     #[test]
     fn id_alloc_shares_id_between_partials_and_final() {
@@ -278,12 +252,4 @@ mod tests {
         assert_eq!(audio_ctx_for(16000 * 2, 256), 256, "下限可配");
     }
 
-    #[test]
-    fn prompt_tail_restores_sentence_style() {
-        assert_eq!(prompt_tail("good morning everyone"), "Good morning everyone.");
-        assert_eq!(prompt_tail("Already fine!"), "Already fine!");
-        assert_eq!(prompt_tail("   "), "");
-        let long = "a".repeat(300);
-        assert_eq!(prompt_tail(&long).chars().count(), 201, "200 字符 + 句号");
-    }
 }

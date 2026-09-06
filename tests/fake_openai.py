@@ -19,7 +19,8 @@ class H(BaseHTTPRequestHandler):
         text = content.split("请翻译：", 1)[-1].strip()
         n_ctx = content.count("\nEN: ") + (1 if content.startswith("EN: ") else 0)
         prov = 1 if "还没说完的半句" in content else 0
-        full = f"pid={os.getpid()} ctx={n_ctx} prov={prov} zh={text}"
+        prev = 1 if "此前已译出：" in content else 0
+        full = f"pid={os.getpid()} ctx={n_ctx} prov={prov} prev={prev} zh={text}"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()

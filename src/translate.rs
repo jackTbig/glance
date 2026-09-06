@@ -68,9 +68,8 @@ pub struct TranslatorConfig {
     pub max_backlog: usize,
     /// 测试用：整体替换 claude 命令（如 ["python", "tests/fake_claude.py"]）
     pub command_override: Vec<String>,
-    /// 临时翻译最短间隔；0 = 关闭临时翻译
-    pub partial_every: Duration,
-    pub partial_min_new_words: usize,
+    /// 说话过程中每来一条新的中间英文就翻临时中文
+    pub partial_translate: bool,
     pub context_sentences: usize,
 }
 
@@ -89,8 +88,7 @@ impl From<&TranslateCfg> for TranslatorConfig {
             rotate_every: c.rotate_every.max(1),
             max_backlog: c.max_backlog.max(1),
             command_override: Vec::new(),
-            partial_every: Duration::from_millis(c.partial_every_ms),
-            partial_min_new_words: c.partial_min_new_words.max(1),
+            partial_translate: c.partial_translate,
             context_sentences: c.context_sentences,
         }
     }
@@ -99,9 +97,10 @@ impl From<&TranslateCfg> for TranslatorConfig {
 // ---------- 提示词与前文 ----------
 
 pub const PROVISIONAL_NOTE: &str = "下面是还没说完的半句，只译到目前为止的内容，不要补全、不要猜后文。";
+pub const CONTINUE_NOTE: &str = "英文有更新。输出更新后的完整译文：已译部分与英文仍一致的原样保留，不一致的改掉；不要重复已译内容，不要另起一遍。";
 
-/// 三个后端共用的用户消息：可选前文对照 + 可选半句说明 + 请翻译的句子
-pub fn build_user_message(context: &[(String, String)], text: &str, provisional: bool) -> String {
+/// 三个后端共用的用户消息：可选前文对照 + 可选半句说明（含此前已译出的临时中文）+ 请翻译的句子
+pub fn build_user_message(context: &[(String, String)], text: &str, provisional: bool, prev_zh: Option<&str>) -> String {
     let mut m = String::new();
     if !context.is_empty() {
         m.push_str("前文（仅供参考，不要翻译）：\n");
@@ -117,6 +116,13 @@ pub fn build_user_message(context: &[(String, String)], text: &str, provisional:
     if provisional {
         m.push_str(PROVISIONAL_NOTE);
         m.push('\n');
+        if let Some(prev) = prev_zh.map(str::trim).filter(|p| !p.is_empty()) {
+            m.push_str("此前已译出：");
+            m.push_str(prev);
+            m.push('\n');
+            m.push_str(CONTINUE_NOTE);
+            m.push('\n');
+        }
     }
     m.push_str("请翻译：");
     m.push_str(text);
@@ -125,14 +131,6 @@ pub fn build_user_message(context: &[(String, String)], text: &str, provisional:
 
 pub fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
-}
-
-/// 临时翻译发送条件：首次要够 min_new 个词；之后距上次发出 ≥ every 且比上次多 ≥ min_new 个词
-pub fn should_send(now: Instant, last_sent_at: Option<Instant>, last_sent_words: usize, words: usize, every: Duration, min_new: usize) -> bool {
-    match last_sent_at {
-        None => words >= min_new,
-        Some(t) => now.duration_since(t) >= every && words >= last_sent_words + min_new,
-    }
 }
 
 /// 最近几句英中对照，定稿线程写、两个翻译线程读
@@ -547,7 +545,7 @@ pub fn spawn_translator(
                             },
                         };
                     }
-                    let msg = build_user_message(&snapshot_context(&context), &en, false);
+                    let msg = build_user_message(&snapshot_context(&context), &en, false, None);
                     let t0 = Instant::now();
                     let ui2 = ui.clone();
                     let mut on_delta = |acc: &str| {
@@ -572,8 +570,9 @@ pub fn spawn_translator(
         .expect("spawn translator")
 }
 
-/// 临时翻译线程：只收中间英文，保留最新一条，按 `partial_every` / `partial_min_new_words` 规则送翻，
-/// 用自己的后端实例（claude = 第二个常驻会话），结果发 ChineseProvisional。失败只打 WARN，不进状态红点。
+/// 临时翻译线程：只收中间英文，保留最新一条；英文一变就翻（同一时刻只有一个在飞，翻完再看最新的），
+/// 提示词带上本话轮此前译出的临时中文让模型续写而不是重新措辞。用自己的后端实例（claude = 第二个常驻会话），
+/// 每次调用完成后整段发 ChineseProvisional（不流式上屏，避免显示先缩短再长回来）。失败只打 WARN，不进状态红点。
 pub fn spawn_partial_translator(
     initial: TranslatorConfig,
     cfg_rx: Receiver<TranslatorConfig>,
@@ -587,8 +586,9 @@ pub fn spawn_partial_translator(
             let mut cfg = initial;
             let mut engine: Option<Engine> = None;
             let mut cur_id: SegId = 0;
-            let mut last_sent_at: Option<Instant> = None;
-            let mut last_words = 0usize;
+            // 本话轮上一次送翻的英文与译出的临时中文
+            let mut last_text = String::new();
+            let mut last_zh = String::new();
             loop {
                 let (mut id, mut text) = match rx.recv() {
                     Ok(x) => x,
@@ -607,16 +607,16 @@ pub fn spawn_partial_translator(
                     cfg = c;
                     engine = None;
                 }
-                if cfg.partial_every.is_zero() || cfg.backend == Backend::Codex {
+                if !cfg.partial_translate || cfg.backend == Backend::Codex {
                     continue;
                 }
                 if id != cur_id {
                     cur_id = id;
-                    last_sent_at = None;
-                    last_words = 0;
+                    last_text.clear();
+                    last_zh.clear();
                 }
-                let words = word_count(&text);
-                if !should_send(Instant::now(), last_sent_at, last_words, words, cfg.partial_every, cfg.partial_min_new_words) {
+                // 英文没变（识别器重复吐同一快照）就不翻
+                if word_count(&text) == 0 || text.trim() == last_text.trim() {
                     continue;
                 }
                 if engine.as_ref().map_or(true, |e| e.needs_rotation(cfg.rotate_every)) {
@@ -628,25 +628,20 @@ pub fn spawn_partial_translator(
                         }
                     };
                 }
-                let msg = build_user_message(&snapshot_context(&context), &text, true);
+                let msg = build_user_message(&snapshot_context(&context), &text, true, Some(&last_zh));
                 let t0 = Instant::now();
-                let ui2 = ui.clone();
-                let mut on_delta = |acc: &str| {
-                    let _ = ui2.send(UiMsg::ChineseProvisional { id, text: acc.to_string() });
-                };
-                match engine.as_mut().unwrap().translate(&cfg, &msg, &mut on_delta) {
+                match engine.as_mut().unwrap().translate(&cfg, &msg, &mut |_| {}) {
                     Ok(zh) => {
-                        tracing::info!("translate partial[{}] {}ms words={words} {zh:?}", cfg.backend.as_str(), t0.elapsed().as_millis());
-                        let _ = ui.send(UiMsg::ChineseProvisional { id, text: zh });
+                        tracing::info!("translate partial[{}] {}ms words={} {zh:?}", cfg.backend.as_str(), t0.elapsed().as_millis(), word_count(&text));
+                        let _ = ui.send(UiMsg::ChineseProvisional { id, text: zh.clone() });
+                        last_zh = zh;
                     }
                     Err(e) => {
                         tracing::warn!("临时翻译失败：{e}");
                         engine = None;
                     }
                 }
-                // 记返回时刻：翻译耗时长于间隔时也不会连发
-                last_sent_at = Some(Instant::now());
-                last_words = words;
+                last_text = text;
             }
         })
         .expect("spawn partial translator")
@@ -710,14 +705,14 @@ mod tests {
 
     #[test]
     fn user_message_without_context_is_just_the_sentence() {
-        let m = build_user_message(&[], "Hello there.", false);
+        let m = build_user_message(&[], "Hello there.", false, None);
         assert_eq!(m, "请翻译：Hello there.");
     }
 
     #[test]
     fn user_message_with_context_lists_pairs_then_sentence() {
         let ctx = vec![("We start now.".to_string(), "我们现在开始。".to_string()), ("Second.".to_string(), "第二。".to_string())];
-        let m = build_user_message(&ctx, "Third.", false);
+        let m = build_user_message(&ctx, "Third.", false, None);
         assert_eq!(
             m,
             "前文（仅供参考，不要翻译）：\nEN: We start now.\nZH: 我们现在开始。\nEN: Second.\nZH: 第二。\n\n请翻译：Third."
@@ -726,20 +721,21 @@ mod tests {
 
     #[test]
     fn provisional_message_carries_half_sentence_note() {
-        let m = build_user_message(&[], "So when you have", true);
+        let m = build_user_message(&[], "So when you have", true, None);
         assert_eq!(m, "下面是还没说完的半句，只译到目前为止的内容，不要补全、不要猜后文。\n请翻译：So when you have");
+        let m = build_user_message(&[], "So when you have", true, Some("   "));
+        assert!(!m.contains("此前已译出"), "空白的已译文本不算");
     }
 
     #[test]
-    fn should_send_rules() {
-        let every = Duration::from_millis(1200);
-        let t0 = Instant::now();
-        assert!(!should_send(t0, None, 0, 2, every, 3), "首次不足 3 词不发");
-        assert!(should_send(t0, None, 0, 3, every, 3), "首次满 3 词就发");
-        let sent = Some(t0);
-        assert!(!should_send(t0 + Duration::from_millis(500), sent, 3, 9, every, 3), "间隔不足不发");
-        assert!(!should_send(t0 + Duration::from_millis(1300), sent, 3, 5, every, 3), "新词不足不发");
-        assert!(should_send(t0 + Duration::from_millis(1300), sent, 3, 6, every, 3), "间隔够且多 3 词才发");
+    fn provisional_message_asks_to_continue_previous_translation() {
+        let m = build_user_message(&[], "So when you have a nested loop", true, Some("所以当你有"));
+        assert_eq!(
+            m,
+            "下面是还没说完的半句，只译到目前为止的内容，不要补全、不要猜后文。\n此前已译出：所以当你有\n英文有更新。输出更新后的完整译文：已译部分与英文仍一致的原样保留，不一致的改掉；不要重复已译内容，不要另起一遍。\n请翻译：So when you have a nested loop"
+        );
+        let m = build_user_message(&[], "x", false, Some("不该出现"));
+        assert!(!m.contains("此前已译出"), "定稿翻译不带续写提示");
     }
 
     #[test]

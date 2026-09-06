@@ -95,3 +95,12 @@
 ## 六、涉及文件
 
 `src/messages.rs`（新消息）、`src/asr.rs`（话轮 id、中间结果送翻译）、`src/translate.rs`（提示词、前文队列、`spawn_partial_translator`、`should_send`）、`src/ui.rs`（消息处理、样式、公共前缀、设置页）、`src/config.rs`（三个配置项）、`src/main.rs`（接线）、`config.example.toml`、`tests/translator.rs`、`tests/fake_openai.py`、`CLAUDE.md`。
+
+## 七、试用后的修订（2026-09-06 晚，Jack 对齐）
+
+1. **触发方式**：去掉 1.2 s 定时与"多 3 个词"门槛。每来一条新的中间英文、内容与上次翻过的不同就翻；同一时刻只有一个在飞，飞完取最新一条。配置项改为开关 `translate.partial_translate`（默认开）。
+2. **中文续写**：临时翻译的提示词带上本话轮此前译出的临时中文，要求"已译部分与英文仍一致的原样保留，不一致的改掉；不要重复、不要另起一遍"（`CONTINUE_NOTE`）。临时翻译不再流式上屏，每次调用完成后整段发。
+3. **屏上文字只增不缩**（英文与中文同规则）：
+   - 中间英文：延长或更长的改写才采纳（改写从分歧点重打）；变短或等长改写不采纳；定稿整句替换但相同开头不重打（`ui::merge_partial_en`）。
+   - 中文：临时译文与定稿流式增量都只在更长或等长改写时才动（`Line::set_zh_if_grown`）；定稿完成的整句允许变短。
+4. **识别去掉 initial_prompt**：日志坐实提示词让 small.en 中间识别 6 s 音频只吐一个词、让 turbo 定稿吞掉开头几个词，是"英文出来又消失"的根源。两个模型裸跑。
