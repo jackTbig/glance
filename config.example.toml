@@ -1,10 +1,10 @@
 [audio]
 energy_threshold = 0.01   # RMS 门限，越小越灵敏
 silence_ms = 400          # 静音多久算一句结束
-min_segment_ms = 600     # 短于此丢弃
-max_segment_ms = 8000     # 长于此就在最近的词间隙切开（不硬切，余下音频接着当下一段）
-partial_every_ms = 400
-device = ""              # 采集哪个播放设备（友好名，设置窗可选）；空 = 跟随系统默认，默认设备切换自动跟随    # 逐字上屏：说话中每隔这么久识别一次中间结果（每次约 0.3–0.5 s），0 关闭
+min_segment_ms = 300     # 说话 0.3 s 就发第一条中间识别
+max_segment_ms = 6000    # 长于此就在最近的词间隙切开（不硬切，余下音频接着当下一段）
+partial_every_ms = 300   # 说话过程中每 0.3 s 发一次中间识别（0 = 关闭逐字上屏）
+device = ""              # 采集哪个播放设备（友好名，设置窗可选）；空 = 跟随系统默认，默认设备切换自动跟随
 
 [asr]
 model_path = 'D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin'
@@ -40,7 +40,7 @@ width = 1100
 height = 120              # 最小高度；实际随内容在 [height, max_height] 内伸缩（下边缘固定向上长）
 max_height = 480
 lines = 2                 # 同时显示最近几段（悬停按钮 行+ / 行- 可调）
-typewriter_cps = 60.0     # 打字机效果，每秒字符数；0 = 整句直出
+typewriter_cps = 0.0      # 打字机效果，每秒字符数；0 = 整句直出（默认，跟语音最紧）
 auto_mini_secs = 20       # 多少秒没语音就缩成待机迷你条，0 = 不自动（悬停按钮"收起"/托盘菜单可手动）
 auto_restore = true       # 有新语音时自动展开
 hotkey_clickable = "Ctrl+Alt+C"

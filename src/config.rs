@@ -26,7 +26,8 @@ pub struct AudioCfg {
 }
 impl Default for AudioCfg {
     fn default() -> Self {
-        Self { energy_threshold: 0.01, silence_ms: 400, min_segment_ms: 600, max_segment_ms: 8000, partial_every_ms: 400, device: String::new() }
+        // 2026-09-06 Jack 试用后定下：0.3 s 就出首条中间结果、每 0.3 s 刷新、6 s 起在词间隙软切（不硬切）
+        Self { energy_threshold: 0.01, silence_ms: 400, min_segment_ms: 300, max_segment_ms: 6000, partial_every_ms: 300, device: String::new() }
     }
 }
 
@@ -207,7 +208,7 @@ impl Default for UiCfg {
             height: 120,
             max_height: 480,
             lines: 2,
-            typewriter_cps: 60.0,
+            typewriter_cps: 0.0,
             hotkey_clickable: "Ctrl+Alt+C".into(),
             hotkey_passthrough: "Ctrl+Alt+P".into(),
             auto_mini_secs: 20,
@@ -303,7 +304,7 @@ mod tests {
     fn partial_file_fills_defaults() {
         let cfg: Config = toml::from_str("[ui]\nfont_size = 30.0\n").unwrap();
         assert_eq!(cfg.ui.font_size, 30.0);
-        assert_eq!(cfg.audio.max_segment_ms, 8000);
+        assert_eq!(cfg.audio.max_segment_ms, 6000);
     }
 
     #[test]
