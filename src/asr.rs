@@ -154,13 +154,45 @@ fn has_words(t: &str) -> bool {
     t.chars().any(|c| c.is_alphanumeric())
 }
 
-/// 识别线程：rx_seg 收切句消息；ui 收英文（中间/最终）；tx_tr 送翻译队列。
+/// 话轮 id：第一个中间结果时分配，同话轮的中间结果与定稿共用；作废不复用
+#[derive(Default)]
+pub(crate) struct IdAlloc {
+    next: SegId,
+    cur: Option<SegId>,
+}
+
+impl IdAlloc {
+    fn alloc(&mut self) -> SegId {
+        self.next += 1;
+        self.next
+    }
+    pub(crate) fn partial_id(&mut self) -> SegId {
+        match self.cur {
+            Some(i) => i,
+            None => {
+                let i = self.alloc();
+                self.cur = Some(i);
+                i
+            }
+        }
+    }
+    pub(crate) fn final_id(&mut self) -> SegId {
+        self.cur.take().unwrap_or_else(|| self.alloc())
+    }
+    /// 定稿为空（噪声）：当前话轮作废
+    pub(crate) fn discard(&mut self) {
+        self.cur = None;
+    }
+}
+
+/// 识别线程：rx_seg 收切句消息；ui 收英文（中间/最终）；tx_tr 送定稿翻译队列；tx_partial 送临时翻译（满了就丢）。
 /// 队列里同时有 Final 与 Partial 时只处理 Final（Partial 作废）；只有 Partial 时取最新的一份。
 pub fn spawn_asr(
     cfg: AsrConfig,
     rx_seg: Receiver<SegMsg>,
     ui: Sender<UiMsg>,
     tx_tr: Sender<(SegId, String)>,
+    tx_partial: Sender<(SegId, String)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("asr".into())
@@ -175,7 +207,7 @@ pub fn spawn_asr(
                 }
             };
             let _ = ui.send(UiMsg::Status { stage: Stage::Asr, state: StageState::Ok });
-            let mut next_id: SegId = 1;
+            let mut ids = IdAlloc::default();
             while let Ok(first) = rx_seg.recv() {
                 let mut batch = vec![first];
                 while let Ok(m) = rx_seg.try_recv() {
@@ -189,7 +221,10 @@ pub fn spawn_asr(
                     match asr.transcribe_partial(&pcm) {
                         Ok(text) if has_words(&text) => {
                             tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
-                            let _ = ui.send(UiMsg::EnglishPartial { id: 0, text });
+                            let id = ids.partial_id();
+                            let _ = ui.send(UiMsg::EnglishPartial { id, text: text.clone() });
+                            // 满了就丢：临时翻译线程只要最新一条
+                            let _ = tx_partial.try_send((id, text));
                         }
                         Ok(_) => {}
                         Err(e) => tracing::info!("asr partial 放弃 {}ms：{e}", t0.elapsed().as_millis()),
@@ -202,15 +237,15 @@ pub fn spawn_asr(
                     match asr.transcribe(&seg) {
                         Ok(text) if has_words(&text) => {
                             tracing::info!("asr {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
-                            let id = next_id;
-                            next_id += 1;
+                            let id = ids.final_id();
                             let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
                             // 满了由翻译线程按积压规则处理；这里不阻塞
                             let _ = tx_tr.try_send((id, text));
                         }
                         Ok(_) => {
-                            // 这句识别为空（多半是噪声）：把可能挂着的中间结果清掉
+                            // 这句识别为空（多半是噪声）：把可能挂着的中间结果清掉，话轮作废
                             let _ = ui.send(UiMsg::EnglishPartial { id: 0, text: String::new() });
+                            ids.discard();
                         }
                         Err(e) => tracing::warn!("识别失败，跳过：{e}"),
                     }
@@ -223,6 +258,17 @@ pub fn spawn_asr(
 #[cfg(test)]
 mod tests {
     use super::{audio_ctx_for, prompt_tail};
+
+    #[test]
+    fn id_alloc_shares_id_between_partials_and_final() {
+        let mut a = super::IdAlloc::default();
+        assert_eq!(a.partial_id(), 1);
+        assert_eq!(a.partial_id(), 1, "同一话轮的中间结果共用 id");
+        assert_eq!(a.final_id(), 1, "定稿沿用");
+        assert_eq!(a.partial_id(), 2, "下一话轮新 id");
+        a.discard();
+        assert_eq!(a.final_id(), 3, "作废的 id 不复用；没有中间结果直接定稿也能分配");
+    }
 
     #[test]
     fn audio_ctx_scales_with_length_and_clamps() {

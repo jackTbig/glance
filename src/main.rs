@@ -4,8 +4,9 @@ use crossbeam_channel::bounded;
 use live_caption::asr::{spawn_asr, AsrConfig};
 use live_caption::audio::capture::spawn_capture;
 use live_caption::config::Config;
+use live_caption::messages::SegId;
 use live_caption::segmenter::{spawn_segmenter, SegMsg, SegmenterConfig};
-use live_caption::translate::{spawn_translator, TranslatorConfig};
+use live_caption::translate::{new_context, spawn_partial_translator, spawn_translator, TranslatorConfig};
 use live_caption::ui::CaptionApp;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -46,6 +47,9 @@ fn main() -> anyhow::Result<()> {
     let (tx_tr, rx_tr) = bounded(64);
     let (tx_ui, rx_ui) = bounded(1024);
     let (tx_cfg, rx_cfg) = bounded::<TranslatorConfig>(4);
+    let (tx_partial, rx_partial) = bounded::<(SegId, String)>(4);
+    let (tx_cfg2, rx_cfg2) = bounded::<TranslatorConfig>(4);
+    let context = new_context();
     let paused = Arc::new(AtomicBool::new(false));
 
     spawn_capture(tx_audio, tx_ui.clone(), cfg.audio.device.clone());
@@ -76,8 +80,10 @@ fn main() -> anyhow::Result<()> {
         rx_seg,
         tx_ui.clone(),
         tx_tr,
+        tx_partial,
     );
-    spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone(), live_caption::translate::new_context());
+    spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone(), context.clone());
+    spawn_partial_translator(TranslatorConfig::from(&cfg.translate), rx_cfg2, rx_partial, tx_ui.clone(), context);
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("live-caption")
