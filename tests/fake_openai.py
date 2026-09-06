@@ -15,8 +15,11 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(n) or b"{}")
-        text = body["messages"][-1]["content"]
-        full = f"pid={os.getpid()} zh={text}"
+        content = body["messages"][-1]["content"]
+        text = content.split("请翻译：", 1)[-1].strip()
+        n_ctx = content.count("\nEN: ") + (1 if content.startswith("EN: ") else 0)
+        prov = 1 if "还没说完的半句" in content else 0
+        full = f"pid={os.getpid()} ctx={n_ctx} prov={prov} zh={text}"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
