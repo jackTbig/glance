@@ -1,12 +1,12 @@
 # End-to-end check: start app -> play the English fixture twice -> screenshot -> wait -> dump log + transcript -> stop app
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\e2e_check.ps1 [screenshot.png]
 # (ASCII only: Windows PowerShell 5.1 reads BOM-less UTF-8 scripts as ANSI)
-param([string]$Shot = "")
+param([string]$Shot = "", [string]$Wav = "tests\fixtures\en-10s.wav", [int]$Plays = 2)
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 if (-not (Test-Path ".\config.toml")) { Copy-Item ".\config.example.toml" ".\config.toml" }
 $exe = "D:\DevCache\lc-target\release\live-caption.exe"
-$wav = Join-Path $root "tests\fixtures\en-10s.wav"
+$wav = Join-Path $root $Wav
 
 # DPI aware, otherwise CopyFromScreen only grabs the top-left part of a scaled display
 Add-Type -TypeDefinition @"
@@ -24,7 +24,7 @@ Write-Host "app pid=$($p.Id), warming up model + claude session for 20s"
 Start-Sleep -Seconds 20
 
 $player = New-Object Media.SoundPlayer $wav
-for ($i = 1; $i -le 2; $i++) {
+for ($i = 1; $i -le $Plays; $i++) {
     Write-Host "play #$i"
     $player.PlaySync()
     Start-Sleep -Seconds 2
@@ -43,7 +43,7 @@ Write-Host "waiting 15s for asr + translate to drain"
 Start-Sleep -Seconds 15
 
 Write-Host "===== log lines (asr/translate/warn/error), this run only"
-$since = (Get-Date).AddMinutes(-2).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm")
+$since = (Get-Date).AddMinutes(-4).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm")
 Get-ChildItem ".\logs" -Filter "live-caption.*" | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object {
     Get-Content $_.FullName -Encoding utf8 | Select-String -Pattern "asr |translate|WARN|ERROR" | ForEach-Object { $_.Line } | Where-Object { $_ -ge $since }
 }

@@ -155,10 +155,24 @@ impl PartialWindow {
 /// 接缝去重：切点贴帧后下一窗可能把已定尾部的一两个词再解一遍，把 `new` 开头与 `committed` 结尾重复的词（≤4 个）去掉。
 /// 比较时忽略大小写与标点。
 fn strip_overlap(committed: &str, new: &str) -> String {
+    strip_overlap_max(committed, new, 4)
+}
+
+/// 跨段去重：上一段定稿没有以句末标点结尾（多半是超长句在词间隙软切出来的），下一段开头与它结尾重复的 1–2 个词去掉
+/// （软切点两侧各认了一遍同一个词："…must be" + "be completed…"）。上一段以 . ! ? 结尾就是真句尾，不碰。
+fn dedupe_across_segments(prev_final: &str, text: String) -> String {
+    let prev = prev_final.trim_end();
+    if prev.is_empty() || prev.ends_with(['.', '!', '?']) {
+        return text;
+    }
+    strip_overlap_max(prev, &text, 2)
+}
+
+fn strip_overlap_max(committed: &str, new: &str, max_words: usize) -> String {
     let norm = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
     let old_words: Vec<&str> = committed.split_whitespace().collect();
     let new_words: Vec<&str> = new.split_whitespace().collect();
-    let max = old_words.len().min(new_words.len()).min(4);
+    let max = old_words.len().min(new_words.len()).min(max_words);
     let mut drop = 0;
     for k in (1..=max).rev() {
         let tail = &old_words[old_words.len() - k..];
@@ -347,6 +361,7 @@ pub fn spawn_asr(
             let _ = ui.send(UiMsg::Status { stage: Stage::Asr, state: StageState::Ok });
             let mut ids = IdAlloc::default();
             let mut win = PartialWindow::default();
+            let mut prev_final = String::new();
             while let Ok(first) = rx_seg.recv() {
                 let mut batch = vec![first];
                 while let Ok(m) = rx_seg.try_recv() {
@@ -375,8 +390,15 @@ pub fn spawn_asr(
                     let at = Local::now();
                     let t0 = std::time::Instant::now();
                     match asr.transcribe(&seg) {
-                        Ok(text) if has_words(&text) => {
-                            tracing::info!("asr {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
+                        Ok(raw) if has_words(&raw) => {
+                            tracing::info!("asr {}ms audio={:.1}s text={raw:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
+                            let text = dedupe_across_segments(&prev_final, raw);
+                            prev_final = text.clone();
+                            if !has_words(&text) {
+                                // 整段都是上一段软切点的重复：作废
+                                let _ = ui.send(UiMsg::EnglishPartial { id, text: String::new() });
+                                continue;
+                            }
                             let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
                             // 满了由翻译线程按积压规则处理；这里不阻塞
                             let _ = tx_tr.try_send((id, text));
@@ -440,6 +462,20 @@ mod tests {
         assert_eq!(strip_overlap("quarterly roadmap,", "discuss the migration"), "discuss the migration", "没有重叠不动");
         assert_eq!(strip_overlap("", "hello"), "hello");
         assert_eq!(strip_overlap("a b c d e", "b c d e f"), "f", "最多 4 词");
+    }
+
+    #[test]
+    fn dedupe_across_segments_only_after_soft_cut() {
+        use super::dedupe_across_segments;
+        // 上一段没有句末标点 = 软切：去掉下一段开头重复的词
+        assert_eq!(dedupe_across_segments("the security training is mandatory and must be", "be completed by the end of next week.".into()), "completed by the end of next week.");
+        assert_eq!(dedupe_across_segments("we have real utilization numbers from the", "from the first batch.".into()), "first batch.");
+        // 上一段以句末标点结尾 = 真句尾：不动，哪怕开头词相同
+        assert_eq!(dedupe_across_segments("You can trust me.", "Me too.".into()), "Me too.");
+        // 没有上一段：不动
+        assert_eq!(dedupe_across_segments("", "Hello.".into()), "Hello.");
+        // 最多去 2 个词
+        assert_eq!(dedupe_across_segments("a b c d", "b c d e".into()), "b c d e", "重叠 3 词超出上限，不认为是软切重复");
     }
 
     #[test]
