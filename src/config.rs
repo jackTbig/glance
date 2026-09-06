@@ -202,6 +202,8 @@ pub struct UiCfg {
     pub auto_mini_secs: u32,
     /// 有新语音时自动从迷你条展开
     pub auto_restore: bool,
+    /// 每行块给英文、中文各预留几行高度（1 = 一行；2 = 长句换行也不顶版面，短句下面留白）
+    pub reserve_rows: u32,
 }
 impl Default for UiCfg {
     fn default() -> Self {
@@ -220,6 +222,7 @@ impl Default for UiCfg {
             hotkey_passthrough: "Ctrl+Alt+P".into(),
             auto_mini_secs: 20,
             auto_restore: true,
+            reserve_rows: 1,
         }
     }
 }

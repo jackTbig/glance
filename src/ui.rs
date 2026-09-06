@@ -952,6 +952,12 @@ impl CaptionApp {
             ui.label("同时显示段数");
             ui.add(egui::Slider::new(&mut d.ui.lines, 1..=8));
             ui.end_row();
+            ui.label("每段预留行高");
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut d.ui.reserve_rows, 1..=3).suffix(" 行"));
+                ui.label(RichText::new("英文、中文各预留几行；2 = 长句换行也不顶版面，短句下面留白").small().weak());
+            });
+            ui.end_row();
             ui.label("打字机速度");
             ui.add(egui::Slider::new(&mut d.ui.typewriter_cps, 0.0..=300.0).fixed_decimals(0).suffix(" 字/秒"));
             ui.end_row();
@@ -1432,8 +1438,9 @@ impl eframe::App for CaptionApp {
                             if seen_final < n_final { 150 } else { 255 }
                         };
                         // 每行块固定预留"英文一行 + 中文一行"的高度：文字后到只填空位，不顶版面（Jack 要求行稳定）
-                        let en_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs * 0.85)));
-                        let zh_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs)));
+                        let rows = self.cfg.ui.reserve_rows.max(1) as f32;
+                        let en_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs * 0.85))) * rows;
+                        let zh_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs))) * rows;
                         let render = |ui: &mut egui::Ui| {
                             let en_text = head(&l.en, l.en_shown);
                             let en_color = if l.partial {
