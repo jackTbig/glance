@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         tx_ui.clone(),
         tx_tr,
     );
-    spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone());
+    spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone(), live_caption::translate::new_context());
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("live-caption")

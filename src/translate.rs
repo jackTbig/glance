@@ -477,6 +477,7 @@ pub fn spawn_translator(
     cfg_rx: Receiver<TranslatorConfig>,
     rx: Receiver<(SegId, String)>,
     ui: Sender<UiMsg>,
+    context: Context,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("translator".into())
@@ -546,14 +547,16 @@ pub fn spawn_translator(
                             },
                         };
                     }
+                    let msg = build_user_message(&snapshot_context(&context), &en, false);
                     let t0 = Instant::now();
                     let ui2 = ui.clone();
                     let mut on_delta = |acc: &str| {
                         let _ = ui2.send(UiMsg::ChinesePartial { id, text: acc.to_string() });
                     };
-                    match engine.as_mut().unwrap().translate(&cfg, &en, &mut on_delta) {
+                    match engine.as_mut().unwrap().translate(&cfg, &msg, &mut on_delta) {
                         Ok(zh) => {
                             tracing::info!("translate[{}] {}ms {zh:?}", cfg.backend.as_str(), t0.elapsed().as_millis());
+                            push_context(&context, &en, &zh, cfg.context_sentences);
                             let _ = ui.send(UiMsg::Chinese { id, text: zh });
                         }
                         Err(e) => {
@@ -567,6 +570,86 @@ pub fn spawn_translator(
             }
         })
         .expect("spawn translator")
+}
+
+/// 临时翻译线程：只收中间英文，保留最新一条，按 `partial_every` / `partial_min_new_words` 规则送翻，
+/// 用自己的后端实例（claude = 第二个常驻会话），结果发 ChineseProvisional。失败只打 WARN，不进状态红点。
+pub fn spawn_partial_translator(
+    initial: TranslatorConfig,
+    cfg_rx: Receiver<TranslatorConfig>,
+    rx: Receiver<(SegId, String)>,
+    ui: Sender<UiMsg>,
+    context: Context,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("translator-partial".into())
+        .spawn(move || {
+            let mut cfg = initial;
+            let mut engine: Option<Engine> = None;
+            let mut cur_id: SegId = 0;
+            let mut last_sent_at: Option<Instant> = None;
+            let mut last_words = 0usize;
+            loop {
+                let (mut id, mut text) = match rx.recv() {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                // 只留最新一条
+                while let Ok((i, t)) = rx.try_recv() {
+                    id = i;
+                    text = t;
+                }
+                let mut newest = None;
+                while let Ok(c) = cfg_rx.try_recv() {
+                    newest = Some(c);
+                }
+                if let Some(c) = newest {
+                    cfg = c;
+                    engine = None;
+                }
+                if cfg.partial_every.is_zero() || cfg.backend == Backend::Codex {
+                    continue;
+                }
+                if id != cur_id {
+                    cur_id = id;
+                    last_sent_at = None;
+                    last_words = 0;
+                }
+                let words = word_count(&text);
+                if !should_send(Instant::now(), last_sent_at, last_words, words, cfg.partial_every, cfg.partial_min_new_words) {
+                    continue;
+                }
+                if engine.as_ref().map_or(true, |e| e.needs_rotation(cfg.rotate_every)) {
+                    engine = match Engine::new(&cfg) {
+                        Ok(e) => Some(e),
+                        Err(e) => {
+                            tracing::warn!("临时翻译引擎启动失败：{e}");
+                            continue;
+                        }
+                    };
+                }
+                let msg = build_user_message(&snapshot_context(&context), &text, true);
+                let t0 = Instant::now();
+                let ui2 = ui.clone();
+                let mut on_delta = |acc: &str| {
+                    let _ = ui2.send(UiMsg::ChineseProvisional { id, text: acc.to_string() });
+                };
+                match engine.as_mut().unwrap().translate(&cfg, &msg, &mut on_delta) {
+                    Ok(zh) => {
+                        tracing::info!("translate partial[{}] {}ms words={words} {zh:?}", cfg.backend.as_str(), t0.elapsed().as_millis());
+                        let _ = ui.send(UiMsg::ChineseProvisional { id, text: zh });
+                    }
+                    Err(e) => {
+                        tracing::warn!("临时翻译失败：{e}");
+                        engine = None;
+                    }
+                }
+                // 记返回时刻：翻译耗时长于间隔时也不会连发
+                last_sent_at = Some(Instant::now());
+                last_words = words;
+            }
+        })
+        .expect("spawn partial translator")
 }
 
 #[cfg(test)]
