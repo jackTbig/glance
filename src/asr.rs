@@ -128,6 +128,20 @@ fn has_words(t: &str) -> bool {
     t.chars().any(|c| c.is_alphanumeric())
 }
 
+/// 解一份中间快照：有词就发界面与临时翻译（临时翻译通道满了就丢，它只要最新一条）
+fn decode_partial(asr: &mut Asr, pcm: &[f32], id: SegId, ui: &Sender<UiMsg>, tx_partial: &Sender<(SegId, String)>) {
+    let t0 = std::time::Instant::now();
+    match asr.transcribe_partial(pcm) {
+        Ok(text) if has_words(&text) => {
+            tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
+            let _ = ui.send(UiMsg::EnglishPartial { id, text: text.clone() });
+            let _ = tx_partial.try_send((id, text));
+        }
+        Ok(_) => {}
+        Err(e) => tracing::info!("asr partial 放弃 {}ms：{e}", t0.elapsed().as_millis()),
+    }
+}
+
 /// 话轮 id：第一个中间结果时分配，同话轮的中间结果与定稿共用；作废不复用
 #[derive(Default)]
 pub(crate) struct IdAlloc {
@@ -150,12 +164,9 @@ impl IdAlloc {
             }
         }
     }
+    /// 定稿沿用当前话轮的 id（没有中间结果就新分配）；之后的中间结果属于下一话轮
     pub(crate) fn final_id(&mut self) -> SegId {
         self.cur.take().unwrap_or_else(|| self.alloc())
-    }
-    /// 定稿为空（噪声）：当前话轮作废
-    pub(crate) fn discard(&mut self) {
-        self.cur = None;
     }
 }
 
@@ -191,35 +202,34 @@ pub fn spawn_asr(
                 if finals.is_empty() {
                     // 只有中间快照：识别最新的一份
                     let Some(SegMsg::Partial(pcm)) = batch.pop() else { continue };
-                    let t0 = std::time::Instant::now();
-                    match asr.transcribe_partial(&pcm) {
-                        Ok(text) if has_words(&text) => {
-                            tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
-                            let id = ids.partial_id();
-                            let _ = ui.send(UiMsg::EnglishPartial { id, text: text.clone() });
-                            // 满了就丢：临时翻译线程只要最新一条
-                            let _ = tx_partial.try_send((id, text));
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::info!("asr partial 放弃 {}ms：{e}", t0.elapsed().as_millis()),
-                    }
+                    let id = ids.partial_id();
+                    decode_partial(&mut asr, &pcm, id, &ui, &tx_partial);
                     continue;
                 }
-                for seg in finals {
+                // 队尾若是下一句的中间快照（切句器发完 Final 才会再发 Partial），让它插队先解：
+                // 否则新句子的英文要排在上一句约 1 s 的定稿解码后面。id 仍按消息顺序分配。
+                let trailing = match batch.last() {
+                    Some(SegMsg::Partial(p)) => Some(p.clone()),
+                    _ => None,
+                };
+                let final_ids: Vec<SegId> = finals.iter().map(|_| ids.final_id()).collect();
+                if let Some(pcm) = trailing {
+                    let id = ids.partial_id();
+                    decode_partial(&mut asr, &pcm, id, &ui, &tx_partial);
+                }
+                for (seg, id) in finals.into_iter().zip(final_ids) {
                     let at = Local::now();
                     let t0 = std::time::Instant::now();
                     match asr.transcribe(&seg) {
                         Ok(text) if has_words(&text) => {
                             tracing::info!("asr {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
-                            let id = ids.final_id();
                             let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
                             // 满了由翻译线程按积压规则处理；这里不阻塞
                             let _ = tx_tr.try_send((id, text));
                         }
                         Ok(_) => {
-                            // 这句识别为空（多半是噪声）：把可能挂着的中间结果清掉，话轮作废
-                            let _ = ui.send(UiMsg::EnglishPartial { id: 0, text: String::new() });
-                            ids.discard();
+                            // 这句识别为空（多半是噪声）：把这个话轮可能挂着的中间结果清掉
+                            let _ = ui.send(UiMsg::EnglishPartial { id, text: String::new() });
                         }
                         Err(e) => tracing::warn!("识别失败，跳过：{e}"),
                     }
@@ -240,8 +250,13 @@ mod tests {
         assert_eq!(a.partial_id(), 1, "同一话轮的中间结果共用 id");
         assert_eq!(a.final_id(), 1, "定稿沿用");
         assert_eq!(a.partial_id(), 2, "下一话轮新 id");
-        a.discard();
-        assert_eq!(a.final_id(), 3, "作废的 id 不复用；没有中间结果直接定稿也能分配");
+        assert_eq!(a.final_id(), 2);
+        assert_eq!(a.final_id(), 3, "没有中间结果直接定稿也能分配，id 不复用");
+        // 插队场景：批里先有第 4 句的定稿、再有第 5 句的中间结果——按消息顺序分配，定稿先拿 id
+        assert_eq!(a.partial_id(), 4);
+        let final_id = a.final_id();
+        let next_partial = a.partial_id();
+        assert_eq!((final_id, next_partial), (4, 5));
     }
 
     #[test]

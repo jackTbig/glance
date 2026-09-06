@@ -50,6 +50,47 @@ fn merge_partial_en(shown: &str, new: &str) -> Option<String> {
     None
 }
 
+fn new_line(id: SegId, at: DateTime<Local>, en: String, partial: bool) -> Line {
+    Line { id, at, en, zh: None, partial, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false }
+}
+
+/// 中间英文按话轮 id 找行：同 id 的中间行按只增不缩更新；没有就新开一行。
+/// 上一句的定稿可能比这一句的中间结果晚到（识别线程让中间结果插队），所以上一句的中间行要留着等它的定稿。
+/// 空文本 = 该话轮识别为空（噪声），删掉它的中间行。
+fn apply_english_partial(lines: &mut VecDeque<Line>, id: SegId, text: String) {
+    if text.is_empty() {
+        if let Some(pos) = lines.iter().position(|l| l.partial && l.id == id) {
+            lines.remove(pos);
+        }
+        return;
+    }
+    if let Some(l) = lines.iter_mut().find(|l| l.partial && l.id == id) {
+        // 只增不缩：变短的快照不采纳；采纳的快照已显示部分原地替换不重打，只有新增部分打字推进
+        if let Some(new) = merge_partial_en(&l.en, &text) {
+            l.en_shown = l.en_shown.min(new.chars().count() as f32);
+            l.en = new;
+        }
+        return;
+    }
+    lines.push_back(new_line(id, Local::now(), text, true));
+}
+
+/// 定稿英文：同 id 的中间行原地转正（已显示部分原地换字不重打）；没有中间行就插在 id 比它大的行前面，保持话轮顺序。
+fn apply_english_final(lines: &mut VecDeque<Line>, id: SegId, at: DateTime<Local>, text: String) {
+    if let Some(l) = lines.iter_mut().find(|l| l.partial && l.id == id) {
+        l.at = at;
+        l.en_shown = l.en_shown.min(text.chars().count() as f32);
+        l.en = text;
+        l.partial = false;
+        return;
+    }
+    let line = new_line(id, at, text, false);
+    match lines.iter().position(|l| l.id > id) {
+        Some(pos) => lines.insert(pos, line),
+        None => lines.push_back(line),
+    }
+}
+
 impl Line {
     /// 换中文：已显示的部分原地替换、不重打（擦掉重打会打断连续阅读），只有超出已显示长度的新增部分用打字机推进
     fn set_zh(&mut self, text: String, provisional: bool) {
@@ -265,41 +306,11 @@ impl CaptionApp {
             match m {
                 UiMsg::EnglishPartial { id, text } => {
                     self.last_activity = Instant::now();
-                    if text.is_empty() {
-                        if self.lines.back().map_or(false, |l| l.partial) {
-                            self.lines.pop_back();
-                        }
-                        continue;
-                    }
-                    match self.lines.back_mut() {
-                        Some(l) if l.partial => {
-                            // 只增不缩：变短的快照不采纳；采纳的快照已显示部分原地替换不重打，只有新增部分打字推进
-                            l.id = id;
-                            if let Some(new) = merge_partial_en(&l.en, &text) {
-                                l.en_shown = l.en_shown.min(new.chars().count() as f32);
-                                l.en = new;
-                            }
-                        }
-                        _ => {
-                            self.lines.push_back(Line { id, at: Local::now(), en: text, zh: None, partial: true, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false });
-                        }
-                    }
+                    apply_english_partial(&mut self.lines, id, text);
                 }
                 UiMsg::English { id, at, text } => {
                     self.last_activity = Instant::now();
-                    match self.lines.back_mut() {
-                        Some(l) if l.partial => {
-                            // 定稿整句替换：已显示部分原地换字不重打，只有超出的部分打字推进
-                            l.id = id;
-                            l.at = at;
-                            l.en_shown = l.en_shown.min(text.chars().count() as f32);
-                            l.en = text.clone();
-                            l.partial = false;
-                        }
-                        _ => {
-                            self.lines.push_back(Line { id, at, en: text.clone(), zh: None, partial: false, en_shown: 0.0, zh_shown: 0.0, zh_provisional: false, zh_final_started: false });
-                        }
-                    }
+                    apply_english_final(&mut self.lines, id, at, text.clone());
                     self.transcript.push_en(id, at, &text);
                 }
                 UiMsg::ChineseProvisional { id, text } => {
@@ -1534,6 +1545,47 @@ mod tests {
         assert!(!p.apply_provisional("并确认".into()));
         assert!(!p.apply_provisional("这".into()));
         assert_eq!(p.zh.as_deref(), Some("并确认GPU服务器的预算"));
+    }
+
+    fn ens(lines: &VecDeque<Line>) -> Vec<(SegId, bool, String)> {
+        lines.iter().map(|l| (l.id, l.partial, l.en.clone())).collect()
+    }
+
+    #[test]
+    fn english_lines_follow_utterance_ids_even_when_next_partial_arrives_before_final() {
+        let mut lines = VecDeque::new();
+        apply_english_partial(&mut lines, 1, "Good".into());
+        apply_english_partial(&mut lines, 1, "Good morning".into());
+        assert_eq!(ens(&lines), vec![(1, true, "Good morning".into())]);
+        // 下一句的中间结果先到（识别线程插队）：另开一行，上一句的中间行留着
+        apply_english_partial(&mut lines, 2, "Today we".into());
+        assert_eq!(ens(&lines), vec![(1, true, "Good morning".into()), (2, true, "Today we".into())]);
+        // 上一句定稿晚到：原地转正，不影响第二句
+        apply_english_final(&mut lines, 1, Local::now(), "Good morning everyone!".into());
+        assert_eq!(ens(&lines), vec![(1, false, "Good morning everyone!".into()), (2, true, "Today we".into())]);
+        apply_english_partial(&mut lines, 2, "Today we will review".into());
+        apply_english_final(&mut lines, 2, Local::now(), "Today we will review the roadmap.".into());
+        assert_eq!(ens(&lines), vec![(1, false, "Good morning everyone!".into()), (2, false, "Today we will review the roadmap.".into())]);
+    }
+
+    #[test]
+    fn final_without_partial_keeps_utterance_order() {
+        let mut lines = VecDeque::new();
+        apply_english_partial(&mut lines, 5, "next sentence".into());
+        // 第 4 句没有中间结果、定稿晚到：插到第 5 句前面
+        apply_english_final(&mut lines, 4, Local::now(), "Previous sentence.".into());
+        assert_eq!(ens(&lines), vec![(4, false, "Previous sentence.".into()), (5, true, "next sentence".into())]);
+    }
+
+    #[test]
+    fn empty_partial_removes_only_that_utterance() {
+        let mut lines = VecDeque::new();
+        apply_english_partial(&mut lines, 1, "noise maybe".into());
+        apply_english_partial(&mut lines, 2, "real speech".into());
+        apply_english_partial(&mut lines, 1, String::new());
+        assert_eq!(ens(&lines), vec![(2, true, "real speech".into())]);
+        apply_english_partial(&mut lines, 9, String::new());
+        assert_eq!(lines.len(), 1, "没有这个话轮的行就什么都不做");
     }
 
     #[test]
