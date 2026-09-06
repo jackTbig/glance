@@ -2,7 +2,7 @@ use crate::messages::{Stage, StageState, UiMsg};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct SegmenterConfig {
@@ -148,7 +148,7 @@ impl Segmenter {
 pub fn spawn_segmenter(
     cfg: SegmenterConfig,
     rx_audio: Receiver<Vec<f32>>,
-    tx_seg: Sender<SegMsg>,
+    tx_seg: Sender<(SegMsg, Instant)>,
     paused: Arc<AtomicBool>,
     ui: Sender<UiMsg>,
 ) -> std::thread::JoinHandle<()> {
@@ -156,7 +156,8 @@ pub fn spawn_segmenter(
         .name("segmenter".into())
         .spawn(move || {
             let mut seg = Segmenter::new(cfg);
-            let send = |m: SegMsg| -> bool { tx_seg.send(m).is_ok() };
+            // 每份快照/定稿带上产生时刻：识别线程据此打印 lag（排队 + 解码），就是"英文落后语音"的实测值
+            let send = |m: SegMsg| -> bool { tx_seg.send((m, Instant::now())).is_ok() };
             loop {
                 match rx_audio.recv_timeout(Duration::from_millis(100)) {
                     Ok(chunk) => {

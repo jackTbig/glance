@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let (tx_audio, rx_audio) = bounded::<Vec<f32>>(256);
-    let (tx_seg, rx_seg) = bounded::<SegMsg>(16);
+    let (tx_seg, rx_seg) = bounded::<(SegMsg, std::time::Instant)>(16);
     let (tx_tr, rx_tr) = bounded(64);
     let (tx_ui, rx_ui) = bounded(1024);
     let (tx_cfg, rx_cfg) = bounded::<TranslatorConfig>(4);

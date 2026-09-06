@@ -2,6 +2,7 @@ use crate::messages::{SegId, Stage, StageState, UiMsg};
 use crate::segmenter::SegMsg;
 use chrono::Local;
 use crossbeam_channel::{Receiver, Sender};
+use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
 
 #[derive(Debug, Clone)]
@@ -339,12 +340,13 @@ fn collapse_ngram_repeats(text: &str) -> String {
 }
 
 /// 解一份中间快照：有词就发界面与临时翻译（临时翻译通道满了就丢，它只要最新一条）
-fn decode_partial(asr: &mut Asr, pcm: &[f32], id: SegId, win: &mut PartialWindow, ui: &Sender<UiMsg>, tx_partial: &Sender<(SegId, String)>) {
+fn decode_partial(asr: &mut Asr, pcm: &[f32], at: Instant, id: SegId, win: &mut PartialWindow, ui: &Sender<UiMsg>, tx_partial: &Sender<(SegId, String)>) {
     win.reset_for(id);
     let t0 = std::time::Instant::now();
     match asr.transcribe_partial(pcm, win) {
         Ok(text) if has_words(&text) => {
-            tracing::info!("asr partial {}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
+            // lag = 切句器发出这份快照到解码完成（排队 + 解码），即这条英文落后语音的毫秒数（再加最多 100 ms 界面重绘）
+            tracing::info!("asr partial {}ms lag={}ms audio={:.1}s text={text:?}", t0.elapsed().as_millis(), at.elapsed().as_millis(), pcm.len() as f32 / 16000.0);
             let _ = ui.send(UiMsg::EnglishPartial { id, text: text.clone() });
             let _ = tx_partial.try_send((id, text));
         }
@@ -385,7 +387,7 @@ impl IdAlloc {
 /// 队列里同时有 Final 与 Partial 时只处理 Final（Partial 作废）；只有 Partial 时取最新的一份。
 pub fn spawn_asr(
     cfg: AsrConfig,
-    rx_seg: Receiver<SegMsg>,
+    rx_seg: Receiver<(SegMsg, Instant)>,
     ui: Sender<UiMsg>,
     tx_tr: Sender<(SegId, String)>,
     tx_partial: Sender<(SegId, String)>,
@@ -411,31 +413,32 @@ pub fn spawn_asr(
                 while let Ok(m) = rx_seg.try_recv() {
                     batch.push(m);
                 }
-                let finals: Vec<Vec<f32>> = batch.iter().filter_map(|m| if let SegMsg::Final(v) = m { Some(v.clone()) } else { None }).collect();
+                let finals: Vec<(Vec<f32>, Instant)> = batch.iter().filter_map(|(m, at)| if let SegMsg::Final(v) = m { Some((v.clone(), *at)) } else { None }).collect();
                 if finals.is_empty() {
                     // 只有中间快照：识别最新的一份
-                    let Some(SegMsg::Partial(pcm)) = batch.pop() else { continue };
+                    let Some((SegMsg::Partial(pcm), at)) = batch.pop() else { continue };
                     let id = ids.partial_id();
-                    decode_partial(&mut asr, &pcm, id, &mut win, &ui, &tx_partial);
+                    decode_partial(&mut asr, &pcm, at, id, &mut win, &ui, &tx_partial);
                     continue;
                 }
                 // 队尾若是下一句的中间快照（切句器发完 Final 才会再发 Partial），让它插队先解：
                 // 否则新句子的英文要排在上一句约 1 s 的定稿解码后面。id 仍按消息顺序分配。
                 let trailing = match batch.last() {
-                    Some(SegMsg::Partial(p)) => Some(p.clone()),
+                    Some((SegMsg::Partial(p), at)) => Some((p.clone(), *at)),
                     _ => None,
                 };
                 let final_ids: Vec<SegId> = finals.iter().map(|_| ids.final_id()).collect();
-                if let Some(pcm) = trailing {
+                if let Some((pcm, at)) = trailing {
                     let id = ids.partial_id();
-                    decode_partial(&mut asr, &pcm, id, &mut win, &ui, &tx_partial);
+                    decode_partial(&mut asr, &pcm, at, id, &mut win, &ui, &tx_partial);
                 }
-                for (seg, id) in finals.into_iter().zip(final_ids) {
-                    let at = Local::now();
+                for ((seg, at), id) in finals.into_iter().zip(final_ids) {
+                    let at_wall = Local::now();
                     let t0 = std::time::Instant::now();
                     match asr.transcribe(&seg) {
                         Ok(raw) if has_words(&raw) => {
-                            tracing::info!("asr {}ms audio={:.1}s text={raw:?}", t0.elapsed().as_millis(), seg.len() as f32 / 16000.0);
+                            // lag = 切句器发出这段到解码完成（排队 + 解码）
+                            tracing::info!("asr {}ms lag={}ms audio={:.1}s text={raw:?}", t0.elapsed().as_millis(), at.elapsed().as_millis(), seg.len() as f32 / 16000.0);
                             let text = dedupe_across_segments(&prev_final, raw);
                             prev_final = text.clone();
                             if !has_words(&text) {
@@ -443,7 +446,7 @@ pub fn spawn_asr(
                                 let _ = ui.send(UiMsg::EnglishPartial { id, text: String::new() });
                                 continue;
                             }
-                            let _ = ui.send(UiMsg::English { id, at, text: text.clone() });
+                            let _ = ui.send(UiMsg::English { id, at: at_wall, text: text.clone() });
                             // 满了由翻译线程按积压规则处理；这里不阻塞
                             let _ = tx_tr.try_send((id, text));
                         }
