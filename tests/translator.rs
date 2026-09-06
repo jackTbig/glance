@@ -289,3 +289,31 @@ fn provisional_thread_is_idle_when_disabled_or_codex() {
     std::thread::sleep(Duration::from_millis(600));
     assert!(ui_rx.try_recv().is_err(), "codex 后端不翻");
 }
+
+#[test]
+fn final_reuses_last_provisional_when_words_match() {
+    // 临时线程和定稿线程共享同一份 Context：定稿英文只差标点时直接复用临时译文，不再调后端
+    let ctx = new_context();
+    let (ptx, prx) = bounded(4);
+    let (ftx, frx) = bounded(16);
+    let (ui_tx, ui_rx) = bounded(256);
+    let (_c1, c1rx) = bounded(4);
+    let (_c2, c2rx) = bounded(4);
+    let _p = spawn_partial_translator(base_cfg(), c1rx, prx, ui_tx.clone(), ctx.clone());
+    let _f = spawn_translator(base_cfg(), c2rx, frx, ui_tx, ctx);
+    ptx.send((9, "good morning everyone".into())).unwrap();
+    let (_, prov, _) = provisional_until(&ui_rx, "zh=good morning everyone");
+    assert!(prov.contains(" prov=1 "));
+    let t0 = Instant::now();
+    ftx.send((9, "Good morning everyone!".into())).unwrap();
+    let (id, zh) = next_chinese(&ui_rx);
+    assert_eq!(id, 9);
+    assert_eq!(zh, prov, "定稿应原样复用临时译文（假后端回显里带 prov=1 可证明没再调用）");
+    assert!(t0.elapsed() < Duration::from_millis(300), "复用不该有后端往返：{:?}", t0.elapsed());
+    // 英文有实质变化就照常翻
+    ptx.send((10, "see you".into())).unwrap();
+    let _ = provisional_until(&ui_rx, "zh=see you");
+    ftx.send((10, "see you tomorrow".into())).unwrap();
+    let (_, zh2) = next_chinese(&ui_rx);
+    assert!(zh2.contains(" prov=0 ") && zh2.ends_with("zh=see you tomorrow"), "{zh2}");
+}

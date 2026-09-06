@@ -133,23 +133,54 @@ pub fn word_count(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
-/// 最近几句英中对照，定稿线程写、两个翻译线程读
-pub type Context = Arc<Mutex<VecDeque<(String, String)>>>;
+/// 两个翻译线程共享的状态：最近几句英中对照（定稿线程写、两边读）+ 最后一次临时翻译（临时线程写、定稿线程读）
+#[derive(Debug, Default)]
+pub struct Shared {
+    pub recent: VecDeque<(String, String)>,
+    /// (话轮 id, 送翻的英文, 译出的中文)
+    pub last_provisional: Option<(SegId, String, String)>,
+}
+
+pub type Context = Arc<Mutex<Shared>>;
 
 pub fn new_context() -> Context {
-    Arc::new(Mutex::new(VecDeque::new()))
+    Arc::new(Mutex::new(Shared::default()))
 }
 
 pub fn push_context(ctx: &Context, en: &str, zh: &str, max: usize) {
-    let mut q = ctx.lock().unwrap();
-    q.push_back((en.to_string(), zh.to_string()));
-    while q.len() > max {
-        q.pop_front();
+    let mut s = ctx.lock().unwrap();
+    s.recent.push_back((en.to_string(), zh.to_string()));
+    while s.recent.len() > max {
+        s.recent.pop_front();
     }
 }
 
 pub fn snapshot_context(ctx: &Context) -> Vec<(String, String)> {
-    ctx.lock().unwrap().iter().cloned().collect()
+    ctx.lock().unwrap().recent.iter().cloned().collect()
+}
+
+pub fn set_last_provisional(ctx: &Context, id: SegId, en: &str, zh: &str) {
+    ctx.lock().unwrap().last_provisional = Some((id, en.to_string(), zh.to_string()));
+}
+
+/// 两段英文是否同一句话：只比字母数字、忽略大小写与标点（定稿常只差 "everyone" 后面的感叹号）
+pub fn same_words(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.split_whitespace().map(|w| w.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect::<String>()).filter(|w| !w.is_empty()).collect::<Vec<_>>();
+    let (x, y) = (norm(a), norm(b));
+    !x.is_empty() && x == y
+}
+
+/// 定稿英文与这个话轮最后一次临时翻译所用的英文相同，就直接拿临时译文当定稿（省一次调用、省约 0.7 s、灰白切换零跳动）
+pub fn take_provisional_for(ctx: &Context, id: SegId, en: &str) -> Option<String> {
+    let mut s = ctx.lock().unwrap();
+    match &s.last_provisional {
+        Some((pid, pen, zh)) if *pid == id && same_words(pen, en) => {
+            let zh = zh.clone();
+            s.last_provisional = None;
+            Some(zh)
+        }
+        _ => None,
+    }
 }
 
 /// Windows 上 `Command::new("codex")` 不会找 .cmd/.bat；这里按 PATH 补全成完整路径
@@ -525,6 +556,12 @@ pub fn spawn_translator(
                 let _ = ui.send(UiMsg::Status { stage: Stage::Translate, state });
 
                 for (id, en) in backlog {
+                    if let Some(zh) = take_provisional_for(&context, id, &en) {
+                        tracing::info!("translate[{}] 复用临时译文 {zh:?}", cfg.backend.as_str());
+                        push_context(&context, &en, &zh, cfg.context_sentences);
+                        let _ = ui.send(UiMsg::Chinese { id, text: zh });
+                        continue;
+                    }
                     if standby.is_none() {
                         if let Some(Engine::Claude(s)) = &engine {
                             if s.turns + 5 >= cfg.rotate_every {
@@ -634,6 +671,7 @@ pub fn spawn_partial_translator(
                     Ok(zh) => {
                         tracing::info!("translate partial[{}] {}ms words={} {zh:?}", cfg.backend.as_str(), t0.elapsed().as_millis(), word_count(&text));
                         let _ = ui.send(UiMsg::ChineseProvisional { id, text: zh.clone() });
+                        set_last_provisional(&context, id, &text, &zh);
                         last_zh = zh;
                     }
                     Err(e) => {
@@ -753,5 +791,24 @@ mod tests {
         assert_eq!(snapshot_context(&ctx), vec![("b".to_string(), "乙".to_string()), ("c".to_string(), "丙".to_string())]);
         push_context(&ctx, "d", "丁", 0);
         assert!(snapshot_context(&ctx).is_empty(), "上限 0 = 不保留");
+    }
+
+    #[test]
+    fn same_words_ignores_case_and_punctuation_only() {
+        assert!(same_words("Good morning everyone", "Good morning everyone!"));
+        assert!(same_words("good morning, everyone.", "Good morning everyone"));
+        assert!(!same_words("Good morning everyone", "Good morning everyone today"));
+        assert!(!same_words("", ""), "空文本不算相同");
+        assert!(!same_words("data center", "datacenter"), "分词不同不算相同");
+    }
+
+    #[test]
+    fn provisional_is_reused_only_for_same_utterance_and_same_words_once() {
+        let ctx = new_context();
+        set_last_provisional(&ctx, 7, "good morning everyone", "大家早上好");
+        assert_eq!(take_provisional_for(&ctx, 8, "Good morning everyone!"), None, "话轮不同不复用");
+        assert_eq!(take_provisional_for(&ctx, 7, "Good morning everyone today"), None, "英文变了不复用");
+        assert_eq!(take_provisional_for(&ctx, 7, "Good morning everyone!").as_deref(), Some("大家早上好"));
+        assert_eq!(take_provisional_for(&ctx, 7, "Good morning everyone!"), None, "只能用一次");
     }
 }
