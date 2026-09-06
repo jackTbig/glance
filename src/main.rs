@@ -28,9 +28,18 @@ fn init_logging(dir: &str) -> anyhow::Result<tracing_appender::non_blocking::Wor
 }
 
 fn main() -> anyhow::Result<()> {
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
     let _guard = init_logging(&Config::resolve(&cfg.paths.logs_dir).to_string_lossy())?;
     tracing::info!("启动，配置文件 {}", Config::path().display());
+    // 重装到别的目录（"仅我用"↔"所有用户"、换盘）后，配置里写死的模型路径会失效，这里自动改指到 exe 旁的 models 目录
+    match cfg.heal_model_paths() {
+        Ok(fixes) => {
+            for f in &fixes {
+                tracing::warn!("配置自愈：{f}");
+            }
+        }
+        Err(e) => tracing::warn!("配置自愈后写回失败：{e}"),
+    }
 
     let (tx_audio, rx_audio) = bounded::<Vec<f32>>(256);
     let (tx_seg, rx_seg) = bounded::<SegMsg>(16);

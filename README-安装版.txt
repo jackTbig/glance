@@ -22,6 +22,7 @@ live-caption 1.0  桌面悬浮实时字幕（英文语音 → 中文字幕）
 五、文件位置
 - 程序与模型：安装目录（默认 D:\Program Files\live-caption）。
 - 配置、字幕记录、日志：%APPDATA%\live-caption\（config.toml / transcripts\ / logs\）。
+- 重装、升级或改安装目录（含"仅我用"/"所有用户"切换）都不会动这里的配置；模型路径随安装目录变了会在启动时自动修正。
 
 六、依赖
 - 显卡驱动自带的 Vulkan（识别用 GPU）；VC++ 运行库（安装包自动装）；中文字体用系统自带的微软雅黑。

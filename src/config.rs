@@ -79,6 +79,50 @@ impl Default for AsrCfg {
     }
 }
 
+impl AsrCfg {
+    /// 安装目录变了（"仅我用"↔"所有用户"切换、换盘、改目录）之后，配置里写死的模型绝对路径会失效，
+    /// 表现为"加载模型失败 InitError"、识别线程退出、设置窗模型下拉为空。
+    /// 这里把失效路径改指到 `bundled`（exe 旁的 models\）里的同名文件；主模型同名不在就用目录里现有的；
+    /// 小模型不在就清空（回落到主模型）。返回每处改动的说明，空 = 没动。`bundled` 不存在时什么都不做。
+    pub fn heal_paths(&mut self, bundled: &Path) -> Vec<String> {
+        let mut fixes = Vec::new();
+        if !bundled.is_dir() {
+            return fixes;
+        }
+        let same_name_in_bundled = |p: &str| -> Option<PathBuf> {
+            let name = Path::new(p).file_name()?;
+            let cand = bundled.join(name);
+            cand.is_file().then_some(cand)
+        };
+        if !self.model_path.trim().is_empty() && !Path::new(&self.model_path).is_file() {
+            if let Some(new) = same_name_in_bundled(&self.model_path).or_else(|| first_model_in(bundled)) {
+                let new = new.to_string_lossy().into_owned();
+                fixes.push(format!("主模型 {} 不存在，改用 {}", self.model_path, new));
+                self.model_path = new;
+            }
+        }
+        if !self.partial_model_path.trim().is_empty() && !Path::new(&self.partial_model_path).is_file() {
+            match same_name_in_bundled(&self.partial_model_path) {
+                Some(new) => {
+                    let new = new.to_string_lossy().into_owned();
+                    fixes.push(format!("中间识别模型 {} 不存在，改用 {}", self.partial_model_path, new));
+                    self.partial_model_path = new;
+                }
+                None => {
+                    fixes.push(format!("中间识别模型 {} 不存在且安装目录里没有，改为同主模型", self.partial_model_path));
+                    self.partial_model_path.clear();
+                }
+            }
+        }
+        if !Path::new(&self.models_dir).is_dir() {
+            let new = bundled.to_string_lossy().into_owned();
+            fixes.push(format!("模型目录 {} 不存在，改用 {}", self.models_dir, new));
+            self.models_dir = new;
+        }
+        fixes
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TranslateCfg {
@@ -204,6 +248,16 @@ impl Config {
         }
     }
 
+    /// 安装目录变动后修正配置里失效的模型路径（见 `AsrCfg::heal_paths`），有改动就立即写回。
+    /// 在日志初始化之后调用，返回的说明由调用方打日志。
+    pub fn heal_model_paths(&mut self) -> anyhow::Result<Vec<String>> {
+        let fixes = self.asr.heal_paths(&exe_dir().join("models"));
+        if !fixes.is_empty() {
+            self.save()?;
+        }
+        Ok(fixes)
+    }
+
     pub fn load() -> anyhow::Result<Config> {
         let p = Self::path();
         if p.exists() {
@@ -256,5 +310,86 @@ mod tests {
     fn resolve_keeps_absolute_and_anchors_relative() {
         assert_eq!(Config::resolve(r"D:\x\y"), PathBuf::from(r"D:\x\y"));
         assert!(Config::resolve("logs").ends_with("logs"));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lc-heal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    #[test]
+    fn heal_rewrites_dangling_paths_to_bundled_models() {
+        // 场景：先"仅我用"装到 old\，再"所有用户"装到 new\ 并卸掉旧的——配置里的绝对路径全部失效
+        let root = scratch("moved");
+        let old = root.join("old").join("models");
+        let new = root.join("new").join("models");
+        touch(&new.join("ggml-large-v3-turbo-q5_0.bin"));
+        touch(&new.join("ggml-small.en.bin"));
+        let mut asr = AsrCfg {
+            model_path: old.join("ggml-large-v3-turbo-q5_0.bin").to_string_lossy().into_owned(),
+            models_dir: old.to_string_lossy().into_owned(),
+            partial_model_path: old.join("ggml-small.en.bin").to_string_lossy().into_owned(),
+            ..AsrCfg::default()
+        };
+        let fixes = asr.heal_paths(&new);
+        assert_eq!(fixes.len(), 3, "{fixes:?}");
+        assert_eq!(asr.model_path, new.join("ggml-large-v3-turbo-q5_0.bin").to_string_lossy());
+        assert_eq!(asr.models_dir, new.to_string_lossy());
+        assert_eq!(asr.partial_model_path, new.join("ggml-small.en.bin").to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_leaves_valid_paths_alone() {
+        let root = scratch("valid");
+        let dir = root.join("models");
+        let main = dir.join("a.bin");
+        touch(&main);
+        let bundled = root.join("bundled");
+        touch(&bundled.join("a.bin"));
+        let mut asr = AsrCfg { model_path: main.to_string_lossy().into_owned(), models_dir: dir.to_string_lossy().into_owned(), partial_model_path: String::new(), ..AsrCfg::default() };
+        let before = asr.clone();
+        assert!(asr.heal_paths(&bundled).is_empty());
+        assert_eq!(asr, before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_falls_back_to_any_bundled_model_and_clears_missing_partial() {
+        // 精简安装只带 turbo；配置想要的文件名不在，就用目录里有的；小模型没了就清空（回落到主模型）
+        let root = scratch("compact");
+        let bundled = root.join("models");
+        touch(&bundled.join("ggml-large-v3-turbo-q5_0.bin"));
+        let gone = root.join("gone");
+        let mut asr = AsrCfg {
+            model_path: gone.join("ggml-medium.en.bin").to_string_lossy().into_owned(),
+            models_dir: gone.to_string_lossy().into_owned(),
+            partial_model_path: gone.join("ggml-small.en.bin").to_string_lossy().into_owned(),
+            ..AsrCfg::default()
+        };
+        let fixes = asr.heal_paths(&bundled);
+        assert_eq!(fixes.len(), 3, "{fixes:?}");
+        assert_eq!(asr.model_path, bundled.join("ggml-large-v3-turbo-q5_0.bin").to_string_lossy());
+        assert_eq!(asr.models_dir, bundled.to_string_lossy());
+        assert_eq!(asr.partial_model_path, "");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heal_without_bundled_dir_changes_nothing() {
+        // 开发机：exe 旁没有 models\，路径失效也不乱改（留给用户在设置里选）
+        let root = scratch("nobundle");
+        let mut asr = AsrCfg { model_path: root.join("x.bin").to_string_lossy().into_owned(), models_dir: root.join("nope").to_string_lossy().into_owned(), partial_model_path: String::new(), ..AsrCfg::default() };
+        let before = asr.clone();
+        assert!(asr.heal_paths(&root.join("bundled")).is_empty());
+        assert_eq!(asr, before);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
