@@ -38,12 +38,7 @@ struct Line {
     zh_final_started: bool,
 }
 
-/// 两段文本开头相同的字符数
-fn common_prefix_chars(a: &str, b: &str) -> usize {
-    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
-}
-
-/// 中间英文只增不缩：新快照是延长就用新的；改写了但更长也用新的（从分歧点重打）；
+/// 中间英文只增不缩：新快照是延长就用新的；改写了但更长也用新的（已显示部分原地换字，不重打）；
 /// 变短或等长的改写一律不采纳（识别器回退的字不该在屏上消失），定稿到了再整句替换。
 fn merge_partial_en(shown: &str, new: &str) -> Option<String> {
     if new == shown {
@@ -56,10 +51,9 @@ fn merge_partial_en(shown: &str, new: &str) -> Option<String> {
 }
 
 impl Line {
-    /// 换中文：公共前缀部分保留已显示进度，只有变动的尾部重新打字
+    /// 换中文：已显示的部分原地替换、不重打（擦掉重打会打断连续阅读），只有超出已显示长度的新增部分用打字机推进
     fn set_zh(&mut self, text: String, provisional: bool) {
-        let keep = self.zh.as_deref().map_or(0, |old| common_prefix_chars(old, &text)) as f32;
-        self.zh_shown = self.zh_shown.min(keep);
+        self.zh_shown = self.zh_shown.min(text.chars().count() as f32);
         self.zh = Some(text);
         self.zh_provisional = provisional;
     }
@@ -279,11 +273,10 @@ impl CaptionApp {
                     }
                     match self.lines.back_mut() {
                         Some(l) if l.partial => {
-                            // 只增不缩：变短的快照不采纳；改写从分歧点重打，未变部分不动
+                            // 只增不缩：变短的快照不采纳；采纳的快照已显示部分原地替换不重打，只有新增部分打字推进
                             l.id = id;
                             if let Some(new) = merge_partial_en(&l.en, &text) {
-                                let keep = common_prefix_chars(&l.en, &new) as f32;
-                                l.en_shown = l.en_shown.min(keep);
+                                l.en_shown = l.en_shown.min(new.chars().count() as f32);
                                 l.en = new;
                             }
                         }
@@ -296,10 +289,10 @@ impl CaptionApp {
                     self.last_activity = Instant::now();
                     match self.lines.back_mut() {
                         Some(l) if l.partial => {
-                            // 定稿整句替换，但与中间结果相同的开头不重打
+                            // 定稿整句替换：已显示部分原地换字不重打，只有超出的部分打字推进
                             l.id = id;
                             l.at = at;
-                            l.en_shown = l.en_shown.min(common_prefix_chars(&l.en, &text) as f32);
+                            l.en_shown = l.en_shown.min(text.chars().count() as f32);
                             l.en = text.clone();
                             l.partial = false;
                         }
@@ -1492,22 +1485,14 @@ mod tests {
     }
 
     #[test]
-    fn common_prefix_counts_chars() {
-        assert_eq!(common_prefix_chars("你好世界", "你好吗"), 2);
-        assert_eq!(common_prefix_chars("abc", "abc"), 3);
-        assert_eq!(common_prefix_chars("abc", "xyz"), 0);
-        assert_eq!(common_prefix_chars("", "abc"), 0);
-    }
-
-    #[test]
-    fn set_zh_keeps_shown_prefix_and_retypes_tail() {
+    fn set_zh_swaps_shown_part_in_place_and_types_only_the_rest() {
         let mut l = line(1);
         l.set_zh("我们现在开始会议".into(), true);
         l.zh_shown = 6.0;
         l.set_zh("我们现在开始今天的会议".into(), true);
-        assert_eq!(l.zh_shown, 6.0, "公共前缀 6 字保留");
-        l.set_zh("大家好".into(), false);
-        assert_eq!(l.zh_shown, 0.0, "完全不同就从头打");
+        assert_eq!(l.zh_shown, 6.0, "已显示的 6 字不重打，后面接着打");
+        l.set_zh("大家来开始".into(), false);
+        assert_eq!(l.zh_shown, 5.0, "改写了也不擦掉重打：已显示部分原地换字，只截到新长度");
         assert!(!l.zh_provisional);
     }
 
@@ -1532,14 +1517,14 @@ mod tests {
         assert!(!l.set_zh_if_grown("我们接着聊大O".into(), false));
         assert_eq!(l.zh.as_deref(), Some("我们接着聊臭名昭著的B.I.G."));
         assert!(l.zh_provisional, "追上之前仍是灰色临时中文");
-        // 追过已显示长度且有分歧：从分歧点重打，前面 5 字保留
+        // 追过已显示长度且有分歧：已显示的 8 字原地换字不重打，后面接着打
         assert!(l.set_zh_if_grown("我们接着聊大O表示法，也就是复杂度".into(), false));
         assert_eq!(l.zh.as_deref(), Some("我们接着聊大O表示法，也就是复杂度"));
-        assert_eq!(l.zh_shown, 5.0);
+        assert_eq!(l.zh_shown, 8.0);
         assert!(!l.zh_provisional);
         // 延长：直接接着打
         assert!(l.set_zh_if_grown("我们接着聊大O表示法，也就是复杂度的写法".into(), false));
-        assert_eq!(l.zh_shown, 5.0);
+        assert_eq!(l.zh_shown, 8.0);
         // 定稿完成的整句比显示的短也照样替换（走 set_zh）
         l.set_zh("我们接着聊大O。".into(), false);
         assert_eq!(l.zh.as_deref(), Some("我们接着聊大O。"));
