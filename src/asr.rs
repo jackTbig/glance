@@ -105,7 +105,15 @@ impl Asr {
             let text = run_with(state, cfg, window)?;
             return Ok(collapse_repeats(&join_text(&win.committed_text, &strip_overlap(&win.committed_text, &text))));
         }
-        let segs = run_segments(state, cfg, window, true)?;
+        let segs = match run_segments(state, cfg, window, true) {
+            Ok(s) => s,
+            Err(e) => {
+                // 带时间戳的解码在别的显卡上万一不行，退回整窗解码，长句的中间结果不能因此消失
+                tracing::warn!("滑窗带时间戳解码失败，本次整窗重解：{e}");
+                let text = run_with(state, cfg, window)?;
+                return Ok(collapse_repeats(&join_text(&win.committed_text, &strip_overlap(&win.committed_text, &text))));
+            }
+        };
         let limit_cs = (window.len().saturating_sub(PARTIAL_KEEP_SAMPLES) / 160) as i64;
         let (committed, end_cs, rest) = split_committable(&segs, limit_cs);
         if end_cs > 0 {
