@@ -88,7 +88,8 @@ impl Default for AsrCfg {
             .find(|p| p.is_file())
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_window_ms: 5000, partial_model_path }
+        // min_audio_ctx 384（2026-09-06 基准：turbo 5 s 片段 1095→893 ms、2 s 片段 1777→663 ms，文本相同；320 在短片段上不稳定）
+        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 384, partial_window_ms: 5000, partial_model_path }
     }
 }
 
@@ -313,6 +314,10 @@ impl Config {
             self.asr.partial_window_ms = AsrCfg::default().partial_window_ms;
         }
         if self.version < 3 {
+            // 定稿编码窗下限 512 → 384（短段定稿快约 40%，文本相同）：只动还是旧默认值的
+            if self.asr.min_audio_ctx == 512 {
+                self.asr.min_audio_ctx = 384;
+            }
             // 中间识别模型 small.en → base.en（快 3 倍、词命中率相同）：只在旧值是 small.en 且同目录有 base.en 时换
             let p = Path::new(&self.asr.partial_model_path);
             if p.file_name().map_or(false, |n| n == "ggml-small.en.bin") {
@@ -399,10 +404,14 @@ mod tests {
         let mut b: Config = toml::from_str(&format!("version = 2\n[asr]\npartial_model_path = '{}'\n", small)).unwrap();
         assert!(b.migrate());
         assert_eq!(b.asr.partial_model_path, dir.join("ggml-base.en.bin").to_string_lossy());
-        // 用户指定的其他模型不动
-        let mut c: Config = toml::from_str("version = 2\n[asr]\npartial_model_path = 'D:/x/ggml-tiny.en.bin'\n").unwrap();
+        // 用户指定的其他模型不动；旧默认 512 的编码窗下限换成 384，用户改过的值（如 640）不动
+        let mut c: Config = toml::from_str("version = 2\n[asr]\npartial_model_path = 'D:/x/ggml-tiny.en.bin'\nmin_audio_ctx = 512\n").unwrap();
         assert!(c.migrate());
         assert_eq!(c.asr.partial_model_path, "D:/x/ggml-tiny.en.bin");
+        assert_eq!(c.asr.min_audio_ctx, 384);
+        let mut d: Config = toml::from_str("version = 2\n[asr]\nmin_audio_ctx = 640\n").unwrap();
+        assert!(d.migrate());
+        assert_eq!(d.asr.min_audio_ctx, 640);
         let _ = std::fs::remove_dir_all(&root);
     }
 

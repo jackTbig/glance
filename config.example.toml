@@ -12,7 +12,7 @@ models_dir = 'D:\models\whisper'   # 设置界面列出这里的 *.bin（已有 
 language = "en"
 threads = 4
 flash_attn = false        # 本机 Arc 核显实测开了反而慢
-min_audio_ctx = 512       # whisper 编码窗下限（1500 = 30 s 全窗）；越小越快、越容易漏字
+min_audio_ctx = 384       # whisper 编码窗下限（1500 = 30 s 全窗）；越小越快；320 以下短段会陷入幻觉循环，别再低
 partial_window_ms = 5000  # 中间识别只解最近这么长的窗口（前面已定的文字用分段时间戳固定），0 = 每次重解整句
 partial_model_path = 'D:\models\whisper\ggml-small.en.bin'   # 中间识别用的小模型，空 = 同主模型
 
