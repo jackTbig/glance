@@ -1424,29 +1424,48 @@ impl eframe::App for CaptionApp {
                     ui.set_width(ui.available_width());
                     let mut seen_final = 0;
                     for l in self.lines.iter() {
+                        // 正在打的那一行高亮（淡黄底带 + 亮色英文）；定稿行不高亮，最新一句全亮、更早的变暗
                         let dim = if l.partial {
-                            170
+                            255
                         } else {
                             seen_final += 1;
                             if seen_final < n_final { 150 } else { 255 }
                         };
-                        let en_text = head(&l.en, l.en_shown);
-                        let en_rt = RichText::new(en_text).size(fs * 0.85).color(Color32::from_rgba_unmultiplied(200, 210, 230, dim));
-                        ui.add(egui::Label::new(if l.partial { en_rt.italics() } else { en_rt }).wrap());
-                        match &l.zh {
-                            Some(zh) => {
-                                let zh_text = head(zh, l.zh_shown);
-                                let rt = if l.zh_provisional {
-                                    RichText::new(zh_text).size(fs).italics().color(Color32::from_rgba_unmultiplied(215, 220, 230, 170))
-                                } else {
-                                    RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))
-                                };
-                                ui.add(egui::Label::new(rt).wrap());
+                        let render = |ui: &mut egui::Ui| {
+                            let en_text = head(&l.en, l.en_shown);
+                            let en_color = if l.partial {
+                                Color32::from_rgba_unmultiplied(255, 236, 160, 255)
+                            } else {
+                                Color32::from_rgba_unmultiplied(200, 210, 230, dim)
+                            };
+                            ui.add(egui::Label::new(RichText::new(en_text).size(fs * 0.85).color(en_color)).wrap());
+                            match &l.zh {
+                                Some(zh) => {
+                                    let zh_text = head(zh, l.zh_shown);
+                                    let rt = if l.zh_provisional {
+                                        RichText::new(zh_text).size(fs).italics().color(Color32::from_rgba_unmultiplied(240, 240, 240, 225))
+                                    } else {
+                                        RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))
+                                    };
+                                    ui.add(egui::Label::new(rt).wrap());
+                                }
+                                None if !l.partial => {
+                                    ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+                                }
+                                None => {}
                             }
-                            None if !l.partial => {
-                                ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
-                            }
-                            None => {}
+                        };
+                        if l.partial {
+                            egui::Frame::new()
+                                .fill(Color32::from_rgba_unmultiplied(255, 225, 140, 30))
+                                .corner_radius(6.0)
+                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    render(ui);
+                                });
+                        } else {
+                            render(ui);
                         }
                         ui.add_space(6.0);
                     }
