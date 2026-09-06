@@ -81,7 +81,7 @@ impl Asr {
 
     /// 最终段识别（主模型）
     pub fn transcribe(&mut self, pcm: &[f32]) -> anyhow::Result<String> {
-        run_with(&mut self.state, &self.cfg, pcm)
+        run_with(&mut self.state, &self.cfg, pcm, false)
     }
 
     /// 中间快照识别（小模型，没有就用主模型），`pcm` 是这句到目前为止的全部音频。
@@ -97,20 +97,20 @@ impl Asr {
         };
         let window_samples = cfg.partial_window_ms as usize * 16;
         if window_samples == 0 {
-            return run_with(state, cfg, pcm);
+            return run_with(state, cfg, pcm, true);
         }
         let start = win.committed_samples.min(pcm.len());
         let window = &pcm[start..];
         if window.len() <= window_samples {
-            let text = run_with(state, cfg, window)?;
+            let text = run_with(state, cfg, window, true)?;
             return Ok(collapse_repeats(&join_text(&win.committed_text, &strip_overlap(&win.committed_text, &text))));
         }
-        let segs = match run_segments(state, cfg, window, true) {
+        let segs = match run_segments(state, cfg, window, true, true) {
             Ok(s) => s,
             Err(e) => {
                 // 带时间戳的解码在别的显卡上万一不行，退回整窗解码，长句的中间结果不能因此消失
                 tracing::warn!("滑窗带时间戳解码失败，本次整窗重解：{e}");
-                let text = run_with(state, cfg, window)?;
+                let text = run_with(state, cfg, window, true)?;
                 return Ok(collapse_repeats(&join_text(&win.committed_text, &strip_overlap(&win.committed_text, &text))));
             }
         };
@@ -216,21 +216,28 @@ fn split_committable(segs: &[(i64, i64, String)], limit_cs: i64) -> (Vec<String>
     (committed, end, pending)
 }
 
-fn run_with(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32]) -> anyhow::Result<String> {
-    let segs = run_segments(state, cfg, pcm, false)?;
+fn run_with(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32], fast: bool) -> anyhow::Result<String> {
+    let segs = run_segments(state, cfg, pcm, false, fast)?;
     let parts: Vec<String> = segs.into_iter().map(|(_, _, t)| t).collect();
     Ok(collapse_repeats(parts.join(" ").trim()))
 }
 
 /// 跑一次 whisper，返回各分段（起止时间 cs，文字）。`timestamps` 为真时开分段/词级时间戳并按 `max_len` 拆短分段，
 /// 供滑窗提交用；平时关掉（关掉更快，也不改变原有识别结果）。
-fn run_segments(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32], timestamps: bool) -> anyhow::Result<Vec<(i64, i64, String)>> {
+fn run_segments(state: &mut WhisperState, cfg: &AsrConfig, pcm: &[f32], timestamps: bool, fast: bool) -> anyhow::Result<Vec<(i64, i64, String)>> {
     let mut audio = pcm.to_vec();
     if audio.len() < MIN_SAMPLES {
         audio.resize(MIN_SAMPLES, 0.0);
     }
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    if fast {
+        // 中间识别：关掉温度回退（质量阈值不过时 whisper 会升温重解最多 5 次，长句验收里同一段 0.9 s 音频两次都耗 7–8 s
+        // 且最后吐出幻觉），并给 token 上限——耗时有界，0.3 s 后的下一份快照自然会纠正。定稿仍保留回退换质量。
+        params.set_temperature_inc(0.0);
+        // 5 s 窗口的正常内容不到 40 个 token；贪心解码陷入 "the top of the top of…" 循环时 64 个 token 约 1 s 就停
+        params.set_max_tokens(64);
+    }
     params.set_language(Some(&cfg.language));
     params.set_translate(false);
     params.set_no_timestamps(!timestamps);
@@ -291,7 +298,44 @@ fn collapse_repeats(text: &str) -> String {
         last_key = k;
         out.push(cl);
     }
-    out.concat().split_whitespace().collect::<Vec<_>>().join(" ")
+    collapse_ngram_repeats(&out.concat())
+}
+
+/// 贪心解码陷入循环时会吐 "the top of the top of the top of…"（关了温度回退后到 token 上限才停）：
+/// 1–4 个词的片段连续重复 3 次以上就只留一份。真人说话极少把同一 1–4 词片段连说 3 遍，"Many, many"（2 遍）不受影响。
+fn collapse_ngram_repeats(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let key = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let mut folded = false;
+        for n in 1..=4 {
+            if i + n > words.len() {
+                break;
+            }
+            let unit: Vec<String> = words[i..i + n].iter().map(|w| key(w)).collect();
+            if unit.iter().any(|w| w.is_empty()) {
+                continue;
+            }
+            let mut reps = 1;
+            while i + (reps + 1) * n <= words.len() && words[i + reps * n..i + (reps + 1) * n].iter().map(|w| key(w)).collect::<Vec<_>>() == unit {
+                reps += 1;
+            }
+            if reps >= 3 {
+                // 留最后一份：末尾的标点跟着保住
+                out.extend_from_slice(&words[i + (reps - 1) * n..i + reps * n]);
+                i += reps * n;
+                folded = true;
+                break;
+            }
+        }
+        if !folded {
+            out.push(words[i]);
+            i += 1;
+        }
+    }
+    out.join(" ")
 }
 
 /// 解一份中间快照：有词就发界面与临时翻译（临时翻译通道满了就丢，它只要最新一条）
@@ -462,6 +506,18 @@ mod tests {
         assert_eq!(strip_overlap("quarterly roadmap,", "discuss the migration"), "discuss the migration", "没有重叠不动");
         assert_eq!(strip_overlap("", "hello"), "hello");
         assert_eq!(strip_overlap("a b c d e", "b c d e f"), "f", "最多 4 词");
+    }
+
+    #[test]
+    fn collapse_ngram_repeats_folds_decoder_loops_but_not_speech() {
+        use super::{collapse_ngram_repeats, collapse_repeats};
+        assert_eq!(collapse_ngram_repeats("I also want to highlight the top of the top of the top of the top of the"), "I also want to highlight the top of the");
+        assert_eq!(collapse_ngram_repeats("no no no no way"), "no way");
+        assert_eq!(collapse_ngram_repeats("Many, many approaches"), "Many, many approaches", "只重复 2 遍不动");
+        assert_eq!(collapse_ngram_repeats("if n is a thousand, if n is a million"), "if n is a thousand, if n is a million", "不完全相同的片段不动");
+        assert_eq!(collapse_ngram_repeats(""), "");
+        // 整条链路：句级折叠之后再做词级折叠
+        assert_eq!(collapse_repeats("So that's just O of the top of the top of the top of the top."), "So that's just O of the top.", "留最后一份，句号保住");
     }
 
     #[test]
