@@ -75,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             threads: cfg.asr.threads,
             flash_attn: cfg.asr.flash_attn,
             min_audio_ctx: cfg.asr.min_audio_ctx,
+            partial_window_ms: cfg.asr.partial_window_ms,
             partial_model_path: Some(cfg.asr.partial_model_path.clone()).filter(|p| !p.trim().is_empty()),
         },
         rx_seg,

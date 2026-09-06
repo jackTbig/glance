@@ -38,7 +38,7 @@ pub struct Segmenter {
 
 /// 在 `buf[from..to)` 里按帧找能量最低的一帧（词与词之间的间隙），返回该帧末尾作为切点（帧对齐）。
 /// 能量相同取靠后的，尽量让前一段长一点。找不到完整的帧就退回 `to`。
-fn quietest_frame_end(buf: &[f32], frame_len: usize, from: usize, to: usize) -> usize {
+pub(crate) fn quietest_frame_end(buf: &[f32], frame_len: usize, from: usize, to: usize) -> usize {
     let to = to.min(buf.len());
     let mut best: Option<(f32, usize)> = None;
     let mut i = from;

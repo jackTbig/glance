@@ -62,6 +62,8 @@ pub struct AsrCfg {
     pub flash_attn: bool,
     /// audio_ctx 下限（1500 = 30 s 全窗；越小越快、越容易漏字）
     pub min_audio_ctx: i32,
+    /// 中间识别只解最近这么长的窗口（前面已定的文字用分段时间戳固定），0 = 每次重解整句
+    pub partial_window_ms: u32,
     /// 中间识别（逐字上屏）用的小模型，空 = 同主模型
     pub partial_model_path: String,
 }
@@ -76,7 +78,7 @@ impl Default for AsrCfg {
         // 中间识别默认用 small.en（约 0.2 s 一次）；找不到就空着（复用主模型）
         let small = Path::new(&models_dir).join("ggml-small.en.bin");
         let partial_model_path = if small.is_file() { small.to_string_lossy().into_owned() } else { String::new() };
-        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_model_path }
+        Self { model_path, models_dir, language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_window_ms: 5000, partial_model_path }
     }
 }
 

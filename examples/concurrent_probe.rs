@@ -6,7 +6,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
 fn load(model: &str) -> anyhow::Result<Asr> {
-    Asr::load(&AsrConfig { model_path: model.to_string(), language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_model_path: None })
+    Asr::load(&AsrConfig { model_path: model.to_string(), language: "en".into(), threads: 4, flash_attn: false, min_audio_ctx: 512, partial_window_ms: 0, partial_model_path: None })
 }
 
 fn main() -> anyhow::Result<()> {
