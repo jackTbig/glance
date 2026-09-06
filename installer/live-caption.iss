@@ -1,7 +1,7 @@
 ; live-caption 安装包（Inno Setup 7）
 ; 由 scripts/build_installer.sh 编译；本文件带 BOM 的 UTF-8 由构建脚本生成到 build/ 下再喂给 ISCC
 #define AppName "live-caption"
-#define AppVer "1.0.1"
+#define AppVer "1.0.2"
 #define ExeSrc "D:\DevCache\lc-target\release\live-caption.exe"
 #define ModelTurbo "D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin"
 #define ModelSmall "D:\models\whisper\ggml-small.en.bin"
