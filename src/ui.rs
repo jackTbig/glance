@@ -1431,6 +1431,9 @@ impl eframe::App for CaptionApp {
                             seen_final += 1;
                             if seen_final < n_final { 150 } else { 255 }
                         };
+                        // 每行块固定预留"英文一行 + 中文一行"的高度：文字后到只填空位，不顶版面（Jack 要求行稳定）
+                        let en_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs * 0.85)));
+                        let zh_h = ui.fonts_mut(|f| f.row_height(&egui::FontId::proportional(fs)));
                         let render = |ui: &mut egui::Ui| {
                             let en_text = head(&l.en, l.en_shown);
                             let en_color = if l.partial {
@@ -1438,35 +1441,39 @@ impl eframe::App for CaptionApp {
                             } else {
                                 Color32::from_rgba_unmultiplied(200, 210, 230, dim)
                             };
-                            ui.add(egui::Label::new(RichText::new(en_text).size(fs * 0.85).color(en_color)).wrap());
-                            match &l.zh {
-                                Some(zh) => {
-                                    let zh_text = head(zh, l.zh_shown);
-                                    let rt = if l.zh_provisional {
-                                        RichText::new(zh_text).size(fs).italics().color(Color32::from_rgba_unmultiplied(240, 240, 240, 225))
-                                    } else {
-                                        RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))
-                                    };
-                                    ui.add(egui::Label::new(rt).wrap());
+                            ui.vertical(|ui| {
+                                ui.set_min_height(en_h);
+                                ui.add(egui::Label::new(RichText::new(en_text).size(fs * 0.85).color(en_color)).wrap());
+                            });
+                            ui.vertical(|ui| {
+                                ui.set_min_height(zh_h);
+                                match &l.zh {
+                                    Some(zh) => {
+                                        let zh_text = head(zh, l.zh_shown);
+                                        let rt = if l.zh_provisional {
+                                            RichText::new(zh_text).size(fs).italics().color(Color32::from_rgba_unmultiplied(240, 240, 240, 225))
+                                        } else {
+                                            RichText::new(zh_text).size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, dim))
+                                        };
+                                        ui.add(egui::Label::new(rt).wrap());
+                                    }
+                                    None if !l.partial => {
+                                        ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+                                    }
+                                    None => {}
                                 }
-                                None if !l.partial => {
-                                    ui.label(RichText::new("…").size(fs).color(Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
-                                }
-                                None => {}
-                            }
+                            });
                         };
-                        if l.partial {
-                            egui::Frame::new()
-                                .fill(Color32::from_rgba_unmultiplied(255, 225, 140, 30))
-                                .corner_radius(6.0)
-                                .inner_margin(egui::Margin::symmetric(8, 4))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    render(ui);
-                                });
-                        } else {
-                            render(ui);
-                        }
+                        // 定稿行也套同样内边距的透明框：中间行转正时底带消失，块高不变
+                        let fill = if l.partial { Color32::from_rgba_unmultiplied(255, 225, 140, 30) } else { Color32::TRANSPARENT };
+                        egui::Frame::new()
+                            .fill(fill)
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(8, 4))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                render(ui);
+                            });
                         ui.add_space(6.0);
                     }
                 });
