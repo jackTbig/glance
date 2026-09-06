@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// 当前配置格式版本（见 `Config::migrate`）
+pub const CONFIG_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// 配置格式版本：旧文件没有这项（= 0），启动时按 `migrate` 一次性把调优过的默认值补上
+    pub version: u32,
     pub audio: AudioCfg,
     pub asr: AsrCfg,
     pub translate: TranslateCfg,
@@ -271,12 +276,36 @@ impl Config {
         let p = Self::path();
         if p.exists() {
             let s = std::fs::read_to_string(&p)?;
-            Ok(toml::from_str(&s)?)
+            let mut cfg: Config = toml::from_str(&s)?;
+            if cfg.migrate() {
+                cfg.save()?;
+            }
+            Ok(cfg)
         } else {
-            let cfg = Config::default();
+            let mut cfg = Config::default();
+            cfg.version = CONFIG_VERSION;
             cfg.save()?;
             Ok(cfg)
         }
+    }
+
+    /// 旧配置文件一次性升级：2026-09-06 试用定下的切句/显示参数只在版本号落后时补上（用户之后自己改的值不再被动）。
+    /// 返回是否有改动。
+    pub fn migrate(&mut self) -> bool {
+        if self.version >= CONFIG_VERSION {
+            return false;
+        }
+        if self.version < 2 {
+            let d = AudioCfg::default();
+            self.audio.silence_ms = d.silence_ms;
+            self.audio.min_segment_ms = d.min_segment_ms;
+            self.audio.max_segment_ms = d.max_segment_ms;
+            self.audio.partial_every_ms = d.partial_every_ms;
+            self.ui.typewriter_cps = UiCfg::default().typewriter_cps;
+            self.asr.partial_window_ms = AsrCfg::default().partial_window_ms;
+        }
+        self.version = CONFIG_VERSION;
+        true
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -313,6 +342,28 @@ mod tests {
     fn old_model_key_still_reads_into_claude_model() {
         let cfg: Config = toml::from_str("[translate]\nmodel = \"haiku\"\n").unwrap();
         assert_eq!(cfg.translate.claude_model, "haiku");
+    }
+
+    #[test]
+    fn old_config_without_version_gets_tuned_defaults_once() {
+        // 1.0.0/1.0.1 安装版留下的 0.2.0 时代参数
+        let mut cfg: Config = toml::from_str("[audio]\nsilence_ms = 500\nmin_segment_ms = 1000\nmax_segment_ms = 8000\npartial_every_ms = 1500\n[ui]\ntypewriter_cps = 60.0\nfont_size = 30.0\n").unwrap();
+        assert_eq!(cfg.version, 0);
+        assert!(cfg.migrate());
+        assert_eq!((cfg.audio.silence_ms, cfg.audio.min_segment_ms, cfg.audio.max_segment_ms, cfg.audio.partial_every_ms), (400, 300, 6000, 300));
+        assert_eq!(cfg.ui.typewriter_cps, 0.0);
+        assert_eq!(cfg.asr.partial_window_ms, 5000);
+        assert_eq!(cfg.ui.font_size, 30.0, "与本次调优无关的用户设置不动");
+        assert_eq!(cfg.version, CONFIG_VERSION);
+        assert!(!cfg.migrate(), "升级过就不再动");
+        // 已是当前版本的文件，用户自己改的值保持
+        let mut newer: Config = toml::from_str("version = 2\n[audio]\nmin_segment_ms = 800\n").unwrap();
+        assert!(!newer.migrate());
+        assert_eq!(newer.audio.min_segment_ms, 800);
+        // 新生成的默认配置带当前版本号，写回后再读不会触发升级
+        let s = toml::to_string(&Config { version: CONFIG_VERSION, ..Config::default() }).unwrap();
+        let mut back: Config = toml::from_str(&s).unwrap();
+        assert!(!back.migrate());
     }
 
     #[test]
