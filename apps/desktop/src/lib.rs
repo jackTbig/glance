@@ -1,3 +1,9 @@
 //! translate-tool 桌面端
 pub mod config;
+pub mod engine;
+pub mod hotkey;
+pub mod panel;
 pub mod server;
+pub mod tray;
+pub mod ui;
+pub mod watcher;

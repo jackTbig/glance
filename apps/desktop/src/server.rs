@@ -10,7 +10,7 @@
 
 use ai_translate::translator::Item;
 use ai_translate::{Scene, Translator};
-use std::io::Read;
+
 use std::sync::{Arc, Mutex};
 
 pub const EXT_ORIGIN_PREFIX: &str = "chrome-extension://";
@@ -169,11 +169,14 @@ pub fn spawn(
                     let _ = request.respond(json_response(200, &cfg_summary, origin.as_deref()));
                 }
                 ("POST", "/v1/translate") => {
-                    let mut body = String::new();
-                    if request.as_reader().read_to_string(&mut body).is_err() {
+                    // 按字节读再宽松解码：请求体若有不完整的多字节字符，
+                    // 不该整个请求 400，交给 JSON 解析报更具体的错
+                    let mut raw = Vec::new();
+                    if std::io::Read::read_to_end(&mut request.as_reader(), &mut raw).is_err() {
                         let _ = request.respond(json_response(400, &serde_json::json!({ "error": "读取请求体失败" }), origin.as_deref()));
                         continue;
                     }
+                    let body = String::from_utf8_lossy(&raw).into_owned();
                     let parsed: Result<TranslateRequest, _> = serde_json::from_str(&body);
                     let resp = match parsed {
                         Err(e) => json_response(400, &serde_json::json!({ "error": format!("请求格式错误：{e}") }), origin.as_deref()),
