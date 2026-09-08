@@ -42,7 +42,20 @@ const CSS = `
   font-size: inherit;
   line-height: 1.6;
 }
-.${TRANSLATION_CLASS}.tt-failed { border-left-color: rgba(230,110,110,.8); opacity: .85; cursor: pointer; }
+/* 进度与失败提示跟在原文最后一个字后面，行内、极小，尽量不动页面布局 */
+.tt-badge {
+  display: inline-block; vertical-align: middle; margin-left: .35em;
+  line-height: 1; font-size: .85em; font-style: normal; user-select: none;
+}
+.tt-badge.tt-loading {
+  width: .85em; height: .85em; border-radius: 50%;
+  border: 2px solid rgba(80,140,240,.25); border-top-color: rgba(80,140,240,.9);
+  animation: tt-spin .8s linear infinite;
+}
+.tt-badge.tt-error { color: rgba(205,60,60,.95); cursor: pointer; white-space: nowrap; }
+.tt-badge.tt-error:hover { text-decoration: underline; }
+@keyframes tt-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .tt-badge.tt-loading { animation-duration: 2.4s; } }
 /* 原文包一层 display:contents 的壳：结构上存在、布局上等于不存在，
    这样「仅译文」只藏原文而不动页面其它部分（早先按 body 直接子元素隐藏，会把整页连译文一起藏掉） */
 .${ORIGINAL_CLASS} { display: contents; }
@@ -178,29 +191,66 @@ function wrapOriginal(el: HTMLElement) {
   el.appendChild(shell);
 }
 
-function attachTranslation(el: HTMLElement, text: string, failed: boolean, original?: string) {
+const BADGE_CLASS = "tt-badge";
+
+function clearBadge(el: Element) {
+  el.querySelectorAll(`:scope > .${BADGE_CLASS}`).forEach((n) => n.remove());
+}
+
+/** 段落已发出去、还没回来：原文末尾跟一个转圈的小点 */
+function attachPending(el: HTMLElement) {
   el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
   wrapOriginal(el);
-  const d = document.createElement("div");
-  d.className = TRANSLATION_CLASS + (failed ? " tt-failed" : "");
-  if (failed) {
-    d.textContent = `翻译失败：${text}（点这里重试）`;
-    d.title = "点击重试";
-    d.addEventListener("click", async (e) => {
-      e.stopPropagation();
-      d.textContent = "重试中…";
-      try {
-        const src = original ?? el.textContent ?? "";
-        const [r] = await translate("full_page", [{ id: "retry", text: src, is_html: false }]);
-        attachTranslation(el, r.text ?? r.error ?? "", !r.text);
-      } catch (err) {
-        d.textContent = `翻译失败：${err instanceof Error ? err.message : String(err)}（点这里重试）`;
+  clearBadge(el);
+  const b = document.createElement("span");
+  b.className = `${BADGE_CLASS} tt-loading`;
+  b.title = "翻译中…";
+  b.setAttribute("aria-label", "翻译中");
+  el.appendChild(b);
+  el.setAttribute(MARK_ATTR, "1");
+}
+
+/** 失败：原文末尾跟一个可点的小图标，详细原因放在 tooltip 里，别撑大页面 */
+function attachFailed(el: HTMLElement, reason: string, original: string) {
+  el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  wrapOriginal(el);
+  clearBadge(el);
+  const b = document.createElement("span");
+  b.className = `${BADGE_CLASS} tt-error`;
+  b.textContent = "⚠ 重试";
+  b.title = `翻译失败：${reason}
+点击重试`;
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    attachPending(el);
+    try {
+      const [r] = await withTimeout(translate("full_page", [{ id: "retry", text: original, is_html: false }]), ITEM_TIMEOUT_MS);
+      if (r.text !== undefined) {
+        attachTranslation(el, r.text, false, original);
+      } else {
+        attachFailed(el, r.error ?? "未知错误", original);
       }
-    });
-  } else {
-    // 译文可能带行内标签，用 innerHTML 但先去掉脚本类节点
-    d.innerHTML = sanitize(text);
+    } catch (err) {
+      attachFailed(el, err instanceof Error ? err.message : String(err), original);
+    }
+  });
+  el.appendChild(b);
+  el.setAttribute(MARK_ATTR, "1");
+}
+
+function attachTranslation(el: HTMLElement, text: string, failed: boolean, original?: string) {
+  if (failed) {
+    attachFailed(el, text, original ?? el.textContent ?? "");
+    return;
   }
+  el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  wrapOriginal(el);
+  clearBadge(el); // 译文来了，把转圈或失败图标收掉
+  const d = document.createElement("div");
+  d.className = TRANSLATION_CLASS;
+  // 译文可能带行内标签，用 innerHTML 但先去掉脚本类节点
+  d.innerHTML = sanitize(text);
   el.appendChild(d);
   el.setAttribute(MARK_ATTR, "1");
 }
@@ -240,13 +290,48 @@ function setDisplay(mode: DisplayMode) {
   });
 }
 
-/** 每请求多少段、同时发几个请求。桌面端会告诉我们它的批大小 */
-const PAGE_CONCURRENCY = 3;
-let batchSize = 10;
+/** 同时飞几个请求（跟桌面端的并发池对齐）、单段多久算超时 */
+let pageConcurrency = 8;
+const ITEM_TIMEOUT_MS = 60_000;
+
+/** 给 Promise 加超时，免得某一段永远转圈 */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("翻译超时，稍后重试")), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** 翻一段：先挂上转圈占位，回来后换成译文或失败图标 */
+async function translateOneBlock(el: HTMLElement, item: TranslateItem): Promise<boolean> {
+  attachPending(el);
+  try {
+    const [r] = await withTimeout(translate("full_page", [item]), ITEM_TIMEOUT_MS);
+    if (r.text !== undefined) {
+      attachTranslation(el, r.text, false, item.text);
+      return true;
+    }
+    attachTranslation(el, r.error ?? "未知错误", true, item.text);
+    return false;
+  } catch (e) {
+    attachTranslation(el, e instanceof Error ? e.message : String(e), true, item.text);
+    return false;
+  }
+}
 
 /**
- * 整页翻译：按文档顺序分批，**每批回来就立刻上屏**，不等整页翻完。
- * 从最上面的段开始发，所以用户看到的是译文自上而下逐段出现。
+ * 整页翻译：**一段一个请求**，从最上面的段开始发。
+ * 发出去的那一段立刻挂上转圈占位，回来就换成译文；失败或超时挂红色警示图标，点它重试。
+ * 逐段发比打包发多花些 token（每次都带一遍系统提示词），换来的是每段独立可见、独立重试。
  */
 async function translatePage() {
   if (busy) return;
@@ -262,64 +347,43 @@ async function translatePage() {
       return { id: String(i), text: isHtml ? el.innerHTML : (el.textContent ?? ""), is_html: isHtml };
     });
 
-    // 批大小跟桌面端保持一致；拿不到就用默认
     const h = await send({ kind: "health" });
-    if (h.ok && "health" in h && h.health.batch_size > 0) batchSize = h.health.batch_size;
+    if (h.ok && "health" in h && h.health.concurrency > 0) pageConcurrency = h.health.concurrency;
 
-    const chunks: TranslateItem[][] = [];
-    for (let i = 0; i < items.length; i += batchSize) chunks.push(items.slice(i, i + batchSize));
-
+    const total = items.length;
     let finished = 0;
     let failed = 0;
-    let firstError: string | null = null;
-    const total = items.length;
     toast(`翻译中 0/${total}…`, 0);
 
-    // 从上往下取批；同时飞几个，先发的先回的概率大，视觉上就是自上而下逐段出现
+    // 从上往下取，同时飞 pageConcurrency 个
     let next = 0;
     const worker = async () => {
-      while (next < chunks.length) {
-        const chunk = chunks[next++];
-        try {
-          const results = await translate("full_page", chunk);
-          for (const r of results) {
-            const el = blocks[Number(r.id)];
-            if (!el || !el.isConnected) continue;
-            if (r.text !== undefined) {
-              attachTranslation(el, r.text, false);
-            } else {
-              failed++;
-              attachTranslation(el, r.error ?? "未知错误", true, items[Number(r.id)].text);
-            }
-          }
-        } catch (e) {
-          // 整批失败（比如桌面端断了）：这一批全部标红，可点重试
-          failed += chunk.length;
-          const msg = e instanceof Error ? e.message : String(e);
-          firstError ??= msg;
-          for (const it of chunk) {
-            const el = blocks[Number(it.id)];
-            if (el?.isConnected) attachTranslation(el, msg, true, it.text);
-          }
+      while (next < total) {
+        const i = next++;
+        const el = blocks[i];
+        if (!el?.isConnected) {
+          finished++;
+          continue;
         }
-        // 第一批一落地就算"这页已翻译"，菜单里立刻能点"恢复原文"
+        const ok = await translateOneBlock(el, items[i]);
+        if (!ok) failed++;
         if (!pageTranslated) {
           pageTranslated = true;
           observeNewContent();
         }
         setDisplay(display === "original" ? settings.defaultDisplay : display);
-        finished += chunk.length;
+        finished++;
         toast(`翻译中 ${finished}/${total}…`, 0);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(PAGE_CONCURRENCY, chunks.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(pageConcurrency, total) }, worker));
 
     if (failed === 0) {
       toast(`完成，共 ${total} 段`);
     } else if (failed === total) {
-      toast(firstError ?? "整页翻译失败", 6000);
+      toast("整页翻译失败，点任意标红的段落可重试", 6000);
     } else {
-      toast(`完成 ${total} 段，其中 ${failed} 段失败（点译文可重试）`, 5000);
+      toast(`完成 ${total} 段，其中 ${failed} 段失败（点标红处重试）`, 5000);
     }
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), 6000);
@@ -331,6 +395,7 @@ async function translatePage() {
 /** 撤掉一个段落的译文，把它还原成翻译前的样子 */
 function removeTranslationFrom(el: Element) {
   el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  clearBadge(el);
   el.querySelectorAll(`:scope > .${ORIGINAL_CLASS}`).forEach((shell) => {
     while (shell.firstChild) el.insertBefore(shell.firstChild, shell);
     shell.remove();
@@ -343,7 +408,7 @@ function removeTranslationFrom(el: Element) {
 function restorePage() {
   document.querySelectorAll(`[${MARK_ATTR}]`).forEach(removeTranslationFrom);
   // 兜底：清掉任何残留（比如翻译中途被打断的）
-  document.querySelectorAll(`.${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  document.querySelectorAll(`.${TRANSLATION_CLASS}, .${BADGE_CLASS}`).forEach((n) => n.remove());
   document.querySelectorAll(`.${ORIGINAL_CLASS}`).forEach((shell) => {
     const parent = shell.parentNode;
     if (!parent) return;

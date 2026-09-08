@@ -115,3 +115,54 @@ fn unknown_path_is_404() {
     assert_eq!(http(h.port, "GET", "/nope", None, "").0, 404);
     h.stop();
 }
+
+#[test]
+fn slow_request_does_not_block_others() {
+    // 插件是一段一个请求发的：一段慢（或在服务端重试）不能把后面的请求堵住，
+    // 否则「翻好一段显示一段」就退化成了排队等待。
+    let (_m, h) = setup();
+    let t0 = std::time::Instant::now();
+    let port = h.port;
+
+    // 先发一个要 1.5 秒的
+    let slow = std::thread::spawn(move || {
+        let body = serde_json::json!({ "scene": "hover", "items": [{ "id": "s", "text": "slow one [[slow:1500]]" }] }).to_string();
+        http(port, "POST", "/v1/translate", Some("chrome-extension://x"), &body)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // 再发一个快的，它不该等前面那个
+    let body = serde_json::json!({ "scene": "hover", "items": [{ "id": "f", "text": "fast one" }] }).to_string();
+    let (code, resp) = http(port, "POST", "/v1/translate", Some("chrome-extension://x"), &body);
+    let fast_ms = t0.elapsed().as_millis();
+
+    assert_eq!(code, 200, "{resp}");
+    assert!(fast_ms < 1200, "快的那个等了 {fast_ms}ms，说明被慢请求堵住了");
+
+    let (slow_code, _) = slow.join().unwrap();
+    assert_eq!(slow_code, 200);
+    h.stop();
+}
+
+#[test]
+fn many_single_item_requests_all_succeed() {
+    // 整页翻译现在是一段一个请求，同时飞好几个，服务端要都能处理
+    let (_m, h) = setup();
+    let port = h.port;
+    let handles: Vec<_> = (0..12)
+        .map(|i| {
+            std::thread::spawn(move || {
+                let body =
+                    serde_json::json!({ "scene": "full_page", "items": [{ "id": i.to_string(), "text": format!("paragraph {i}") }] })
+                        .to_string();
+                http(port, "POST", "/v1/translate", Some("chrome-extension://x"), &body)
+            })
+        })
+        .collect();
+    for (i, hd) in handles.into_iter().enumerate() {
+        let (code, body) = hd.join().unwrap();
+        assert_eq!(code, 200, "第 {i} 个请求失败：{body}");
+        assert!(body.contains("zh=paragraph"), "第 {i} 个回包不对：{body}");
+    }
+    h.stop();
+}

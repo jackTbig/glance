@@ -253,16 +253,21 @@ test("悬停：松开修饰键就取消，还没到时间不该翻", async () =>
 test("桌面端没运行时给出明确提示", async () => {
   const page = await openPage();
   const sw = ctx.serviceWorkers()[0];
-  await sw.evaluate(async () => {
-    await chrome.storage.sync.set({ port: 1 }); // 指向一个没人监听的端口
-  });
-  await page.reload();
-  await triggerPage(page);
-  await expect(page.locator("#tt-toast")).toHaveText(/翻译工具未运行/, { timeout: 20_000 });
-  await sw.evaluate(async (port) => {
-    await chrome.storage.sync.set({ port });
-  }, SERVICE_PORT);
-  await page.close();
+  try {
+    await sw.evaluate(async () => {
+      await chrome.storage.sync.set({ port: 1 }); // 指向一个没人监听的端口
+    });
+    await page.reload();
+    await triggerPage(page);
+    // 逐段发送后，错误显示在段落自己的失败块里
+    await expect(page.locator("#p1 > .tt-badge.tt-error")).toHaveAttribute("title", /翻译工具未运行/, { timeout: 20_000 });
+  } finally {
+    // 一定要还原，否则后面所有用例都连不上假服务
+    await sw.evaluate(async (port) => {
+      await chrome.storage.sync.set({ port });
+    }, SERVICE_PORT);
+    await page.close();
+  }
 });
 
 // ---------------- 功能菜单（popup） ----------------
@@ -626,5 +631,76 @@ test("整页翻译过程中第一批落地后就能恢复原文", async () => {
     return await chrome.tabs.sendMessage(tab!.id!, { kind: "status" });
   });
   expect(st.translated).toBe(true);
+  await page.close();
+});
+
+// ---------------- 逐段发送：加载动画与失败图标 ----------------
+
+test("整页翻译：发出去的段先转圈，回来再变译文", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/states.html`);
+  await page.bringToFront();
+  await page.waitForTimeout(150);
+  await tell(ctx, "toggle_page");
+
+  // 慢的那段应当先出现转圈徽章：行内、跟在原文后面、不占一行
+  const pending = page.locator("#slow > .tt-badge.tt-loading");
+  await expect(pending).toBeVisible({ timeout: 10_000 });
+  const box = await pending.boundingBox();
+  expect(box!.width).toBeLessThan(30); // 只是个小点，不能撑大布局
+  expect(box!.height).toBeLessThan(30);
+
+  // 快的那段这时已经出译文了 —— 证明是一段一段独立走完的
+  await expect(page.locator("#fine .tt-translation")).toHaveText(/zh=/, { timeout: 15_000 });
+
+  // 慢的那段最终也会好
+  await expect(page.locator("#slow .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(page.locator("#slow > .tt-badge")).toHaveCount(0);
+  await expect(page.locator("#tt-toast")).toHaveText(/完成/, { timeout: 30_000 });
+  await page.close();
+});
+
+test("整页翻译：失败的段显示警示图标，可点重试", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/states.html`);
+  await page.bringToFront();
+  await page.waitForTimeout(150);
+  await tell(ctx, "toggle_page");
+
+  const bad = page.locator("#bad > .tt-badge.tt-error");
+  await expect(bad).toBeVisible({ timeout: 30_000 });
+  await expect(bad).toHaveText("⚠ 重试");
+  await expect(bad).toHaveAttribute("title", /翻译失败/);
+  // 只是个小标记，不能变成一大段文字
+  const bbox = await bad.boundingBox();
+  expect(bbox!.height).toBeLessThan(40);
+
+  // 别的段不受影响
+  await expect(page.locator("#fine .tt-translation")).toHaveText(/zh=/);
+  await expect(page.locator("#slow .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  // 点它会重新发一次（这段在假后端里恒失败，所以还是失败，但要能看到重试发生过）
+  await bad.click();
+  await expect(page.locator("#bad > .tt-badge.tt-loading")).toBeVisible({ timeout: 5000 });
+  await expect(page.locator("#bad > .tt-badge.tt-error")).toBeVisible({ timeout: 30_000 });
+  await page.waitForTimeout(300); // 让在途请求落地，别拖累后面的用例
+  await page.close();
+});
+
+test("整页翻译：一段一个请求，请求数正好等于段数", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/simple.html`);
+  await page.bringToFront();
+  await page.waitForTimeout(200);
+  // 页面就位后再清零，免得把别的请求算进来
+  await fetch(`http://127.0.0.1:${MOCK_PORT}/reset`, { method: "POST" });
+  await tell(ctx, "toggle_page");
+  await expect(page.locator("#c .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(page.locator(".tt-translation")).toHaveCount(3);
+  await page.waitForTimeout(400);
+
+  const stats = await (await fetch(`http://127.0.0.1:${MOCK_PORT}/stats`)).json();
+  console.log("3 段页面，假后端收到的请求数：", stats.requests);
+  expect(stats.requests).toBe(3); // 打包发的话只会是 1
   await page.close();
 });

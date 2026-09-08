@@ -112,10 +112,16 @@ pub struct ServerHandle {
 impl ServerHandle {
     pub fn stop(&self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        // 自连一次把 accept 唤醒
-        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        // 每个处理线程都堵在 recv 上，挨个连一次把它们唤醒
+        for _ in 0..WORKERS {
+            let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+        }
     }
 }
+
+/// 同时处理几个请求。插件是一段一个请求发的，单线程会让它们排队，
+/// 一段慢（或在服务端重试）就把后面全堵住，流式上屏的效果荡然无存。
+const WORKERS: usize = 8;
 
 /// 起服务。`translator` 用 Mutex 包着以便设置变更后热替换。
 pub fn spawn(
@@ -126,14 +132,23 @@ pub fn spawn(
 ) -> anyhow::Result<ServerHandle> {
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("本地服务无法监听 {port} 端口：{e}"))?;
     let actual = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
+    let server = Arc::new(server);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stop2 = stop.clone();
-    std::thread::Builder::new().name("local-server".into()).spawn(move || {
-        tracing::info!("本地服务已监听 http://127.0.0.1:{actual}");
-        for mut request in server.incoming_requests() {
+    tracing::info!("本地服务已监听 http://127.0.0.1:{actual}（{WORKERS} 个处理线程）");
+    for i in 0..WORKERS {
+      let server = server.clone();
+      let stop2 = stop.clone();
+      let allowed_ids = allowed_ids.clone();
+      let translator = translator.clone();
+      std::thread::Builder::new().name(format!("local-server-{i}")).spawn(move || {
+        loop {
             if stop2.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
+            let mut request = match server.recv() {
+                Ok(r) => r,
+                Err(_) => break,
+            };
             let origin = request
                 .headers()
                 .iter()
@@ -209,8 +224,9 @@ pub fn spawn(
                 }
             }
         }
-        tracing::info!("本地服务已停止");
-    })?;
+        tracing::debug!("本地服务处理线程 {i} 退出");
+      })?;
+    }
     Ok(ServerHandle { port: actual, stop })
 }
 
