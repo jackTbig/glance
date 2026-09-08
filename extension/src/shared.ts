@@ -29,6 +29,26 @@ export const DEFAULT_SETTINGS: Settings = {
   disabledHosts: [],
 };
 
+/** 桌面端 /v1/health 的回包 */
+export interface Health {
+  version: string;
+  backend?: string;
+  model?: string;
+  concurrency: number;
+  batch_size: number;
+}
+
+/** popup 问 content script 要的当前页状态 */
+export interface PageStatus {
+  translated: boolean;
+  display: DisplayMode;
+  /** 已翻译的段落数 */
+  blocks: number;
+  /** 页面自己报的域名。不靠 tabs 权限读 tab.url：`activeTab` 只在用户点图标那一下授予，
+   *  别的入口（比如直接打开 popup.html）读到的 url 是空的。 */
+  host: string;
+}
+
 export interface TranslateItem {
   id: string;
   text: string;
@@ -47,9 +67,18 @@ export type Message =
   | { kind: "health" }
   | { kind: "settings" };
 
+/** popup / background → content script */
+export type PageCommand =
+  | { kind: "status" }
+  | { kind: "translate_page" }
+  | { kind: "restore_page" }
+  | { kind: "toggle_page" }
+  | { kind: "translate_selection" }
+  | { kind: "set_display"; mode: DisplayMode };
+
 export type Reply =
   | { ok: true; results: TranslateResult[] }
-  | { ok: true; health: { version: string; concurrency: number; batch_size: number } }
+  | { ok: true; health: Health }
   | { ok: true; settings: Settings }
   | { ok: false; error: string };
 

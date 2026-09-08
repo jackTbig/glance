@@ -74,3 +74,16 @@ test("真实后端整页翻译", async () => {
   console.log("带链接段：", await page.locator("#p2 .tt-translation").innerHTML());
   await page.close();
 });
+
+test("真实后端：菜单显示当前模型", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  const extId = new URL(sw.url()).host;
+  const popup = await ctx.newPage();
+  await popup.goto(`chrome-extension://${extId}/popup.html`);
+  await popup.waitForFunction(() => document.getElementById("conn")?.textContent !== "检测中…", null, { timeout: 15_000 });
+  await expect(popup.locator("#conn")).toHaveText(/桌面端已连接/);
+  const model = await popup.locator("#serviceName").textContent();
+  console.log("菜单显示的模型：", model);
+  expect(model).toBe("deepseek-chat");
+  await popup.close();
+});

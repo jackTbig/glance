@@ -8,6 +8,8 @@ import {
   TRANSLATION_CLASS,
   worthTranslating,
   type DisplayMode,
+  type PageCommand,
+  type PageStatus,
   type Reply,
   type Scene,
   type Settings,
@@ -440,13 +442,28 @@ function install() {
     }
   });
 
-  chrome.runtime.onMessage.addListener((msg: { kind: string }, _s, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg: PageCommand, _s, sendResponse) => {
     switch (msg.kind) {
+      case "status":
+        // popup 靠这个判断页面能不能注入、当前是不是已翻译
+        sendResponse({
+          translated: pageTranslated,
+          display,
+          blocks: document.querySelectorAll(`.${TRANSLATION_CLASS}`).length,
+          host: location.hostname,
+        } satisfies PageStatus);
+        return false;
+      case "translate_page":
+        if (!pageTranslated) void translatePage();
+        break;
       case "toggle_page":
         cyclePage();
         break;
       case "restore_page":
         restorePage();
+        break;
+      case "set_display":
+        if (pageTranslated) setDisplay(msg.mode);
         break;
       case "translate_selection": {
         const sel = window.getSelection();
@@ -457,6 +474,19 @@ function install() {
     }
     sendResponse({ ok: true });
     return false;
+  });
+
+  // popup 里改了开关就立刻生效，不用刷新页面
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "sync") return;
+    for (const [k, v] of Object.entries(changes)) {
+      (settings as unknown as Record<string, unknown>)[k] = v.newValue;
+    }
+    // 站点被停用时，把已经弹出来的图标与面板收掉
+    if (hostDisabled()) {
+      removeIcon();
+      closePanel(true);
+    }
   });
 }
 

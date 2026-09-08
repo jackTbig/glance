@@ -210,3 +210,122 @@ test("桌面端没运行时给出明确提示", async () => {
   }, SERVICE_PORT);
   await page.close();
 });
+
+// ---------------- 功能菜单（popup） ----------------
+
+/** 直接打开 popup.html 当普通页面测：Playwright 点不了扩展图标 */
+async function openPopup(): Promise<Page> {
+  const sw = ctx.serviceWorkers()[0];
+  const extId = new URL(sw.url()).host;
+  const p = await ctx.newPage();
+  await p.goto(`chrome-extension://${extId}/popup.html`);
+  // 等 init() 跑完再交互：它是异步的（读设置 → 查桌面端 → 问页面状态），
+  // 中途点击会被随后的 render() 覆盖掉
+  await p.waitForFunction(() => document.getElementById("conn")?.textContent !== "检测中…", null, { timeout: 15_000 });
+  return p;
+}
+
+test("菜单：显示连接状态与当前翻译服务", async () => {
+  const popup = await openPopup();
+  await expect(popup.locator("#conn")).toHaveText(/桌面端已连接/, { timeout: 15_000 });
+  await expect(popup.locator("#conn")).toHaveClass(/ok/);
+  await expect(popup.locator("#serviceName")).toHaveText("mock");
+  await popup.close();
+});
+
+test("菜单：两个功能格子能开关，状态即时落到设置里", async () => {
+  const popup = await openPopup();
+  const hover = popup.locator("#tile-hover");
+  const icon = popup.locator("#tile-icon");
+  await expect(hover).toHaveClass(/on/);
+  await expect(icon).toHaveClass(/on/);
+
+  await hover.click();
+  await expect(hover).not.toHaveClass(/on/);
+  await expect(popup.locator("#hoverDesc")).toHaveText("已关闭，点击开启");
+
+  await icon.click();
+  await expect(icon).not.toHaveClass(/on/);
+
+  // 存到 chrome.storage 里了
+  const sw = ctx.serviceWorkers()[0];
+  const saved = await sw.evaluate(async () => chrome.storage.sync.get(["hoverModifier", "selectionIcon"]));
+  expect(saved.hoverModifier).toBe("none");
+  expect(saved.selectionIcon).toBe(false);
+
+  // 还原，别影响后面的用例
+  await hover.click();
+  await icon.click();
+  await expect(hover).toHaveClass(/on/);
+  await popup.close();
+});
+
+test("菜单：点悬停格子里的键名循环换修饰键", async () => {
+  const popup = await openPopup();
+  await expect(popup.locator("#hoverKey")).toHaveText("Alt");
+  await popup.locator("#hoverKey").click();
+  await expect(popup.locator("#hoverKey")).toHaveText("Ctrl");
+  await popup.locator("#hoverKey").click();
+  await expect(popup.locator("#hoverKey")).toHaveText("Shift");
+  await popup.locator("#hoverKey").click();
+  await expect(popup.locator("#hoverKey")).toHaveText("Alt");
+  // 点键名不该把格子关掉
+  await expect(popup.locator("#tile-hover")).toHaveClass(/on/);
+  await popup.close();
+});
+
+test("菜单：本站停用那一行要么藏起来，要么显示具体域名", async () => {
+  const popup = await openPopup();
+  const row = popup.locator("#siteRow");
+  if (await row.isVisible()) {
+    // 显示时必须带具体域名，不能是「在  停用」这种空文案
+    await expect(popup.locator("#siteLabel")).toHaveText(/^在 \S+ 停用$/);
+  }
+  await popup.close();
+});
+
+test("站点停用后悬停与划词图标都不再触发，快捷键仍可用", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ disabledHosts: ["127.0.0.1"] }));
+  const page = await openPage();
+
+  // 悬停：不该插译文
+  const box = await page.locator("#l1").boundingBox();
+  await page.keyboard.down("Alt");
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.mouse.move(box!.x + 24, box!.y + 10);
+  await page.waitForTimeout(1200);
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
+  await page.keyboard.up("Alt");
+
+  // 划词图标：不该出现
+  await page.evaluate(() => {
+    const el = document.getElementById("p1")!;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 100, clientY: 100 }));
+  });
+  await page.waitForTimeout(400);
+  await expect(page.locator("#tt-icon")).toHaveCount(0);
+
+  // 整页快捷键不受站点停用影响
+  await triggerPage(page);
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  await sw.evaluate(async () => chrome.storage.sync.set({ disabledHosts: [] }));
+  await page.close();
+});
+
+test("菜单：桌面端没运行时状态变红并提示", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ port: 1 }));
+  const popup = await openPopup();
+  await expect(popup.locator("#conn")).toHaveText(/桌面端未运行/, { timeout: 15_000 });
+  await expect(popup.locator("#conn")).toHaveClass(/bad/);
+  await expect(popup.locator("#downHint")).toBeVisible();
+  await popup.close();
+  await sw.evaluate(async (port) => chrome.storage.sync.set({ port }), SERVICE_PORT);
+});

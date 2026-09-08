@@ -7,7 +7,7 @@ const watch = process.argv.includes("--watch");
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist", { recursive: true });
 
-for (const name of ["background", "content", "options"]) {
+for (const name of ["background", "content", "options", "popup"]) {
   await build({
     entryPoints: [`src/${name}.ts`],
     bundle: true,

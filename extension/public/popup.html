@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>translate-tool</title>
+<style>
+  :root {
+    --bg: #fff; --card: #f6f7f9; --fg: #1c1c20; --sub: #6b7280; --line: #e5e7eb;
+    --accent: #285ab4; --accent-soft: #e8eefb; --ok: #15803d; --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1f; --card: #26262b; --fg: #e7e7ea; --sub: #9ca3af; --line: #33333a;
+      --accent: #4d82e8; --accent-soft: #22304a; --ok: #4ade80; --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  /* 显式写了 display 的元素会盖掉浏览器默认的 [hidden]{display:none}，
+     .modes 与 footer label 都是 flex，不加这条 hidden 属性等于没写 */
+  [hidden] { display: none !important; }
+  body {
+    width: 300px; margin: 0; padding: 12px;
+    font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--fg);
+  }
+
+  /* 顶部连接状态 */
+  .conn { font-size: 12px; display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .conn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--sub); flex: none; }
+  .conn.ok { color: var(--ok); } .conn.ok::before { background: var(--ok); }
+  .conn.bad { color: var(--bad); } .conn.bad::before { background: var(--bad); }
+
+  /* 翻译服务卡片 */
+  .service {
+    background: var(--card); border-radius: 9px; padding: 9px 11px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+  }
+  .service:hover { filter: brightness(0.98); }
+  .service .k { color: var(--sub); font-size: 12px; flex: none; }
+  .service .v { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .service .go { margin-left: auto; color: var(--sub); font-size: 11px; flex: none; }
+
+  /* 主按钮 */
+  button.main {
+    width: 100%; padding: 11px; border: none; border-radius: 9px; cursor: pointer;
+    background: var(--accent); color: #fff; font: inherit; font-size: 14px; font-weight: 600;
+  }
+  button.main:hover { filter: brightness(1.1); }
+  button.main:disabled { opacity: .45; cursor: not-allowed; }
+  button.main.secondary { background: var(--card); color: var(--fg); font-weight: 500; }
+
+  .modes { display: flex; gap: 6px; margin-top: 7px; }
+  .modes button {
+    flex: 1; padding: 6px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--sub); cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .modes button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); font-weight: 600; }
+
+  /* 功能格子 */
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .tile {
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 8px; cursor: pointer;
+    background: var(--bg); text-align: left; font: inherit; color: var(--fg);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .tile:hover { background: var(--card); }
+  .tile.on { border-color: var(--accent); background: var(--accent-soft); }
+  .tile .t { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 5px; }
+  .tile .t .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line); flex: none; }
+  .tile.on .t .dot { background: var(--accent); }
+  .tile .d { font-size: 11px; color: var(--sub); line-height: 1.35; }
+  .tile.on .d { color: var(--accent); }
+  .tile .key { border-bottom: 1px dashed currentColor; cursor: pointer; font-weight: 700; }
+  .tile .key:hover { opacity: .75; }
+  .tile:disabled { opacity: .4; cursor: not-allowed; }
+
+  .hint { font-size: 11px; color: var(--sub); margin: 8px 0 0; }
+  .hint.warn { color: var(--bad); }
+
+  footer {
+    margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px; font-size: 12px;
+  }
+  footer a { color: var(--sub); text-decoration: none; cursor: pointer; }
+  footer a:hover { color: var(--accent); }
+  footer .spacer { flex: 1; }
+  footer label { display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--sub); }
+  footer input { width: 13px; height: 13px; accent-color: var(--accent); cursor: pointer; }
+</style>
+</head>
+<body>
+  <div id="conn" class="conn">检测中…</div>
+  <p id="downHint" class="hint warn" hidden>请先启动桌面端 translate-tool，再刷新页面。</p>
+
+  <div class="service" id="service" title="模型与 API Key 在桌面端设置里改">
+    <span class="k">翻译服务</span>
+    <span class="v" id="serviceName">—</span>
+    <span class="go">在桌面端改 ›</span>
+  </div>
+
+  <button id="translate" class="main">翻译此页</button>
+  <div id="modes" class="modes" hidden>
+    <button id="mode-bilingual">双语对照</button>
+    <button id="mode-translation_only">仅译文</button>
+  </div>
+  <p id="pageHint" class="hint" hidden>这个页面不允许扩展运行（chrome:// 与扩展商店页），换个普通网页试试。</p>
+
+  <div class="tiles">
+    <button class="tile" id="tile-hover">
+      <span class="t"><span class="dot"></span>鼠标悬停</span>
+      <span class="d" id="hoverDesc">按住 <b class="key" id="hoverKey">Alt</b> 停在段落上</span>
+    </button>
+    <button class="tile" id="tile-icon">
+      <span class="t"><span class="dot"></span>划词翻译</span>
+      <span class="d">选中后弹「译」按钮</span>
+    </button>
+  </div>
+  <p id="siteHint" class="hint" hidden>本站已停用悬停与划词；快捷键 Alt+Shift+T / Alt+Shift+S 仍可用。</p>
+
+  <footer>
+    <a id="options">⚙ 设置</a>
+    <span class="spacer"></span>
+    <label id="siteRow" title="在这个站点不自动弹图标、不响应悬停">
+      <input type="checkbox" id="siteOff" /><span id="siteLabel">本站停用</span>
+    </label>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

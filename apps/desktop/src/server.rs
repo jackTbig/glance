@@ -158,12 +158,26 @@ pub fn spawn(
                 ("GET", "/v1/health") => {
                     let cfg_summary = {
                         let t = translator.lock().unwrap();
+                        let c = t.config();
+                        // 整页那条路由就是插件实际会用到的后端
+                        let route = c.route(Scene::FullPage);
+                        let model = if route.model.trim().is_empty() {
+                            match route.backend {
+                                ai_translate::Backend::Claude => c.base.claude_model.clone(),
+                                ai_translate::Backend::Codex => c.base.codex_model.clone(),
+                                ai_translate::Backend::OpenAi => c.base.openai_model.clone(),
+                            }
+                        } else {
+                            route.model.clone()
+                        };
                         serde_json::json!({
                             "ok": true,
                             "app": "translate-tool",
                             "version": app_version,
-                            "concurrency": t.config().concurrency,
-                            "batch_size": t.config().batch_size,
+                            "backend": route.backend.as_str(),
+                            "model": model,
+                            "concurrency": c.concurrency,
+                            "batch_size": c.batch_size,
                         })
                     };
                     let _ = request.respond(json_response(200, &cfg_summary, origin.as_deref()));

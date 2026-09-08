@@ -60,17 +60,8 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
   return true; // 异步回复
 });
 
-// 点插件图标 = 翻译当前页面
-chrome.action.onClicked.addListener(async (tab) => {
-  if (tab.id === undefined) return;
-  try {
-    await chrome.tabs.sendMessage(tab.id, { kind: "toggle_page" });
-  } catch {
-    // content script 还没注入（比如刚装完插件的旧标签页）
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-    await chrome.tabs.sendMessage(tab.id, { kind: "toggle_page" });
-  }
-});
+// 点插件图标弹的是 popup.html（manifest 里的 action.default_popup），
+// 声明了 default_popup 之后 chrome.action.onClicked 不再触发，所以这里不挂它。
 
 chrome.commands?.onCommand.addListener(async (command) => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
