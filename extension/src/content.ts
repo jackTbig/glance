@@ -82,14 +82,28 @@ function ensureStyle() {
   document.documentElement.appendChild(s);
 }
 
+let toastTimer: number | null = null;
+
+/** ms = 0 表示常驻，由调用方自己收掉（进度条用） */
 function toast(msg: string, ms = 3200) {
   ensureStyle();
-  document.getElementById("tt-toast")?.remove();
-  const d = document.createElement("div");
-  d.id = "tt-toast";
+  let d = document.getElementById("tt-toast");
+  if (!d) {
+    d = document.createElement("div");
+    d.id = "tt-toast";
+    document.body.appendChild(d);
+  }
   d.textContent = msg;
-  document.body.appendChild(d);
-  setTimeout(() => d.remove(), ms);
+  if (toastTimer !== null) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  if (ms > 0) {
+    toastTimer = window.setTimeout(() => {
+      d?.remove();
+      toastTimer = null;
+    }, ms);
+  }
 }
 
 /** 扩展上下文还活着吗：重新加载/更新扩展后，老页面里的这份脚本会失去 chrome.runtime.id */
@@ -226,6 +240,14 @@ function setDisplay(mode: DisplayMode) {
   });
 }
 
+/** 每请求多少段、同时发几个请求。桌面端会告诉我们它的批大小 */
+const PAGE_CONCURRENCY = 3;
+let batchSize = 10;
+
+/**
+ * 整页翻译：按文档顺序分批，**每批回来就立刻上屏**，不等整页翻完。
+ * 从最上面的段开始发，所以用户看到的是译文自上而下逐段出现。
+ */
 async function translatePage() {
   if (busy) return;
   busy = true;
@@ -235,30 +257,71 @@ async function translatePage() {
       toast("这个页面没有找到可翻译的段落");
       return;
     }
-    toast(`正在翻译 ${blocks.length} 个段落…`, 60_000);
     const items: TranslateItem[] = blocks.map((el, i) => {
       const isHtml = hasInlineMarkup(el);
       return { id: String(i), text: isHtml ? el.innerHTML : (el.textContent ?? ""), is_html: isHtml };
     });
-    const results = await translate("full_page", items);
+
+    // 批大小跟桌面端保持一致；拿不到就用默认
+    const h = await send({ kind: "health" });
+    if (h.ok && "health" in h && h.health.batch_size > 0) batchSize = h.health.batch_size;
+
+    const chunks: TranslateItem[][] = [];
+    for (let i = 0; i < items.length; i += batchSize) chunks.push(items.slice(i, i + batchSize));
+
+    let finished = 0;
     let failed = 0;
-    for (const r of results) {
-      const el = blocks[Number(r.id)];
-      if (!el) continue;
-      if (r.text !== undefined) {
-        attachTranslation(el, r.text, false);
-      } else {
-        failed++;
-        attachTranslation(el, r.error ?? "未知错误", true, items[Number(r.id)].text);
+    let firstError: string | null = null;
+    const total = items.length;
+    toast(`翻译中 0/${total}…`, 0);
+
+    // 从上往下取批；同时飞几个，先发的先回的概率大，视觉上就是自上而下逐段出现
+    let next = 0;
+    const worker = async () => {
+      while (next < chunks.length) {
+        const chunk = chunks[next++];
+        try {
+          const results = await translate("full_page", chunk);
+          for (const r of results) {
+            const el = blocks[Number(r.id)];
+            if (!el || !el.isConnected) continue;
+            if (r.text !== undefined) {
+              attachTranslation(el, r.text, false);
+            } else {
+              failed++;
+              attachTranslation(el, r.error ?? "未知错误", true, items[Number(r.id)].text);
+            }
+          }
+        } catch (e) {
+          // 整批失败（比如桌面端断了）：这一批全部标红，可点重试
+          failed += chunk.length;
+          const msg = e instanceof Error ? e.message : String(e);
+          firstError ??= msg;
+          for (const it of chunk) {
+            const el = blocks[Number(it.id)];
+            if (el?.isConnected) attachTranslation(el, msg, true, it.text);
+          }
+        }
+        // 第一批一落地就算"这页已翻译"，菜单里立刻能点"恢复原文"
+        if (!pageTranslated) {
+          pageTranslated = true;
+          observeNewContent();
+        }
+        setDisplay(display === "original" ? settings.defaultDisplay : display);
+        finished += chunk.length;
+        toast(`翻译中 ${finished}/${total}…`, 0);
       }
+    };
+    await Promise.all(Array.from({ length: Math.min(PAGE_CONCURRENCY, chunks.length) }, worker));
+
+    if (failed === 0) {
+      toast(`完成，共 ${total} 段`);
+    } else if (failed === total) {
+      toast(firstError ?? "整页翻译失败", 6000);
+    } else {
+      toast(`完成 ${total} 段，其中 ${failed} 段失败（点译文可重试）`, 5000);
     }
-    pageTranslated = true;
-    setDisplay(settings.defaultDisplay);
-    document.getElementById("tt-toast")?.remove();
-    toast(failed === 0 ? `完成，共 ${results.length} 段` : `完成 ${results.length} 段，其中 ${failed} 段失败（点译文可重试）`);
-    observeNewContent();
   } catch (e) {
-    document.getElementById("tt-toast")?.remove();
     toast(e instanceof Error ? e.message : String(e), 6000);
   } finally {
     busy = false;

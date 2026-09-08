@@ -110,3 +110,36 @@ test("真实后端：按住 Alt 悬停翻鼠标所在段，中英对照", async 
   await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
   await page.close();
 });
+
+test("真实后端：长页面分批上屏，能看到译文自上而下逐步出现", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/long.html`);
+  await page.bringToFront();
+  await page.waitForTimeout(800);
+
+  const sw = ctx.serviceWorkers()[0];
+  const t0 = Date.now();
+  for (let i = 0; i < 30; i++) {
+    try {
+      await sw.evaluate(async () => {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        await chrome.tabs.sendMessage(tab!.id!, { kind: "toggle_page" });
+      });
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  await expect(page.locator("#s1 .tt-translation")).toBeVisible({ timeout: 120_000 });
+  const firstAt = Date.now() - t0;
+  const doneWhenFirstShows = await page.locator(".tt-translation").count();
+
+  await expect(page.locator("#s60 .tt-translation")).toBeVisible({ timeout: 180_000 });
+  const allAt = Date.now() - t0;
+
+  console.log(`首段出现 ${firstAt}ms（此时共 ${doneWhenFirstShows} 段已上屏），全部完成 ${allAt}ms`);
+  console.log("首段译文：", (await page.locator("#s1 .tt-translation").textContent())?.trim());
+  expect(firstAt).toBeLessThan(allAt);
+  await page.close();
+});

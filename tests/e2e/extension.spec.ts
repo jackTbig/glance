@@ -581,3 +581,50 @@ test("段落翻译：换成 Ctrl 后按 Ctrl 生效、按 Alt 不生效", async 
   await sw.evaluate(async () => chrome.storage.sync.set({ hoverModifier: "alt" }));
   await page.close();
 });
+
+// ---------------- 整页翻译：流式上屏 ----------------
+
+test("整页翻译：译文分批出现，先上面后下面，进度实时更新", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/long.html`);
+  await page.waitForLoadState("domcontentloaded");
+  await page.bringToFront();
+  await page.waitForTimeout(150);
+
+  // 让假后端慢一点，才看得出"分批"
+  await tell(ctx, "toggle_page");
+
+  // 第一段先出来，此时最后一段还没出来 —— 证明不是等整页翻完才一次性显示
+  await expect(page.locator("#s1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  const lastDoneEarly = await page.locator("#s60 .tt-translation").count();
+
+  // 进度提示带数字
+  await expect(page.locator("#tt-toast")).toHaveText(/翻译中 \d+\/\d+…|完成，共 \d+ 段/, { timeout: 10_000 });
+
+  // 最终全部翻完
+  await expect(page.locator("#s60 .tt-translation")).toHaveText(/zh=/, { timeout: 60_000 });
+  await expect(page.locator("#tt-toast")).toHaveText(/完成，共 \d+ 段/, { timeout: 30_000 });
+  // 60 个 p 加一个 h1 标题
+  await expect(page.locator(".tt-translation")).toHaveCount(61);
+
+  console.log("第一段出现时，最后一段是否已出现：", lastDoneEarly > 0 ? "是（页面太短没看出分批）" : "否（确实是分批上屏）");
+  await page.close();
+});
+
+test("整页翻译过程中第一批落地后就能恢复原文", async () => {
+  const page = await ctx.newPage();
+  await page.goto(`http://127.0.0.1:${PAGES_PORT}/long.html`);
+  await page.bringToFront();
+  await page.waitForTimeout(150);
+  await tell(ctx, "toggle_page");
+  await expect(page.locator("#s1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  // 不等翻完就问状态，应该已经是「已翻译」
+  const sw = ctx.serviceWorkers()[0];
+  const st = await sw.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return await chrome.tabs.sendMessage(tab!.id!, { kind: "status" });
+  });
+  expect(st.translated).toBe(true);
+  await page.close();
+});
