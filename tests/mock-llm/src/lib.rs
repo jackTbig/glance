@@ -49,15 +49,23 @@ fn marker_num(text: &str, key: &str) -> Option<u64> {
     text[start..end].trim().parse().ok()
 }
 
+/// 每行前加 zh=；带 ⟨n⟩ 编号的行把 zh= 放在编号之后；以「：」结尾的指令行跳过
 fn translate_lines(text: &str) -> String {
     let drop = marker_num(text, "drop");
     text.lines()
-        .filter(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.ends_with('：') && !l.ends_with(':'))
         .filter(|l| match drop {
-            Some(k) => !l.trim_start().starts_with(&format!("⟨{k}⟩")),
+            Some(k) => !l.starts_with(&format!("⟨{k}⟩")),
             None => true,
         })
-        .map(|l| format!("zh={l}"))
+        .map(|l| match l.strip_prefix('⟨').and_then(|r| r.find('⟩')) {
+            Some(i) => {
+                let (num, rest) = l.split_at(i + '⟨'.len_utf8() + '⟩'.len_utf8());
+                format!("{num} zh={}", rest.trim())
+            }
+            None => format!("zh={l}"),
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -216,6 +224,6 @@ mod tests {
 
     #[test]
     fn drop_marker_removes_numbered_line() {
-        assert_eq!(translate_lines("⟨1⟩ a [[drop:2]]\n⟨2⟩ b\n⟨3⟩ c"), "zh=⟨1⟩ a [[drop:2]]\nzh=⟨3⟩ c");
+        assert_eq!(translate_lines("请翻译以下各段：\n⟨1⟩ a [[drop:2]]\n⟨2⟩ b\n⟨3⟩ c"), "⟨1⟩ zh=a [[drop:2]]\n⟨3⟩ zh=c");
     }
 }

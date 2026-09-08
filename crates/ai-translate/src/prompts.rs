@@ -34,11 +34,16 @@ pub fn system_prompt(scene: Scene, glossary_block: Option<&str>) -> String {
 }
 
 /// 用户消息：可选上下文 + 待译文本（整页给 pack 好的多行文本）
-pub fn user_message(scene: Scene, text: &str, context: Option<&str>) -> String {
+/// 术语对照放用户消息而不是系统提示，是因为 claude 常驻会话的系统提示启动后不能变。
+pub fn user_message(scene: Scene, text: &str, context: Option<&str>, glossary_block: Option<&str>) -> String {
     let mut m = String::new();
     if let Some(c) = context.map(str::trim).filter(|c| !c.is_empty()) {
         m.push_str("上下文（仅供参考，不要翻译）：\n");
         m.push_str(c);
+        m.push_str("\n\n");
+    }
+    if let Some(g) = glossary_block.map(str::trim).filter(|g| !g.is_empty()) {
+        m.push_str(g);
         m.push_str("\n\n");
     }
     m.push_str(if scene == Scene::FullPage { "请翻译以下各段：\n" } else { "请翻译：\n" });
@@ -66,7 +71,8 @@ mod tests {
 
     #[test]
     fn user_message_with_context() {
-        assert_eq!(user_message(Scene::Selection, "hi", Some("prev")), "上下文（仅供参考，不要翻译）：\nprev\n\n请翻译：\nhi");
-        assert_eq!(user_message(Scene::FullPage, "⟨1⟩ a", None), "请翻译以下各段：\n⟨1⟩ a");
+        assert_eq!(user_message(Scene::Selection, "hi", Some("prev"), None), "上下文（仅供参考，不要翻译）：\nprev\n\n请翻译：\nhi");
+        assert_eq!(user_message(Scene::FullPage, "⟨1⟩ a", None, None), "请翻译以下各段：\n⟨1⟩ a");
+        assert_eq!(user_message(Scene::Hover, "x", None, Some("术语对照：\nA → 甲")), "术语对照：\nA → 甲\n\n请翻译：\nx");
     }
 }

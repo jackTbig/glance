@@ -13,6 +13,8 @@ pub mod openai;
 pub mod prompts;
 pub mod retry;
 pub mod scene;
+pub mod semaphore;
+pub mod translator;
 pub mod util;
 
 pub use backend::{Backend, BackendConfig};
@@ -20,4 +22,5 @@ pub use engine::{test_translate, Engine};
 pub use glossary::{Glossary, GlossaryEntry};
 pub use retry::RetryPolicy;
 pub use scene::Scene;
+pub use translator::{Item, ItemResult, SceneRoute, Translator, TranslatorConfig};
 pub use util::resolve_bin;
