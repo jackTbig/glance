@@ -88,28 +88,18 @@ test("真实后端：菜单显示当前模型", async () => {
   await popup.close();
 });
 
-test("真实后端：快捷键翻鼠标所在段，中英对照", async () => {
+test("真实后端：按住 Alt 悬停翻鼠标所在段，中英对照", async () => {
   const page = await ctx.newPage();
   await page.goto(PAGE);
+  await page.waitForTimeout(800); // 等 content script 注入
   const box = await page.locator("#l1").boundingBox();
   await page.mouse.move(box!.x + 20, box!.y + 8);
-
-  const sw = ctx.serviceWorkers()[0];
-  for (let i = 0; i < 30; i++) {
-    try {
-      await sw.evaluate(async () => {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab?.id === undefined) throw new Error("no tab");
-        await chrome.tabs.sendMessage(tab.id, { kind: "translate_block" });
-      });
-      break;
-    } catch {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-  }
+  await page.waitForTimeout(150);
+  await page.keyboard.down("Alt");
 
   const li = page.locator("#l1");
   await expect(li.locator(".tt-translation")).toBeVisible({ timeout: 90_000 });
+  await page.keyboard.up("Alt");
   const zh = await li.locator(".tt-translation").textContent();
   const en = await li.locator(".tt-original").textContent();
   console.log("原文：", en?.trim());

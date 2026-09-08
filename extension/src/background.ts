@@ -88,9 +88,7 @@ chrome.commands?.onCommand.addListener(async (command) => {
       ? "toggle_page"
       : command === "translate-selection"
         ? "translate_selection"
-        : command === "translate-block"
-          ? "translate_block"
-          : null;
+        : null;
   if (kind) {
     try {
       await chrome.tabs.sendMessage(tab.id, { kind });

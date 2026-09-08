@@ -43,12 +43,6 @@
         "default": "Alt+Shift+S"
       },
       "description": "翻译选中的文字"
-    },
-    "translate-block": {
-      "suggested_key": {
-        "default": "Alt+Shift+H"
-      },
-      "description": "翻译鼠标所在的那一段（中英对照）"
     }
   }
 }

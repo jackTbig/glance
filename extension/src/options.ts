@@ -13,7 +13,6 @@ async function load() {
   $<HTMLTextAreaElement>("disabledHosts").value = s.disabledHosts.join("\n");
   $<HTMLInputElement>("keyFullPage").value = s.keyFullPage;
   $<HTMLInputElement>("keySelection").value = s.keySelection;
-  $<HTMLInputElement>("keyBlock").value = s.keyBlock;
 }
 
 /** 写法不合法就退回默认值，免得用户把自己锁死 */
@@ -32,7 +31,6 @@ async function save() {
     disabledHosts: $<HTMLTextAreaElement>("disabledHosts").value.split("\n").map((x) => x.trim()).filter(Boolean),
     keyFullPage: readKey("keyFullPage", DEFAULT_SETTINGS.keyFullPage),
     keySelection: readKey("keySelection", DEFAULT_SETTINGS.keySelection),
-    keyBlock: readKey("keyBlock", DEFAULT_SETTINGS.keyBlock),
   };
   await chrome.storage.sync.set(s);
   await load(); // 非法写法被退回默认值时，界面上要能看出来

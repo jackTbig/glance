@@ -296,7 +296,7 @@ test("菜单：两个功能格子能开关，状态即时落到设置里", async
 
   await hover.click();
   await expect(hover).not.toHaveClass(/on/);
-  await expect(popup.locator("#hoverDesc")).toHaveText(/自动触发已关；仍可按/);
+  await expect(popup.locator("#hoverDesc")).toHaveText(/已关闭/);
 
   await icon.click();
   await expect(icon).not.toHaveClass(/on/);
@@ -311,18 +311,6 @@ test("菜单：两个功能格子能开关，状态即时落到设置里", async
   await hover.click();
   await icon.click();
   await expect(hover).toHaveClass(/on/);
-  await popup.close();
-});
-
-test("菜单：关掉格子时文案要说清快捷键仍可用", async () => {
-  const popup = await openPopup();
-  await popup.locator("#tile-hover").click();
-  await expect(popup.locator("#hoverDesc")).toHaveText(/仍可按 Alt\+Shift\+H/);
-  await popup.locator("#tile-icon").click();
-  await expect(popup.locator("#iconDesc")).toHaveText(/仍可按 Alt\+Shift\+S/);
-  // 还原
-  await popup.locator("#tile-hover").click();
-  await popup.locator("#tile-icon").click();
   await popup.close();
 });
 
@@ -410,30 +398,6 @@ test("恢复原文后 DOM 回到翻译前的样子（原文壳与标记都清掉
   await page.close();
 });
 
-test("快捷键翻鼠标所在段：原文保留，译文插在下方", async () => {
-  const page = await openPage();
-  const box = await page.locator("#l1").boundingBox();
-  await page.mouse.move(box!.x + 20, box!.y + 8); // 不按任何修饰键
-  await tell(ctx, "translate_block");
-
-  const li = page.locator("#l1");
-  await expect(li.locator(".tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-  // 原文还在：整段文字里既有英文原文也有中文译文
-  await expect(li).toContainText("Memory safety without garbage collection.");
-  // 译文是原文的兄弟节点，插在段内末尾
-  const lastClass = await li.evaluate((el) => (el.lastElementChild as HTMLElement)?.className ?? "");
-  expect(lastClass).toContain("tt-translation");
-  await page.close();
-});
-
-test("鼠标不在正文上时按快捷键给出提示而不是乱翻", async () => {
-  const page = await openPage();
-  await page.mouse.move(2, 2); // 页面左上角空白处
-  await tell(ctx, "translate_block");
-  await expect(page.locator("#tt-toast")).toHaveText(/没有可翻译的段落/, { timeout: 10_000 });
-  await page.close();
-});
-
 test("整页切到仅译文后，单段翻译仍然中英对照", async () => {
   const page = await openPage();
   await triggerPage(page); // 整页翻译
@@ -445,7 +409,10 @@ test("整页切到仅译文后，单段翻译仍然中英对照", async () => {
   const box = await page.locator("#dynamic").boundingBox();
   if (box) {
     await page.mouse.move(box.x + 10, box.y + 5);
-    await tell(ctx, "translate_block");
+    await page.waitForTimeout(120);
+    await page.keyboard.down("Alt");
+    await page.waitForTimeout(700);
+    await page.keyboard.up("Alt");
   }
   // 仅译文模式下，这一段的原文仍然可见（tt-paired 豁免）
   const dyn = page.locator("#dynamic");
@@ -453,52 +420,6 @@ test("整页切到仅译文后，单段翻译仍然中英对照", async () => {
     await expect(dyn.locator(".tt-translation")).toBeVisible({ timeout: 30_000 });
     await expect(dyn.locator(".tt-original")).toBeVisible();
   }
-  await page.close();
-});
-
-test("再按一次快捷键撤掉这一段的译文，DOM 还原干净", async () => {
-  const page = await openPage();
-  const box = await page.locator("#l2").boundingBox();
-  await page.mouse.move(box!.x + 20, box!.y + 8);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-
-  await page.waitForTimeout(200);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#tt-toast")).toHaveText(/已撤掉/, { timeout: 10_000 });
-  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
-  await expect(page.locator("#l2 .tt-original")).toHaveCount(0);
-  await expect(page.locator("#l2")).not.toHaveAttribute("data-tt-done", /.*/);
-  await expect(page.locator("#l2")).toHaveText("Concurrency without data races.");
-  await page.close();
-});
-
-test("撤掉之后还能再翻一次", async () => {
-  const page = await openPage();
-  const box = await page.locator("#l1").boundingBox();
-  await page.mouse.move(box!.x + 20, box!.y + 8);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-  await page.waitForTimeout(200);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
-  await page.waitForTimeout(200);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-  await page.close();
-});
-
-test("整页翻译后也能单独撤掉某一段", async () => {
-  const page = await openPage();
-  await triggerPage(page);
-  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-
-  const box = await page.locator("#p1").boundingBox();
-  await page.mouse.move(box!.x + 20, box!.y + 8);
-  await page.keyboard.press("Alt+Shift+H");
-  await expect(page.locator("#p1 .tt-translation")).toHaveCount(0);
-  // 别的段落不受影响
-  await expect(page.locator("#p2 .tt-translation")).toHaveText(/zh=/);
   await page.close();
 });
 
@@ -528,16 +449,6 @@ test("同一页面重复注入 content script 不会绑两套监听", async () =
 });
 
 // ---------------- 页面内快捷键（不走 chrome.commands） ----------------
-
-test("在页面里真按 Alt+Shift+H 翻鼠标所在段", async () => {
-  const page = await openPage();
-  const box = await page.locator("#l1").boundingBox();
-  await page.mouse.move(box!.x + 20, box!.y + 8);
-  await page.keyboard.press("Alt+Shift+H"); // 真按键，不是发消息
-  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
-  await expect(page.locator("#l1 .tt-original")).toBeVisible();
-  await page.close();
-});
 
 test("在页面里真按 Alt+Shift+Y 翻整页", async () => {
   const page = await openPage();
@@ -569,27 +480,104 @@ test("在输入框里打字不会触发快捷键", async () => {
     document.body.prepend(input);
     input.focus();
   });
-  await page.keyboard.press("Alt+Shift+H");
+  await page.keyboard.press("Alt+Shift+Y");
   await page.waitForTimeout(600);
   await expect(page.locator(".tt-translation")).toHaveCount(0);
-  await expect(page.locator("#tt-toast")).toHaveCount(0);
   await page.close();
 });
 
-test("自定义快捷键后立即按新键生效", async () => {
-  const sw = ctx.serviceWorkers()[0];
-  await sw.evaluate(async () => chrome.storage.sync.set({ keyBlock: "Ctrl+Alt+M" }));
-  const page = await openPage();
-  const box = await page.locator("#l2").boundingBox();
+
+// ---------------- 段落翻译：按住修饰键的完整语义 ----------------
+
+/** 鼠标停到某元素上，按住修饰键等一会儿再松开 */
+async function holdOver(page: Page, sel: string, key = "Alt", ms = 700) {
+  const box = await page.locator(sel).boundingBox();
   await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.waitForTimeout(120);
+  await page.keyboard.down(key);
+  await page.waitForTimeout(ms);
+  await page.keyboard.up(key);
+}
 
-  await page.keyboard.press("Alt+Shift+H"); // 旧键不再生效
-  await page.waitForTimeout(500);
-  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
+test("段落翻译：原文保留，译文插在下方", async () => {
+  const page = await openPage();
+  await holdOver(page, "#l1");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(page.locator("#l1 .tt-original")).toBeVisible();
+  await expect(page.locator("#l1")).toContainText("Memory safety without garbage collection.");
+  const lastClass = await page.locator("#l1").evaluate((el) => (el.lastElementChild as HTMLElement)?.className ?? "");
+  expect(lastClass).toContain("tt-translation");
+  await page.close();
+});
 
-  await page.keyboard.press("Control+Alt+M");
+test("段落翻译：按住不放不会翻第二次，也不会翻到外层大块", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.keyboard.down("Alt");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.waitForTimeout(1500); // 一直按着、鼠标不动，等好几个判定周期
+  await page.keyboard.up("Alt");
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(1);
+  // 外层容器不该被整块翻掉（早先 blockAt 会跳过已翻段落，往上找到父块又翻一遍）
+  await expect(page.locator("ul > .tt-translation")).toHaveCount(0);
+  await expect(page.locator("body > .tt-translation")).toHaveCount(0);
+  await page.close();
+});
+
+test("段落翻译：松开再按住同一段就撤掉译文，第三次又翻回来", async () => {
+  const page = await openPage();
+  await holdOver(page, "#l2");
   await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
 
-  await sw.evaluate(async () => chrome.storage.sync.set({ keyBlock: "Alt+Shift+H" }));
+  await holdOver(page, "#l2");
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
+  await expect(page.locator("#l2 .tt-original")).toHaveCount(0);
+  await expect(page.locator("#l2")).not.toHaveAttribute("data-tt-done", /.*/);
+  await expect(page.locator("#l2")).toHaveText("Concurrency without data races.");
+
+  await holdOver(page, "#l2");
+  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.close();
+});
+
+test("段落翻译：整页翻译后也能单独撤掉某一段", async () => {
+  const page = await openPage();
+  await triggerPage(page);
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await holdOver(page, "#p1");
+  await expect(page.locator("#p1 .tt-translation")).toHaveCount(0);
+  await expect(page.locator("#p2 .tt-translation")).toHaveText(/zh=/);
+  await page.close();
+});
+
+test("段落翻译：按住修饰键扫过多段，每段各翻一次", async () => {
+  const page = await openPage();
+  const b1 = await page.locator("#l1").boundingBox();
+  await page.mouse.move(b1!.x + 20, b1!.y + 8);
+  await page.keyboard.down("Alt");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  // 第一段插入译文后第二段位置下移了，坐标要重新取
+  const b2 = await page.locator("#l2").boundingBox();
+  await page.mouse.move(b2!.x + 20, b2!.y + 8);
+  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.keyboard.up("Alt");
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(1);
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(1);
+  await page.close();
+});
+
+test("段落翻译：换成 Ctrl 后按 Ctrl 生效、按 Alt 不生效", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverModifier: "ctrl" }));
+  const page = await openPage();
+  await holdOver(page, "#l1", "Alt", 700);
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
+  await holdOver(page, "#l1", "Control", 700);
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  // Ctrl 也要能撤销
+  await holdOver(page, "#l1", "Control", 700);
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverModifier: "alt" }));
   await page.close();
 });

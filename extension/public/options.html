@@ -40,12 +40,13 @@
   <div class="row"><label for="disabledHosts">停用的站点</label><textarea id="disabledHosts" placeholder="每行一个域名，如&#10;example.com"></textarea></div>
 
   <h2>快捷键</h2>
-  <div class="hint2">这三个由插件在网页里自己监听，不受 Chrome「最多 4 个扩展快捷键」的限制，
-    也不会被 Alt+Shift+T 这类浏览器内置键抢走。写法如 <code>Alt+Shift+H</code>，至少要含 Alt 或 Ctrl。
+  <div class="hint2">这两个由插件在网页里自己监听，不受 Chrome「最多 4 个扩展快捷键」的限制，
+    也不会被 Alt+Shift+T 这类浏览器内置键抢走。写法如 <code>Alt+Shift+S</code>，至少要含 Alt 或 Ctrl。
+    段落翻译不用组合键，直接按住上面配的那个修饰键就行。
     在输入框里打字时不会触发。</div>
   <div class="row"><label for="keyFullPage">整页翻译</label><input id="keyFullPage" type="text" /></div>
   <div class="row"><label for="keySelection">翻译选中文字</label><input id="keySelection" type="text" /></div>
-  <div class="row"><label for="keyBlock">段落翻译（手动）</label><input id="keyBlock" type="text" /></div>
+
   <p><button id="save">保存</button> <button id="check" class="ghost">检测桌面端</button><span id="status"></span></p>
   <script src="options.js"></script>
 </body>

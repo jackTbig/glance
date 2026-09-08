@@ -49,8 +49,8 @@ function render() {
   const keyName = { alt: "Alt", ctrl: "Ctrl", shift: "Shift", none: "Alt" }[settings.hoverModifier];
   // 这个格子管的是「自动触发」：关掉后快捷键照样能翻当前段，所以文案要写清楚
   $("hoverDesc").innerHTML = hoverOn
-    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停留自动翻`
-    : `自动触发已关；仍可按 ${settings.keyBlock}`;
+    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停 0.3 秒；再来一次撤销`
+    : "已关闭，点这里开启";
   // innerHTML 重建后要重新绑事件
   document.getElementById("hoverKey")?.addEventListener("click", (e) => {
     e.stopPropagation(); // 别把点击传给格子（那是开关）
@@ -74,7 +74,6 @@ function render() {
 
   // 底部显示实际生效的三个快捷键（页面自己监听的那套，可在设置里改）
   $("keys").innerHTML = [
-    `<kbd>${settings.keyBlock}</kbd> 本段`,
     `<kbd>${settings.keySelection}</kbd> 划词`,
     `<kbd>${settings.keyFullPage}</kbd> 整页`,
   ].join(" · ");

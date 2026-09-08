@@ -33,7 +33,7 @@ test("值得翻译", () => {
 });
 
 test("默认设置字段齐全", () => {
-  for (const k of ["port", "hoverModifier", "hoverDelayMs", "selectionIcon", "defaultDisplay", "disabledHosts"]) {
+  for (const k of ["port", "hoverModifier", "hoverDelayMs", "selectionIcon", "defaultDisplay", "disabledHosts", "keyFullPage", "keySelection"]) {
     assert.ok(k in S.DEFAULT_SETTINGS, `缺 ${k}`);
   }
   assert.equal(S.DEFAULT_SETTINGS.port, 42731);
@@ -71,9 +71,13 @@ test("输入框里不抢按键", () => {
   assert.equal(S.isTyping(null), false);
 });
 
+test("段落翻译不占组合键，只用修饰键（避免两套语义打架）", () => {
+  assert.equal("keyBlock" in S.DEFAULT_SETTINGS, false, "段落翻译只靠 hoverModifier，不再有独立组合键");
+});
+
 test("默认快捷键不与 Chrome 内置键冲突", () => {
   // Alt+Shift+T 是 Chrome 的工具栏焦点键，扩展永远拿不到，别拿来当默认
-  for (const k of [S.DEFAULT_SETTINGS.keyFullPage, S.DEFAULT_SETTINGS.keySelection, S.DEFAULT_SETTINGS.keyBlock]) {
+  for (const k of [S.DEFAULT_SETTINGS.keyFullPage, S.DEFAULT_SETTINGS.keySelection]) {
     assert.notEqual(k.toLowerCase(), "alt+shift+t");
     assert.ok(S.parseHotkey(k), `${k} 必须是合法写法`);
   }

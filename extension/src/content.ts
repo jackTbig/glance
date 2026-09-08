@@ -479,6 +479,9 @@ function cancelHover() {
   }
 }
 
+/** 本次按住修饰键期间已经处理过的那一段：松开键才清空，所以「松开再按」= 再处理一次 */
+let handledThisHold: Element | null = null;
+
 /**
  * 安排一次悬停翻译。两条路都会走到这里：
  * 1. 按住修饰键的状态下移动鼠标；
@@ -487,14 +490,27 @@ function cancelHover() {
  */
 function scheduleHoverAt(x: number, y: number, force = false) {
   if (settings.hoverModifier === "none" || hostDisabled()) return;
-  const el = blockAt(document.elementFromPoint(x, y), (t) => getComputedStyle(t));
+  const target = document.elementFromPoint(x, y);
+  // 已翻译的段落要认出来自己，不能交给 blockAt——它会跳过带标记的元素，
+  // 于是往上找到更大的父块，结果是把整块又翻一遍（用户看到的就是「重复按会再翻译」）
+  const done = target?.closest(`[${MARK_ATTR}]`) ?? null;
+  const el = (done ?? blockAt(target, (t) => getComputedStyle(t))) as HTMLElement | null;
   if (!el) return;
+  // 同一次按住期间，同一段只处理一次；松开修饰键再按才会再处理（这就是「再按一次撤销」）
+  if (el === handledThisHold && !force) return;
   if (el === lastHovered && !force) return;
   lastHovered = el;
   cancelHover();
   hoverTimer = window.setTimeout(() => {
     hoverTimer = null;
-    if (lastHovered === el) void translateHover(el);
+    if (lastHovered !== el) return;
+    handledThisHold = el;
+    if (el.hasAttribute(MARK_ATTR)) {
+      removeTranslationFrom(el);
+      toast("已撤掉这一段的译文", 1400);
+    } else {
+      void translateHover(el);
+    }
   }, settings.hoverDelayMs);
 }
 
@@ -525,27 +541,6 @@ async function translateHover(el: HTMLElement) {
   } finally {
     el.classList.remove("tt-working");
   }
-}
-
-/**
- * 快捷键入口：翻鼠标所在那一段；已经翻过的再按一次就撤掉译文。
- * 先判「已翻过」再找块——blockAt 会跳过带 MARK_ATTR 的元素，
- * 不先判的话对着已翻译的段落按键会得到「没有可翻译的段落」这种误导提示。
- */
-function translateBlockUnderCursor() {
-  const target = document.elementFromPoint(lastMouse.x, lastMouse.y);
-  const done = target?.closest(`[${MARK_ATTR}]`);
-  if (done) {
-    removeTranslationFrom(done);
-    toast("已撤掉这一段的译文", 1600);
-    return;
-  }
-  const el = blockAt(target, (x) => getComputedStyle(x));
-  if (!el) {
-    toast("鼠标下没有可翻译的段落，把鼠标移到正文上再按一次");
-    return;
-  }
-  void translateHover(el);
 }
 
 // ---------------- 事件接线 ----------------
@@ -611,6 +606,7 @@ function install() {
     if (isHoverModifierKey(e)) {
       cancelHover();
       lastHovered = null;
+      handledThisHold = null; // 松开了；下次按住可以对同一段再操作一次（翻 ↔ 撤）
     }
   }, opts);
 
@@ -628,10 +624,7 @@ function install() {
     // 页面里自己认快捷键。不能只靠 chrome.commands：它最多分配 4 个，
     // 且与浏览器内置键冲突时静默不给（Alt+Shift+T 就永远拿不到）
     if (isTyping(e.target)) return;
-    if (matchesHotkey(e, settings.keyBlock)) {
-      e.preventDefault();
-      if (once("block")) translateBlockUnderCursor();
-    } else if (matchesHotkey(e, settings.keySelection)) {
+    if (matchesHotkey(e, settings.keySelection)) {
       e.preventDefault();
       if (once("selection")) {
         const sel = window.getSelection();
@@ -666,9 +659,6 @@ function install() {
         break;
       case "set_display":
         if (pageTranslated) setDisplay(msg.mode);
-        break;
-      case "translate_block":
-        if (once("block")) translateBlockUnderCursor();
         break;
       case "translate_selection": {
         if (!once("selection")) break;

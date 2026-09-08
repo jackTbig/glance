@@ -23,7 +23,6 @@ export interface Settings {
    *  （Alt+Shift+T 就是 Chrome 的工具栏焦点键，永远拿不到）。 */
   keyFullPage: string;
   keySelection: string;
-  keyBlock: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -35,7 +34,6 @@ export const DEFAULT_SETTINGS: Settings = {
   disabledHosts: [],
   keyFullPage: "Alt+Shift+Y",
   keySelection: "Alt+Shift+S",
-  keyBlock: "Alt+Shift+H",
 };
 
 /** 把 "Alt+Shift+H" 解析成可比对的形状；不合法返回 null */
@@ -122,7 +120,6 @@ export type PageCommand =
   | { kind: "restore_page" }
   | { kind: "toggle_page" }
   | { kind: "translate_selection" }
-  | { kind: "translate_block" }
   | { kind: "set_display"; mode: DisplayMode };
 
 export type Reply =
