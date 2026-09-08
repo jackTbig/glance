@@ -67,6 +67,13 @@ function render() {
   $<HTMLInputElement>("siteOff").checked = off;
   $("siteLabel").textContent = `在 ${host} 停用`;
   $("siteHint").hidden = !off;
+
+  // 底部显示实际生效的三个快捷键（页面自己监听的那套，可在设置里改）
+  $("keys").innerHTML = [
+    `<kbd>${settings.keyBlock}</kbd> 本段`,
+    `<kbd>${settings.keySelection}</kbd> 划词`,
+    `<kbd>${settings.keyFullPage}</kbd> 整页`,
+  ].join(" · ");
 }
 
 async function init() {

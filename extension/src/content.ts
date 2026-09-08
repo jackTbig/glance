@@ -4,7 +4,9 @@ import {
   collectBlocks,
   DEFAULT_SETTINGS,
   hasInlineMarkup,
+  isTyping,
   MARK_ATTR,
+  matchesHotkey,
   TRANSLATION_CLASS,
   worthTranslating,
   type DisplayMode,
@@ -416,6 +418,19 @@ async function translateSelection(x: number, y: number) {
 
 // ---------------- 悬停 ----------------
 
+/**
+ * 同一个动作在极短时间内只执行一次。
+ * 只为了挡住「同一次按键经 chrome.commands 与页面监听各来一遍」（两者相差几十毫秒），
+ * 窗口不能开大：人连按两次最快也要 150 ms 上下，开到 300 ms 会把用户的连按吞掉。
+ */
+const lastFired: Record<string, number> = {};
+function once(action: string, ms = 120): boolean {
+  const now = Date.now();
+  if (now - (lastFired[action] ?? 0) < ms) return false;
+  lastFired[action] = now;
+  return true;
+}
+
 let hoverTimer: number | null = null;
 let lastHovered: HTMLElement | null = null;
 /** 鼠标最后停留的位置：按快捷键翻"当前这段"时要靠它找元素 */
@@ -553,6 +568,24 @@ function install() {
     if (e.key === "Escape") {
       closePanel(true);
       removeIcon();
+      return;
+    }
+    // 页面里自己认快捷键。不能只靠 chrome.commands：它最多分配 4 个，
+    // 且与浏览器内置键冲突时静默不给（Alt+Shift+T 就永远拿不到）
+    if (isTyping(e.target)) return;
+    if (matchesHotkey(e, settings.keyBlock)) {
+      e.preventDefault();
+      if (once("block")) translateBlockUnderCursor();
+    } else if (matchesHotkey(e, settings.keySelection)) {
+      e.preventDefault();
+      if (once("selection")) {
+        const sel = window.getSelection();
+        const r = sel?.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+        void translateSelection((r?.left ?? 40) + window.scrollX, (r?.bottom ?? 40) + window.scrollY);
+      }
+    } else if (matchesHotkey(e, settings.keyFullPage)) {
+      e.preventDefault();
+      if (once("page")) cyclePage();
     }
   }, opts);
 
@@ -571,7 +604,7 @@ function install() {
         if (!pageTranslated) void translatePage();
         break;
       case "toggle_page":
-        cyclePage();
+        if (once("page")) cyclePage();
         break;
       case "restore_page":
         restorePage();
@@ -580,9 +613,10 @@ function install() {
         if (pageTranslated) setDisplay(msg.mode);
         break;
       case "translate_block":
-        translateBlockUnderCursor();
+        if (once("block")) translateBlockUnderCursor();
         break;
       case "translate_selection": {
+        if (!once("selection")) break;
         const sel = window.getSelection();
         const r = sel?.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
         void translateSelection((r?.left ?? 40) + window.scrollX, (r?.bottom ?? 40) + window.scrollY);

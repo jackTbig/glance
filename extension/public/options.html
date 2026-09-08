@@ -6,9 +6,13 @@
 <style>
   body { font: 14px/1.7 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 24px; max-width: 560px; color: #222; }
   h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 14px; margin: 22px 0 6px; }
+  .hint2 { color: #666; font-size: 12px; margin-bottom: 10px; line-height: 1.6; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  @media (prefers-color-scheme: dark) { .hint2 { color: #999; } code { background: #333; } }
   .hint { color: #666; font-size: 12px; margin-bottom: 18px; }
   .row { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: center; margin-bottom: 10px; }
-  input[type=number], select, textarea { padding: 5px 7px; border: 1px solid #ccc; border-radius: 5px; font: inherit; width: 100%; box-sizing: border-box; }
+  input[type=number], input[type=text], select, textarea { padding: 5px 7px; border: 1px solid #ccc; border-radius: 5px; font: inherit; width: 100%; box-sizing: border-box; }
   textarea { height: 70px; resize: vertical; }
   button { padding: 7px 14px; border: none; border-radius: 6px; background: #285ab4; color: #fff; cursor: pointer; font: inherit; }
   button.ghost { background: #eee; color: #333; }
@@ -34,6 +38,14 @@
     <select id="defaultDisplay"><option value="bilingual">双语对照</option><option value="translation_only">仅译文</option></select>
   </div>
   <div class="row"><label for="disabledHosts">停用的站点</label><textarea id="disabledHosts" placeholder="每行一个域名，如&#10;example.com"></textarea></div>
+
+  <h2>快捷键</h2>
+  <div class="hint2">这三个由插件在网页里自己监听，不受 Chrome「最多 4 个扩展快捷键」的限制，
+    也不会被 Alt+Shift+T 这类浏览器内置键抢走。写法如 <code>Alt+Shift+H</code>，至少要含 Alt 或 Ctrl。
+    在输入框里打字时不会触发。</div>
+  <div class="row"><label for="keyFullPage">整页翻译</label><input id="keyFullPage" type="text" /></div>
+  <div class="row"><label for="keySelection">翻译选中文字</label><input id="keySelection" type="text" /></div>
+  <div class="row"><label for="keyBlock">翻译鼠标所在段</label><input id="keyBlock" type="text" /></div>
   <p><button id="save">保存</button> <button id="check" class="ghost">检测桌面端</button><span id="status"></span></p>
   <script src="options.js"></script>
 </body>

@@ -116,6 +116,7 @@ async function openPage(): Promise<Page> {
 /** 直接调 content script 里挂的消息入口（等价于点插件图标） */
 async function triggerPage(page: Page) {
   await page.bringToFront();
+  await page.waitForTimeout(150); // 连续切显示模式时别撞上去重窗口
   await tell(ctx, "toggle_page");
 }
 
@@ -402,6 +403,7 @@ test("同一段落重复按快捷键不会翻第二次", async () => {
   await tell(ctx, "translate_block");
   await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
 
+  await page.waitForTimeout(200); // 模拟用户隔一会儿再按，别撞上去重窗口
   await tell(ctx, "translate_block");
   await expect(page.locator("#tt-toast")).toHaveText(/已经翻过了/, { timeout: 10_000 });
   await expect(page.locator("#l2 .tt-translation")).toHaveCount(1);
@@ -430,5 +432,72 @@ test("同一页面重复注入 content script 不会绑两套监听", async () =
     el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 100, clientY: 100 }));
   });
   await expect(page.locator("#tt-icon")).toHaveCount(1, { timeout: 5000 });
+  await page.close();
+});
+
+// ---------------- 页面内快捷键（不走 chrome.commands） ----------------
+
+test("在页面里真按 Alt+Shift+H 翻鼠标所在段", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.keyboard.press("Alt+Shift+H"); // 真按键，不是发消息
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(page.locator("#l1 .tt-original")).toBeVisible();
+  await page.close();
+});
+
+test("在页面里真按 Alt+Shift+Y 翻整页", async () => {
+  const page = await openPage();
+  await page.keyboard.press("Alt+Shift+Y");
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.close();
+});
+
+test("在页面里真按 Alt+Shift+S 翻选中文字", async () => {
+  const page = await openPage();
+  await page.evaluate(() => {
+    const el = document.getElementById("p2")!;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await page.keyboard.press("Alt+Shift+S");
+  await expect(page.locator("#tt-panel .tt-body")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.close();
+});
+
+test("在输入框里打字不会触发快捷键", async () => {
+  const page = await openPage();
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.id = "probe";
+    document.body.prepend(input);
+    input.focus();
+  });
+  await page.keyboard.press("Alt+Shift+H");
+  await page.waitForTimeout(600);
+  await expect(page.locator(".tt-translation")).toHaveCount(0);
+  await expect(page.locator("#tt-toast")).toHaveCount(0);
+  await page.close();
+});
+
+test("自定义快捷键后立即按新键生效", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ keyBlock: "Ctrl+Alt+M" }));
+  const page = await openPage();
+  const box = await page.locator("#l2").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+
+  await page.keyboard.press("Alt+Shift+H"); // 旧键不再生效
+  await page.waitForTimeout(500);
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
+
+  await page.keyboard.press("Control+Alt+M");
+  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  await sw.evaluate(async () => chrome.storage.sync.set({ keyBlock: "Alt+Shift+H" }));
   await page.close();
 });

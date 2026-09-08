@@ -18,6 +18,12 @@ export interface Settings {
   defaultDisplay: DisplayMode;
   /** 这些站点不做任何自动行为（悬停、图标） */
   disabledHosts: string[];
+  /** 页面内自己监听的快捷键。不依赖 chrome.commands：
+   *  Chrome 最多只分配 4 个扩展快捷键，且与内置键冲突时静默不分配
+   *  （Alt+Shift+T 就是 Chrome 的工具栏焦点键，永远拿不到）。 */
+  keyFullPage: string;
+  keySelection: string;
+  keyBlock: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -27,7 +33,49 @@ export const DEFAULT_SETTINGS: Settings = {
   selectionIcon: true,
   defaultDisplay: "bilingual",
   disabledHosts: [],
+  keyFullPage: "Alt+Shift+Y",
+  keySelection: "Alt+Shift+S",
+  keyBlock: "Alt+Shift+H",
 };
+
+/** 把 "Alt+Shift+H" 解析成可比对的形状；不合法返回 null */
+export function parseHotkey(spec: string): { alt: boolean; ctrl: boolean; shift: boolean; key: string } | null {
+  const parts = spec.split("+").map((p) => p.trim().toLowerCase()).filter(Boolean);
+  if (parts.length === 0) return null;
+  const mods = { alt: false, ctrl: false, shift: false };
+  let key = "";
+  for (const p of parts) {
+    if (p === "alt") mods.alt = true;
+    else if (p === "ctrl" || p === "control") mods.ctrl = true;
+    else if (p === "shift") mods.shift = true;
+    else if (key) return null; // 两个主键
+    else key = p;
+  }
+  if (!key) return null;
+  if (!mods.alt && !mods.ctrl) return null; // 至少要有 Alt 或 Ctrl，否则会吃掉正常打字
+  return { ...mods, key };
+}
+
+/** 这次按键是不是这个快捷键 */
+export function matchesHotkey(
+  e: { altKey: boolean; ctrlKey: boolean; shiftKey: boolean; key: string; code: string },
+  spec: string,
+): boolean {
+  const h = parseHotkey(spec);
+  if (!h) return false;
+  if (e.altKey !== h.alt || e.ctrlKey !== h.ctrl || e.shiftKey !== h.shift) return false;
+  // 按 code 比而不是 key：按住 Alt 时 e.key 在部分布局下会变成别的字符
+  const want = h.key.length === 1 && /[a-z0-9]/.test(h.key) ? (/[0-9]/.test(h.key) ? `Digit${h.key}` : `Key${h.key.toUpperCase()}`) : h.key;
+  return e.code.toLowerCase() === want.toLowerCase() || e.key.toLowerCase() === h.key;
+}
+
+/** 焦点在输入框里就别抢按键 */
+export function isTyping(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el || !el.tagName) return false;
+  if (el.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+}
 
 /** 桌面端 /v1/health 的回包 */
 export interface Health {

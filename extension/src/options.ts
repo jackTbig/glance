@@ -1,5 +1,5 @@
 /** 设置页：只管插件侧的行为，Key 与模型在桌面端配 */
-import { DEFAULT_SETTINGS, type Settings } from "./shared";
+import { DEFAULT_SETTINGS, parseHotkey, type Settings } from "./shared";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -11,6 +11,15 @@ async function load() {
   $<HTMLInputElement>("selectionIcon").checked = s.selectionIcon;
   $<HTMLSelectElement>("defaultDisplay").value = s.defaultDisplay;
   $<HTMLTextAreaElement>("disabledHosts").value = s.disabledHosts.join("\n");
+  $<HTMLInputElement>("keyFullPage").value = s.keyFullPage;
+  $<HTMLInputElement>("keySelection").value = s.keySelection;
+  $<HTMLInputElement>("keyBlock").value = s.keyBlock;
+}
+
+/** 写法不合法就退回默认值，免得用户把自己锁死 */
+function readKey(id: string, fallback: string): string {
+  const v = $<HTMLInputElement>(id).value.trim();
+  return parseHotkey(v) ? v : fallback;
 }
 
 async function save() {
@@ -21,9 +30,13 @@ async function save() {
     selectionIcon: $<HTMLInputElement>("selectionIcon").checked,
     defaultDisplay: $<HTMLSelectElement>("defaultDisplay").value as Settings["defaultDisplay"],
     disabledHosts: $<HTMLTextAreaElement>("disabledHosts").value.split("\n").map((x) => x.trim()).filter(Boolean),
+    keyFullPage: readKey("keyFullPage", DEFAULT_SETTINGS.keyFullPage),
+    keySelection: readKey("keySelection", DEFAULT_SETTINGS.keySelection),
+    keyBlock: readKey("keyBlock", DEFAULT_SETTINGS.keyBlock),
   };
   await chrome.storage.sync.set(s);
-  status("已保存。已打开的页面需要刷新后生效。");
+  await load(); // 非法写法被退回默认值时，界面上要能看出来
+  status("已保存，立即生效。");
 }
 
 function status(msg: string) {

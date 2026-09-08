@@ -34,7 +34,7 @@
   "commands": {
     "translate-page": {
       "suggested_key": {
-        "default": "Alt+Shift+T"
+        "default": "Alt+Shift+Y"
       },
       "description": "翻译整页 / 切换显示模式（不经过菜单）"
     },
