@@ -17,6 +17,9 @@ import {
   type TranslateResult,
 } from "./shared";
 
+/** 包住原文的壳，用于「仅译文」时单独隐藏原文 */
+const ORIGINAL_CLASS = "tt-original";
+
 let settings: Settings = DEFAULT_SETTINGS;
 let display: DisplayMode = "original";
 let pageTranslated = false;
@@ -34,8 +37,13 @@ const CSS = `
   line-height: 1.6;
 }
 .${TRANSLATION_CLASS}.tt-failed { border-left-color: rgba(230,110,110,.8); opacity: .85; cursor: pointer; }
-.tt-hide-original > *:not(.${TRANSLATION_CLASS}) { display: none !important; }
-.tt-hide-original { }
+/* 原文包一层 display:contents 的壳：结构上存在、布局上等于不存在，
+   这样「仅译文」只藏原文而不动页面其它部分（早先按 body 直接子元素隐藏，会把整页连译文一起藏掉） */
+.${ORIGINAL_CLASS} { display: contents; }
+.tt-hide-original .${ORIGINAL_CLASS} { display: none; }
+/* 单段翻译（悬停 / 快捷键）永远中英对照：整页处于「仅译文」时，这一段的原文也留着 */
+.tt-hide-original .tt-paired > .${ORIGINAL_CLASS} { display: contents; }
+.tt-working { outline: 2px dashed rgba(80,140,240,.5); outline-offset: 2px; }
 #tt-toast {
   position: fixed; z-index: 2147483647; right: 16px; bottom: 16px;
   background: rgba(28,28,32,.95); color: #fff; padding: 10px 14px; border-radius: 8px;
@@ -98,8 +106,18 @@ async function translate(scene: Scene, items: TranslateItem[], context?: string)
 
 // ---------------- 整页翻译 ----------------
 
+/** 把元素里原有的内容包进 .tt-original 壳（只包一次） */
+function wrapOriginal(el: HTMLElement) {
+  if (el.querySelector(`:scope > .${ORIGINAL_CLASS}`)) return;
+  const shell = document.createElement("span");
+  shell.className = ORIGINAL_CLASS;
+  while (el.firstChild) shell.appendChild(el.firstChild);
+  el.appendChild(shell);
+}
+
 function attachTranslation(el: HTMLElement, text: string, failed: boolean, original?: string) {
   el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  wrapOriginal(el);
   const d = document.createElement("div");
   d.className = TRANSLATION_CLASS + (failed ? " tt-failed" : "");
   if (failed) {
@@ -152,8 +170,8 @@ export function sanitize(html: string): string {
 
 function setDisplay(mode: DisplayMode) {
   display = mode;
-  const root = document.body;
-  root.classList.toggle("tt-hide-original", mode === "translation_only");
+  // 原文的显隐交给 CSS（.tt-hide-original + .tt-original），这里只管译文块本身
+  document.body.classList.toggle("tt-hide-original", mode === "translation_only");
   document.querySelectorAll(`.${TRANSLATION_CLASS}`).forEach((n) => {
     (n as HTMLElement).style.display = mode === "original" ? "none" : "block";
   });
@@ -200,7 +218,17 @@ async function translatePage() {
 
 function restorePage() {
   document.querySelectorAll(`.${TRANSLATION_CLASS}`).forEach((n) => n.remove());
-  document.querySelectorAll(`[${MARK_ATTR}]`).forEach((n) => n.removeAttribute(MARK_ATTR));
+  // 把原文壳拆掉，DOM 回到翻译前的样子
+  document.querySelectorAll(`.${ORIGINAL_CLASS}`).forEach((shell) => {
+    const parent = shell.parentNode;
+    if (!parent) return;
+    while (shell.firstChild) parent.insertBefore(shell.firstChild, shell);
+    shell.remove();
+  });
+  document.querySelectorAll(`[${MARK_ATTR}]`).forEach((n) => {
+    n.removeAttribute(MARK_ATTR);
+    n.classList.remove("tt-paired");
+  });
   document.body.classList.remove("tt-hide-original");
   pageTranslated = false;
   display = "original";
@@ -343,6 +371,8 @@ async function translateSelection(x: number, y: number) {
 
 let hoverTimer: number | null = null;
 let lastHovered: HTMLElement | null = null;
+/** 鼠标最后停留的位置：按快捷键翻"当前这段"时要靠它找元素 */
+let lastMouse = { x: 0, y: 0 };
 
 function modifierDown(e: MouseEvent): boolean {
   switch (settings.hoverModifier) {
@@ -357,15 +387,23 @@ function modifierDown(e: MouseEvent): boolean {
   }
 }
 
+/**
+ * 翻译单个段落，原文留在原处、译文插在紧下方——中英对照。
+ * 文字直接从 DOM 取（innerHTML 或 textContent），不做任何图像识别。
+ */
 async function translateHover(el: HTMLElement) {
   if (el.hasAttribute(MARK_ATTR)) return;
   const isHtml = hasInlineMarkup(el);
   const text = isHtml ? el.innerHTML : (el.textContent ?? "");
   el.setAttribute(MARK_ATTR, "1");
+  el.classList.add("tt-working"); // 翻译中给个淡淡的高亮，知道点中的是哪段
   try {
     const [r] = await translate("hover", [{ id: "h", text, is_html: isHtml }]);
     if (r.text !== undefined) {
       attachTranslation(el, r.text, false);
+      // 单段翻译一律对照显示：整页切过「仅译文」时 body 上有 tt-hide-original，
+      // 这里打个标记把这一段的原文豁免掉，否则用户看到的是原文消失、只剩译文
+      el.classList.add("tt-paired");
     } else {
       el.removeAttribute(MARK_ATTR);
       toast(r.error ?? "翻译失败");
@@ -373,7 +411,26 @@ async function translateHover(el: HTMLElement) {
   } catch (e) {
     el.removeAttribute(MARK_ATTR);
     toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    el.classList.remove("tt-working");
   }
+}
+
+/** 翻译鼠标当前所在的那一段（快捷键入口，不需要按住修饰键） */
+function translateBlockUnderCursor() {
+  const target = document.elementFromPoint(lastMouse.x, lastMouse.y);
+  // 先判"已翻过"再找块：blockAt 会跳过带 MARK_ATTR 的元素，
+  // 不先判的话对着已翻译的段落按快捷键会得到"没有可翻译的段落"这种误导提示
+  if (target?.closest(`[${MARK_ATTR}]`)) {
+    toast("这一段已经翻过了");
+    return;
+  }
+  const el = blockAt(target, (x) => getComputedStyle(x));
+  if (!el) {
+    toast("鼠标下没有可翻译的段落，把鼠标移到正文上再按一次");
+    return;
+  }
+  void translateHover(el);
 }
 
 // ---------------- 事件接线 ----------------
@@ -415,6 +472,14 @@ function install() {
     if (icon && e.target !== icon) removeIcon();
     if (panel && !panel.contains(e.target as Node)) closePanel();
   });
+
+  document.addEventListener(
+    "mousemove",
+    (e) => {
+      lastMouse = { x: e.clientX, y: e.clientY };
+    },
+    { passive: true },
+  );
 
   document.addEventListener("mousemove", (e) => {
     if (settings.hoverModifier === "none" || hostDisabled()) return;
@@ -464,6 +529,9 @@ function install() {
         break;
       case "set_display":
         if (pageTranslated) setDisplay(msg.mode);
+        break;
+      case "translate_block":
+        translateBlockUnderCursor();
         break;
       case "translate_selection": {
         const sel = window.getSelection();

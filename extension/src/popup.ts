@@ -48,8 +48,8 @@ function render() {
   hoverTile.disabled = off;
   const keyName = { alt: "Alt", ctrl: "Ctrl", shift: "Shift", none: "Alt" }[settings.hoverModifier];
   $("hoverDesc").innerHTML = hoverOn
-    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停在段落上`
-    : "已关闭，点击开启";
+    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停留，或按 Alt+Shift+H`
+    : "已关闭；Alt+Shift+H 仍可翻当前段";
   // innerHTML 重建后要重新绑事件
   document.getElementById("hoverKey")?.addEventListener("click", (e) => {
     e.stopPropagation(); // 别把点击传给格子（那是开关）

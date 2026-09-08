@@ -149,9 +149,14 @@ test("整页翻译：再触发一次切到仅译文，第三次回到原文", as
 
   await triggerPage(page);
   await expect(page.locator("body")).toHaveClass(/tt-hide-original/);
+  // 仅译文：原文壳藏起来，译文块仍然看得见（早先的实现按 body 直接子元素隐藏，会把整页连译文一起藏掉）
+  await expect(page.locator("#p1 .tt-original")).toBeHidden();
+  await expect(page.locator("#p1 .tt-translation")).toBeVisible();
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/);
 
   await triggerPage(page);
   await expect(page.locator("#p1 .tt-translation")).toBeHidden();
+  await expect(page.locator("#p1 .tt-original")).toBeVisible();
   await page.close();
 });
 
@@ -242,7 +247,7 @@ test("菜单：两个功能格子能开关，状态即时落到设置里", async
 
   await hover.click();
   await expect(hover).not.toHaveClass(/on/);
-  await expect(popup.locator("#hoverDesc")).toHaveText("已关闭，点击开启");
+  await expect(popup.locator("#hoverDesc")).toHaveText(/已关闭/);
 
   await icon.click();
   await expect(icon).not.toHaveClass(/on/);
@@ -328,4 +333,77 @@ test("菜单：桌面端没运行时状态变红并提示", async () => {
   await expect(popup.locator("#downHint")).toBeVisible();
   await popup.close();
   await sw.evaluate(async (port) => chrome.storage.sync.set({ port }), SERVICE_PORT);
+});
+
+// ---------------- 单段翻译（快捷键，中英对照） ----------------
+
+test("恢复原文后 DOM 回到翻译前的样子（原文壳与标记都清掉）", async () => {
+  const page = await openPage();
+  await triggerPage(page);
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await tell(ctx, "restore_page");
+  await expect(page.locator(".tt-translation")).toHaveCount(0);
+  await expect(page.locator(".tt-original")).toHaveCount(0);
+  await expect(page.locator("[data-tt-done]")).toHaveCount(0);
+  await expect(page.locator("#p1")).toHaveText("Rust is a systems programming language that runs blazingly fast and prevents segfaults.");
+  await page.close();
+});
+
+test("快捷键翻鼠标所在段：原文保留，译文插在下方", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8); // 不按任何修饰键
+  await tell(ctx, "translate_block");
+
+  const li = page.locator("#l1");
+  await expect(li.locator(".tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  // 原文还在：整段文字里既有英文原文也有中文译文
+  await expect(li).toContainText("Memory safety without garbage collection.");
+  // 译文是原文的兄弟节点，插在段内末尾
+  const lastClass = await li.evaluate((el) => (el.lastElementChild as HTMLElement)?.className ?? "");
+  expect(lastClass).toContain("tt-translation");
+  await page.close();
+});
+
+test("鼠标不在正文上时按快捷键给出提示而不是乱翻", async () => {
+  const page = await openPage();
+  await page.mouse.move(2, 2); // 页面左上角空白处
+  await tell(ctx, "translate_block");
+  await expect(page.locator("#tt-toast")).toHaveText(/没有可翻译的段落/, { timeout: 10_000 });
+  await page.close();
+});
+
+test("整页切到仅译文后，单段翻译仍然中英对照", async () => {
+  const page = await openPage();
+  await triggerPage(page); // 整页翻译
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await triggerPage(page); // 切到仅译文
+  await expect(page.locator("body")).toHaveClass(/tt-hide-original/);
+
+  // 此时翻一个还没翻过的段落（动态加进来的那段）
+  const box = await page.locator("#dynamic").boundingBox();
+  if (box) {
+    await page.mouse.move(box.x + 10, box.y + 5);
+    await tell(ctx, "translate_block");
+  }
+  // 仅译文模式下，这一段的原文仍然可见（tt-paired 豁免）
+  const dyn = page.locator("#dynamic");
+  if ((await dyn.count()) > 0) {
+    await expect(dyn.locator(".tt-translation")).toBeVisible({ timeout: 30_000 });
+    await expect(dyn.locator(".tt-original")).toBeVisible();
+  }
+  await page.close();
+});
+
+test("同一段落重复按快捷键不会翻第二次", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l2").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await tell(ctx, "translate_block");
+  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  await tell(ctx, "translate_block");
+  await expect(page.locator("#tt-toast")).toHaveText(/已经翻过了/, { timeout: 10_000 });
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(1);
+  await page.close();
 });

@@ -74,6 +74,7 @@ export type PageCommand =
   | { kind: "restore_page" }
   | { kind: "toggle_page" }
   | { kind: "translate_selection" }
+  | { kind: "translate_block" }
   | { kind: "set_display"; mode: DisplayMode };
 
 export type Reply =

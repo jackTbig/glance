@@ -66,7 +66,14 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
 chrome.commands?.onCommand.addListener(async (command) => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return;
-  const kind = command === "translate-page" ? "toggle_page" : command === "translate-selection" ? "translate_selection" : null;
+  const kind =
+    command === "translate-page"
+      ? "toggle_page"
+      : command === "translate-selection"
+        ? "translate_selection"
+        : command === "translate-block"
+          ? "translate_block"
+          : null;
   if (kind) {
     try {
       await chrome.tabs.sendMessage(tab.id, { kind });
