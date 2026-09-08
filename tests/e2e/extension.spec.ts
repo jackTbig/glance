@@ -407,3 +407,28 @@ test("同一段落重复按快捷键不会翻第二次", async () => {
   await expect(page.locator("#l2 .tt-translation")).toHaveCount(1);
   await page.close();
 });
+
+test("同一页面重复注入 content script 不会绑两套监听", async () => {
+  const page = await openPage();
+  const sw = ctx.serviceWorkers()[0];
+  // 模拟扩展更新后 background 的重新注入
+  await sw.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id !== undefined) {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+    }
+  });
+  await page.waitForTimeout(300);
+
+  await page.evaluate(() => {
+    const el = document.getElementById("p1")!;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 100, clientY: 100 }));
+  });
+  await expect(page.locator("#tt-icon")).toHaveCount(1, { timeout: 5000 });
+  await page.close();
+});

@@ -20,6 +20,10 @@ import {
 /** 包住原文的壳，用于「仅译文」时单独隐藏原文 */
 const ORIGINAL_CLASS = "tt-original";
 
+/** 扩展重新加载后，老页面里残留的这份脚本就失效了；所有 DOM 监听挂在这上面，一次全摘 */
+const abort = new AbortController();
+const EXT_GONE = "插件刚更新过，请刷新页面（F5）后再用。";
+
 let settings: Settings = DEFAULT_SETTINGS;
 let display: DisplayMode = "original";
 let pageTranslated = false;
@@ -86,15 +90,58 @@ function toast(msg: string, ms = 3200) {
   setTimeout(() => d.remove(), ms);
 }
 
+/** 扩展上下文还活着吗：重新加载/更新扩展后，老页面里的这份脚本会失去 chrome.runtime.id */
+function extensionAlive(): boolean {
+  try {
+    return chrome.runtime?.id !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** 上下文没了：摘掉所有监听、清掉页面上的浮层，只提示一次 */
+let gaveUp = false;
+function giveUp() {
+  if (gaveUp) return;
+  gaveUp = true;
+  abort.abort();
+  try {
+    icon?.remove();
+    panel?.remove();
+    observer?.disconnect();
+  } catch {
+    /* 页面可能已经在卸载 */
+  }
+  toast(EXT_GONE, 6000);
+}
+
 function send(msg: unknown): Promise<Reply> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(msg, (r: Reply) => {
-      if (chrome.runtime.lastError) {
-        resolve({ ok: false, error: chrome.runtime.lastError.message ?? "扩展通信失败" });
+    if (!extensionAlive()) {
+      giveUp();
+      resolve({ ok: false, error: EXT_GONE });
+      return;
+    }
+    try {
+      chrome.runtime.sendMessage(msg, (r: Reply) => {
+        const err = chrome.runtime.lastError?.message;
+        if (err) {
+          if (/context invalidated|Receiving end does not exist/i.test(err)) giveUp();
+          resolve({ ok: false, error: /context invalidated/i.test(err) ? EXT_GONE : err });
+        } else {
+          resolve(r);
+        }
+      });
+    } catch (e) {
+      // 上下文失效时 sendMessage 是同步抛异常，不走回调
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/context invalidated/i.test(msg)) {
+        giveUp();
+        resolve({ ok: false, error: EXT_GONE });
       } else {
-        resolve(r);
+        resolve({ ok: false, error: msg });
       }
-    });
+    }
   });
 }
 
@@ -442,6 +489,8 @@ function hostDisabled(): boolean {
 function install() {
   ensureStyle();
 
+  const opts = { signal: abort.signal };
+
   document.addEventListener("mouseup", (e) => {
     if (!settings.selectionIcon || hostDisabled()) return;
     setTimeout(() => {
@@ -466,19 +515,19 @@ function install() {
         if (icon === b) removeIcon();
       }, 2500);
     }, 10);
-  });
+  }, opts);
 
   document.addEventListener("mousedown", (e) => {
     if (icon && e.target !== icon) removeIcon();
     if (panel && !panel.contains(e.target as Node)) closePanel();
-  });
+  }, opts);
 
   document.addEventListener(
     "mousemove",
     (e) => {
       lastMouse = { x: e.clientX, y: e.clientY };
     },
-    { passive: true },
+    { passive: true, signal: abort.signal },
   );
 
   document.addEventListener("mousemove", (e) => {
@@ -498,14 +547,14 @@ function install() {
       hoverTimer = null;
       if (lastHovered === el) void translateHover(el);
     }, settings.hoverDelayMs);
-  });
+  }, opts);
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closePanel(true);
       removeIcon();
     }
-  });
+  }, opts);
 
   chrome.runtime.onMessage.addListener((msg: PageCommand, _s, sendResponse) => {
     switch (msg.kind) {
@@ -558,7 +607,15 @@ function install() {
   });
 }
 
+const INJECTED_FLAG = "__ttInjected";
+
 async function boot() {
+  // 扩展更新后 background 会给已打开的页面重新注入这份脚本；
+  // 老的那份上下文已失效（它自己会 giveUp 摘监听），但要挡住同一份被注入两次
+  const w = window as unknown as Record<string, unknown>;
+  if (w[INJECTED_FLAG]) return;
+  w[INJECTED_FLAG] = true;
+
   const r = await send({ kind: "settings" });
   if (r.ok && "settings" in r) settings = r.settings;
   install();

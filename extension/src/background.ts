@@ -63,6 +63,23 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
 // 点插件图标弹的是 popup.html（manifest 里的 action.default_popup），
 // 声明了 default_popup 之后 chrome.action.onClicked 不再触发，所以这里不挂它。
 
+/**
+ * 装好或更新后，给已经打开着的标签页重新注入 content script。
+ * 不这么做的话，老页面里跑的还是上一版脚本，它的扩展上下文已失效，
+ * 用户一划词就得到 "Extension context invalidated"，只能自己刷新页面。
+ */
+chrome.runtime.onInstalled.addListener(async () => {
+  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+  for (const tab of tabs) {
+    if (tab.id === undefined) continue;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+    } catch {
+      // 有些页面不让注入（下载页、PDF 查看器等），跳过就是
+    }
+  }
+});
+
 chrome.commands?.onCommand.addListener(async (command) => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id === undefined) return;
