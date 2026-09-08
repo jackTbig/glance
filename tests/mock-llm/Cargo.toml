@@ -1,0 +1,11 @@
+[package]
+name = "mock-llm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+serde.workspace = true
+serde_json.workspace = true
+futures = "0.3"
