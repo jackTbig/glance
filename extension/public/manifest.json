@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "translate-tool 翻译",
+  "version": "0.1.0",
+  "description": "整页 / 悬停 / 划词翻译，翻译由本机的 translate-tool 桌面端完成，API Key 不进浏览器。",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "翻译此页（再次点击切换双语/仅译文/原文）" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "translate-page": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "翻译整页 / 切换显示模式"
+    },
+    "translate-selection": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "翻译选中的文字"
+    }
+  }
+}

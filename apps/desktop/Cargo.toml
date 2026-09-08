@@ -7,6 +7,11 @@ edition.workspace = true
 name = "translate-tool"
 path = "src/main.rs"
 
+# 只跑本地服务、不开界面：端到端测试与排障用
+[[bin]]
+name = "translate-tool-service"
+path = "src/bin/service.rs"
+
 [lib]
 name = "translate_tool"
 path = "src/lib.rs"

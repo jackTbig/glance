@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Test Article</title>
+<style>body{font:16px/1.7 system-ui;margin:40px;max-width:760px} .hidden{display:none}</style></head>
+<body>
+<h1>Rust Programming Language</h1>
+<p id="p1">Rust is a systems programming language that runs blazingly fast and prevents segfaults.</p>
+<p id="p2">Read the <a href="https://doc.rust-lang.org">official documentation</a> for <b>more</b> details about ownership.</p>
+<p id="p3">这一段已经是中文，翻译时应当原样保留。</p>
+<p id="p4" class="hidden">This paragraph is hidden and must not be translated.</p>
+<pre id="code">fn main() { println!("this is code, do not translate"); }</pre>
+<ul><li id="l1">Memory safety without garbage collection.</li><li id="l2">Concurrency without data races.</li></ul>
+<p id="short">+</p>
+<div id="later"></div>
+<script>
+  // 模拟动态加载：1 秒后追加一段
+  setTimeout(() => {
+    const p = document.createElement("p");
+    p.id = "dynamic";
+    p.textContent = "This paragraph was added dynamically after the page loaded.";
+    document.getElementById("later").appendChild(p);
+  }, 1000);
+</script>
+</body>
+</html>
