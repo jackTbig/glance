@@ -265,18 +265,27 @@ async function translatePage() {
   }
 }
 
+/** 撤掉一个段落的译文，把它还原成翻译前的样子 */
+function removeTranslationFrom(el: Element) {
+  el.querySelectorAll(`:scope > .${TRANSLATION_CLASS}`).forEach((n) => n.remove());
+  el.querySelectorAll(`:scope > .${ORIGINAL_CLASS}`).forEach((shell) => {
+    while (shell.firstChild) el.insertBefore(shell.firstChild, shell);
+    shell.remove();
+  });
+  el.removeAttribute(MARK_ATTR);
+  el.classList.remove("tt-paired", "tt-working");
+  if (lastHovered === el) lastHovered = null; // 允许马上再翻一次
+}
+
 function restorePage() {
+  document.querySelectorAll(`[${MARK_ATTR}]`).forEach(removeTranslationFrom);
+  // 兜底：清掉任何残留（比如翻译中途被打断的）
   document.querySelectorAll(`.${TRANSLATION_CLASS}`).forEach((n) => n.remove());
-  // 把原文壳拆掉，DOM 回到翻译前的样子
   document.querySelectorAll(`.${ORIGINAL_CLASS}`).forEach((shell) => {
     const parent = shell.parentNode;
     if (!parent) return;
     while (shell.firstChild) parent.insertBefore(shell.firstChild, shell);
     shell.remove();
-  });
-  document.querySelectorAll(`[${MARK_ATTR}]`).forEach((n) => {
-    n.removeAttribute(MARK_ATTR);
-    n.classList.remove("tt-paired");
   });
   document.body.classList.remove("tt-hide-original");
   pageTranslated = false;
@@ -518,13 +527,17 @@ async function translateHover(el: HTMLElement) {
   }
 }
 
-/** 翻译鼠标当前所在的那一段（快捷键入口，不需要按住修饰键） */
+/**
+ * 快捷键入口：翻鼠标所在那一段；已经翻过的再按一次就撤掉译文。
+ * 先判「已翻过」再找块——blockAt 会跳过带 MARK_ATTR 的元素，
+ * 不先判的话对着已翻译的段落按键会得到「没有可翻译的段落」这种误导提示。
+ */
 function translateBlockUnderCursor() {
   const target = document.elementFromPoint(lastMouse.x, lastMouse.y);
-  // 先判"已翻过"再找块：blockAt 会跳过带 MARK_ATTR 的元素，
-  // 不先判的话对着已翻译的段落按快捷键会得到"没有可翻译的段落"这种误导提示
-  if (target?.closest(`[${MARK_ATTR}]`)) {
-    toast("这一段已经翻过了");
+  const done = target?.closest(`[${MARK_ATTR}]`);
+  if (done) {
+    removeTranslationFrom(done);
+    toast("已撤掉这一段的译文", 1600);
     return;
   }
   const el = blockAt(target, (x) => getComputedStyle(x));

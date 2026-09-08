@@ -456,17 +456,49 @@ test("整页切到仅译文后，单段翻译仍然中英对照", async () => {
   await page.close();
 });
 
-test("同一段落重复按快捷键不会翻第二次", async () => {
+test("再按一次快捷键撤掉这一段的译文，DOM 还原干净", async () => {
   const page = await openPage();
   const box = await page.locator("#l2").boundingBox();
   await page.mouse.move(box!.x + 20, box!.y + 8);
-  await tell(ctx, "translate_block");
+  await page.keyboard.press("Alt+Shift+H");
   await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
 
-  await page.waitForTimeout(200); // 模拟用户隔一会儿再按，别撞上去重窗口
-  await tell(ctx, "translate_block");
-  await expect(page.locator("#tt-toast")).toHaveText(/已经翻过了/, { timeout: 10_000 });
-  await expect(page.locator("#l2 .tt-translation")).toHaveCount(1);
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Alt+Shift+H");
+  await expect(page.locator("#tt-toast")).toHaveText(/已撤掉/, { timeout: 10_000 });
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
+  await expect(page.locator("#l2 .tt-original")).toHaveCount(0);
+  await expect(page.locator("#l2")).not.toHaveAttribute("data-tt-done", /.*/);
+  await expect(page.locator("#l2")).toHaveText("Concurrency without data races.");
+  await page.close();
+});
+
+test("撤掉之后还能再翻一次", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.keyboard.press("Alt+Shift+H");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Alt+Shift+H");
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Alt+Shift+H");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.close();
+});
+
+test("整页翻译后也能单独撤掉某一段", async () => {
+  const page = await openPage();
+  await triggerPage(page);
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  const box = await page.locator("#p1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.keyboard.press("Alt+Shift+H");
+  await expect(page.locator("#p1 .tt-translation")).toHaveCount(0);
+  // 别的段落不受影响
+  await expect(page.locator("#p2 .tt-translation")).toHaveText(/zh=/);
   await page.close();
 });
 
