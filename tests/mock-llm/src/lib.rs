@@ -129,7 +129,7 @@ async fn reset(State(st): State<Shared>) -> StatusCode {
     StatusCode::OK
 }
 
-pub fn router(st: Shared) -> Router {
+fn router(st: Shared) -> Router {
     Router::new()
         .route("/chat/completions", post(chat))
         .route("/v1/chat/completions", post(chat))
