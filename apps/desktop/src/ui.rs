@@ -14,6 +14,15 @@ use text_capture::{Capturer, Source};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 用户配的热键被别的程序占了就往下试这些。
+/// 常见组合（Ctrl+Alt+T/S/X/D/W、Ctrl+Shift+D）在实测机器上都已被占用，别放进来。
+const FALLBACK_HOTKEYS: &[&str] = &[
+    "Ctrl+Alt+Y", "Ctrl+Alt+G", "Ctrl+Alt+Q",
+    "Ctrl+Shift+Y", "Ctrl+Shift+Q", "Ctrl+Shift+T",
+    "Alt+Shift+Y", "Alt+Shift+Q", "Alt+Shift+Z",
+    "Ctrl+Alt+F9", "Ctrl+Alt+F10", "Ctrl+Alt+F11",
+];
+
 /// 界面里正在做什么
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -71,17 +80,28 @@ impl App {
 
         let hk = GlobalHotKeyManager::new().map_err(|e| anyhow::anyhow!("热键管理器初始化失败：{e}"))?;
         let mut hotkey_ids = Vec::new();
-        for (s, action) in [
-            (&cfg.hotkeys.selection, HotkeyAction::Selection),
-            (&cfg.hotkeys.screenshot, HotkeyAction::Screenshot),
-            (&cfg.hotkeys.toggle_panel, HotkeyAction::TogglePanel),
+        let mut hotkey_notes = Vec::new();
+        let mut taken: Vec<String> = Vec::new();
+        for (want, action, label) in [
+            (&cfg.hotkeys.selection, HotkeyAction::Selection, "划词"),
+            (&cfg.hotkeys.screenshot, HotkeyAction::Screenshot, "截屏"),
+            (&cfg.hotkeys.toggle_panel, HotkeyAction::TogglePanel, "面板"),
         ] {
-            match parse_hotkey(s) {
-                Ok(k) => match hk.register(k) {
-                    Ok(()) => hotkey_ids.push((k.id(), action)),
-                    Err(e) => tracing::warn!("热键 {s} 注册失败（可能被其他程序占用）：{e}"),
-                },
-                Err(e) => tracing::warn!("热键 {s} 无法解析：{e}"),
+            match register_with_fallback(&hk, want, &taken) {
+                Some((id, used)) => {
+                    if used != *want {
+                        tracing::warn!("{label}热键 {want} 被其他程序占用，已自动改用 {used}");
+                        hotkey_notes.push(format!("{label} {used}（{want} 被占用）"));
+                    } else {
+                        hotkey_notes.push(format!("{label} {used}"));
+                    }
+                    taken.push(used);
+                    hotkey_ids.push((id, action));
+                }
+                None => {
+                    tracing::error!("{label}热键 {want} 与所有备选都注册不上，请在设置里换一个组合");
+                    hotkey_notes.push(format!("{label} 未注册"));
+                }
             }
         }
 
@@ -98,10 +118,11 @@ impl App {
         };
 
         let status = format!(
-            "取词 {} · 识别 {} · 服务 {}",
+            "取词 {} · 识别 {} · 服务 {} · 热键 {}",
             if capturer.has_uia() { "就绪" } else { "不可用" },
             capturer.ocr_language().unwrap_or_else(|| "不可用".into()),
             server.as_ref().map(|s| format!("{}", s.port)).unwrap_or_else(|| "未启动".into()),
+            hotkey_notes.join("，"),
         );
         tracing::info!("{status}");
 
@@ -278,6 +299,22 @@ impl App {
             Err(e) => self.settings_msg = format!("设置有误：{e}"),
         }
     }
+}
+
+/// 先试用户配的，占用了就依次试备选（跳过本次已用掉的）。返回 (热键 id, 实际用的组合)
+fn register_with_fallback(hk: &GlobalHotKeyManager, want: &str, taken: &[String]) -> Option<(u32, String)> {
+    let mut candidates: Vec<String> = vec![want.to_string()];
+    candidates.extend(FALLBACK_HOTKEYS.iter().map(|s| s.to_string()));
+    for c in candidates {
+        if taken.iter().any(|t| t.eq_ignore_ascii_case(&c)) {
+            continue;
+        }
+        let Ok(k) = parse_hotkey(&c) else { continue };
+        if hk.register(k).is_ok() {
+            return Some((k.id(), c));
+        }
+    }
+    None
 }
 
 fn watch_cfg(cfg: &Config) -> WatchConfig {

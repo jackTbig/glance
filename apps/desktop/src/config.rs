@@ -136,9 +136,11 @@ pub struct HotkeyCfg {
 impl Default for HotkeyCfg {
     fn default() -> Self {
         Self {
-            selection: "Ctrl+Alt+T".into(),
-            screenshot: "Ctrl+Alt+S".into(),
-            toggle_panel: "Ctrl+Alt+X".into(),
+            // 别用 Ctrl+Alt+T / S / X / D / W：本机实测这些已被其他程序占用（错误码 1409）。
+            // 注册失败时 ui.rs 会自动往下试 FALLBACK_HOTKEYS 里的备选。
+            selection: "Ctrl+Alt+Y".into(),
+            screenshot: "Ctrl+Alt+G".into(),
+            toggle_panel: "Ctrl+Alt+Q".into(),
             hover_modifier: "alt".into(),
             hover_delay_ms: 300,
         }
@@ -333,7 +335,7 @@ mod tests {
         let cfg: Config = toml::from_str("version = 1\n[backend]\nopenai_model = \"x\"\n").unwrap();
         assert_eq!(cfg.backend.openai_model, "x");
         assert_eq!(cfg.backend.claude_model, "sonnet", "没写的字段用默认值");
-        assert_eq!(cfg.hotkeys.selection, "Ctrl+Alt+T");
+        assert_eq!(cfg.hotkeys.selection, "Ctrl+Alt+Y");
     }
 
     #[test]

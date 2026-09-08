@@ -11,10 +11,10 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 同 main.rs：只认 TRANSLATE_TOOL_LOG，不读 RUST_LOG（本机有个 RUST_LOG=error 会把日志压没）
+    let spec = std::env::var("TRANSLATE_TOOL_LOG").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "info".into());
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(&spec).unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
         .init();
 
     let args: Vec<String> = std::env::args().collect();
