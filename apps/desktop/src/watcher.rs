@@ -137,11 +137,18 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
     std::thread::Builder::new()
         .name("mouse-watcher".into())
         .spawn(move || {
+            tracing::info!(
+                "鼠标监视已启动：悬停修饰键 {}，停留 {} ms 触发",
+                cfg.hover_modifier.label_zh(),
+                cfg.hover_delay.as_millis()
+            );
             let mut st = WatchState::new(cfg.clone());
             let mut poll = cfg.poll;
+            let mut last_mod = false;
             while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
                 while let Ok(c) = cfg_rx.try_recv() {
                     poll = c.poll;
+                    tracing::info!("鼠标监视换配置：修饰键 {}，停留 {} ms", c.hover_modifier.label_zh(), c.hover_delay.as_millis());
                     st.set_config(c);
                 }
                 while let Ok(p) = pause_rx.try_recv() {
@@ -150,7 +157,14 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
                 let (x, y) = text_capture::screen::cursor_pos();
                 let left_down = unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 };
                 let mod_down = st.cfg.hover_modifier.is_down();
+                // 修饰键按下 / 松开各记一行：排「按住 Alt 没反应」时，
+                // 先要能分清是没读到按键，还是读到了但后面没走通
+                if mod_down != last_mod {
+                    tracing::debug!("悬停修饰键 {} {}，鼠标物理({x},{y})", st.cfg.hover_modifier.label_zh(), if mod_down { "按下" } else { "松开" });
+                    last_mod = mod_down;
+                }
                 if let Some(t) = st.step(x, y, left_down, mod_down, Instant::now()) {
+                    tracing::debug!("鼠标监视触发 {t:?}");
                     if tx.send(t).is_err() {
                         break;
                     }

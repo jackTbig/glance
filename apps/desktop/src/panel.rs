@@ -18,7 +18,10 @@ pub struct PanelState {
     pub translated: String,
     pub source: Source,
     pub phase: Phase,
-    /// 面板左上角（虚拟屏坐标）
+    /// 触发点（虚拟屏物理坐标）。**摆放永远以它为基准算**，
+    /// 拿上一帧摆出来的 pos 当锚点会每帧再加一次间距，面板会以每秒几百像素往右下爬走。
+    pub anchor: (i32, i32),
+    /// 上一帧实际摆到的左上角（虚拟屏物理坐标）；钉住后就固定用它
     pub pos: (i32, i32),
     /// 钉住后不自动关闭，可拖动
     pub pinned: bool,
@@ -27,13 +30,14 @@ pub struct PanelState {
 }
 
 impl PanelState {
-    pub fn new(scene_label: &'static str, source: Source, pos: (i32, i32)) -> PanelState {
+    pub fn new(scene_label: &'static str, source: Source, anchor: (i32, i32)) -> PanelState {
         PanelState {
             original: String::new(),
             translated: String::new(),
             source,
             phase: Phase::Working("正在取词…".into()),
-            pos,
+            anchor,
+            pos: anchor,
             pinned: false,
             opened_at: Instant::now(),
             scene_label,
@@ -82,9 +86,10 @@ pub fn place(
     (x, y)
 }
 
-/// 小图标位置：选区结束点的右下角
-pub fn place_icon(anchor: (i32, i32), size: u32, screen: (i32, i32, u32, u32)) -> (i32, i32) {
-    place(anchor, (size, size), screen, 8)
+/// 小图标位置：选区结束点的右下角。
+/// `size` 与 `gap` 都是**物理**像素，调用方负责按当前缩放比换算（见 `dpi::Dpi`）。
+pub fn place_icon(anchor: (i32, i32), size: u32, screen: (i32, i32, u32, u32), gap: i32) -> (i32, i32) {
+    place(anchor, (size, size), screen, gap)
 }
 
 #[cfg(test)]
@@ -111,6 +116,11 @@ mod tests {
     }
 
     #[test]
+    fn icon_sits_just_off_the_release_point() {
+        assert_eq!(place_icon((1680, 393), 60, (0, 0, 3072, 1920), 8), (1688, 401));
+    }
+
+    #[test]
     fn clamps_when_nothing_fits() {
         let (x, y) = place((10, 10), (1900, 1070), SCREEN, 12);
         assert!(x >= 0 && y >= 0);
@@ -122,6 +132,25 @@ mod tests {
         let screen = (-1920, -200, 1920, 1080);
         let (x, y) = place((-1900, -180), (400, 300), screen, 12);
         assert!(x >= -1920 && y >= -200, "({x},{y})");
+    }
+
+    /// 回归：界面每帧都会把摆放结果记回 `pos`。要是摆放拿 `pos` 当锚点，
+    /// 每帧都会再加一次间距，面板会以每秒几百像素往右下爬走、绕屏一圈——
+    /// 用户看到的就是「翻译完了但屏幕上什么都没有」。
+    #[test]
+    fn repeated_placement_does_not_drift() {
+        const BIG: (i32, i32, u32, u32) = (0, 0, 3072, 1920);
+        let mut p = PanelState::new("悬停翻译", Source::Uia, (1633, 358));
+        let mut last: Option<(i32, i32)> = None;
+        for frame in 0..40 {
+            let at = place(p.anchor, (840, 920), BIG, 28);
+            p.pos = at;
+            if let Some(prev) = last {
+                assert_eq!(prev, at, "第 {frame} 帧面板挪了位");
+            }
+            last = Some(at);
+        }
+        assert_eq!(last, Some((1661, 386)));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! egui 界面：译文浮窗、划词小图标、截屏框选、设置窗、托盘
 use crate::config::Config;
+use crate::dpi::Dpi;
 use crate::engine::{Engine, Event, Job};
 use crate::hotkey::{parse_hotkey, HoverModifier};
 use crate::panel::{place, place_icon, PanelState, Phase};
@@ -22,6 +23,10 @@ const FALLBACK_HOTKEYS: &[&str] = &[
     "Alt+Shift+Y", "Alt+Shift+Q", "Alt+Shift+Z",
     "Ctrl+Alt+F9", "Ctrl+Alt+F10", "Ctrl+Alt+F11",
 ];
+
+/// 框选完到真正抓图之间等多久：够窗口挪走、桌面重新合成，又不至于让人觉得卡。
+/// 界面按 33 ms 一帧跑，这里相当于等 5 帧。
+const MASK_CLEAR_DELAY: Duration = Duration::from_millis(180);
 
 /// 界面里正在做什么
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +52,13 @@ pub struct App {
     hotkey_ids: Vec<(u32, HotkeyAction)>,
     mode: Mode,
     panel: Option<PanelState>,
+    /// 框选已完成、等遮罩窗从屏幕上撤走再抓图（物理矩形 + 框完的时刻）。
+    /// 直接抓会把半透明遮罩一起拍进去，识别的是被压暗的画面。
+    pending_region: Option<((i32, i32, u32, u32), Instant)>,
+    /// 刚进入框选：给遮罩窗要一次焦点，不然 Esc 取消收不到按键
+    focus_selector: bool,
+    /// 上次记进日志的小图标位置。界面 30 fps 重画，不去重的话一秒刷 30 行
+    logged_icon_at: Option<(i32, i32)>,
     /// 当前有效的任务序号，用来丢弃过期事件
     cur_seq: u64,
     mouse_left_panel_at: Option<Instant>,
@@ -117,6 +129,23 @@ impl App {
             None
         };
 
+        // 一次性把 DPI 口径写进日志：Win32 坐标与 egui 窗口定位的单位不一致时，
+        // 所有跟位置有关的功能（划词图标、译文面板、截屏遮罩）都会整体漂移
+        #[cfg(windows)]
+        unsafe {
+            windows_link::link!("user32.dll" "system" fn GetDpiForSystem() -> u32);
+            windows_link::link!("user32.dll" "system" fn GetThreadDpiAwarenessContext() -> isize);
+            windows_link::link!("user32.dll" "system" fn GetAwarenessFromDpiAwarenessContext(value: isize) -> i32);
+            let dpi = GetDpiForSystem();
+            let aware = GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext());
+            let (vx, vy, vw, vh) = text_capture::screen::virtual_screen();
+            tracing::info!(
+                "DPI 探测：system_dpi={dpi}（缩放 {}%） awareness={aware} 虚拟屏=({vx},{vy}) {vw}x{vh} egui_ppp={}",
+                dpi * 100 / 96,
+                cc.egui_ctx.pixels_per_point()
+            );
+        }
+
         let status = format!(
             "取词 {} · 识别 {} · 服务 {} · 热键 {}",
             if capturer.has_uia() { "就绪" } else { "不可用" },
@@ -139,6 +168,9 @@ impl App {
             hotkey_ids,
             mode: Mode::Idle,
             panel: None,
+            pending_region: None,
+            focus_selector: false,
+            logged_icon_at: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
             settings_open: false,
@@ -158,21 +190,27 @@ impl App {
     }
 
     fn start(&mut self, job: Job, scene_label: &'static str, anchor: (i32, i32), source: Source) {
+        tracing::debug!("{scene_label} 开始，锚点物理({},{}) job={job:?}", anchor.0, anchor.1);
         self.cur_seq = self.engine.submit(job);
-        let mut p = PanelState::new(scene_label, source, anchor);
-        p.pos = anchor;
-        self.panel = Some(p);
+        self.panel = Some(PanelState::new(scene_label, source, anchor));
         self.mode = Mode::Panel;
         self.mouse_left_panel_at = None;
     }
 
-    /// 该点所在进程是否在例外列表里
+    /// 该点所在进程是否在例外列表里。
+    /// 命中会静默吞掉悬停与小图标，所以一定要打日志：不然表现就是「按住 Alt 没反应」。
     fn excluded_at(&self, x: i32, y: i32) -> bool {
         if self.cfg.ui.excluded_processes.is_empty() {
             return false;
         }
         match self.capturer.process_at(x, y) {
-            Some(p) => self.cfg.ui.excluded_processes.iter().any(|e| e.eq_ignore_ascii_case(&p)),
+            Some(p) => {
+                let hit = self.cfg.ui.excluded_processes.iter().any(|e| e.eq_ignore_ascii_case(&p));
+                if hit {
+                    tracing::debug!("({x},{y}) 属于 {p}，在例外进程列表里，不响应");
+                }
+                hit
+            }
             None => false,
         }
     }
@@ -181,12 +219,19 @@ impl App {
         while let Ok(t) = self.triggers.try_recv() {
             match t {
                 Trigger::SelectionEnded { x, y } => {
-                    if self.cfg.ui.selection_icon && !matches!(self.mode, Mode::Selecting { .. }) && !self.excluded_at(x, y) {
+                    if !self.cfg.ui.selection_icon {
+                        tracing::debug!("划词结束于({x},{y})，但设置里关了小图标");
+                    } else if matches!(self.mode, Mode::Selecting { .. }) {
+                        tracing::debug!("划词结束于({x},{y})，但正在框选，忽略");
+                    } else if !self.excluded_at(x, y) {
+                        tracing::debug!("划词结束于物理({x},{y})，弹小图标");
                         self.mode = Mode::Icon { pos: (x, y), since: Instant::now() };
                     }
                 }
                 Trigger::Hovered { x, y } => {
-                    if matches!(self.mode, Mode::Idle | Mode::Icon { .. }) && !self.excluded_at(x, y) {
+                    if !matches!(self.mode, Mode::Idle | Mode::Icon { .. }) {
+                        tracing::debug!("悬停触发于({x},{y})，但界面正忙（{:?}），忽略", self.mode);
+                    } else if !self.excluded_at(x, y) {
                         self.start(Job::Hover { x, y }, "悬停翻译", (x, y), Source::Uia);
                     }
                 }
@@ -206,6 +251,8 @@ impl App {
                 HotkeyAction::Screenshot => {
                     self.mode = Mode::Selecting { start: None };
                     self.panel = None;
+                    self.pending_region = None;
+                    self.focus_selector = true;
                 }
                 HotkeyAction::TogglePanel => {
                     if self.panel.is_some() {
@@ -280,6 +327,7 @@ impl App {
     }
 
     fn close_panel(&mut self) {
+        self.logged_icon_at = None;
         self.panel = None;
         self.mode = Mode::Idle;
         self.mouse_left_panel_at = None;
@@ -356,6 +404,15 @@ impl eframe::App for App {
         self.drain_events();
         self.drain_tray(&ctx, _frame);
 
+        // 框选完等遮罩真的从屏幕上撤走再抓图（见 draw_region_selector 末尾）
+        if let Some((rect, at)) = self.pending_region {
+            if at.elapsed() >= MASK_CLEAR_DELAY {
+                self.pending_region = None;
+                let (x, y, w, h) = rect;
+                self.start(Job::Region { x, y, w, h }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+            }
+        }
+
         // 小图标超时消失
         if let Mode::Icon { since, .. } = self.mode {
             if since.elapsed() > Duration::from_millis(self.cfg.ui.icon_timeout_ms) {
@@ -388,13 +445,21 @@ impl App {
 
     fn draw_icon(&mut self, ui: &mut egui::Ui, pos: (i32, i32)) {
         let ctx = ui.ctx().clone();
+        let dpi = Dpi::from_ctx(&ctx);
+        // 摆放算在物理坐标系里（锚点来自 GetCursorPos），图标边长是逻辑像素，先换成物理
         let screen = text_capture::screen::virtual_screen();
-        let (x, y) = place_icon(pos, 30, screen);
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x as f32, y as f32)));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(30.0, 30.0)));
+        const ICON: f32 = 30.0;
+        let (x, y) = place_icon(pos, dpi.to_physical_len(ICON).max(1) as u32, screen, dpi.to_physical_len(4.0));
+        let logical = dpi.to_logical_pos((x, y));
+        if self.logged_icon_at != Some((x, y)) {
+            self.logged_icon_at = Some((x, y));
+            tracing::debug!("小图标：锚点物理({},{}) → 摆到物理({x},{y}) → 逻辑{logical:?} ppp={}", pos.0, pos.1, dpi.ppp());
+        }
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(logical));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(ICON, ICON)));
         let mut clicked = false;
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let r = ui.allocate_response(egui::vec2(30.0, 30.0), egui::Sense::click());
+            let r = ui.allocate_response(egui::vec2(ICON, ICON), egui::Sense::click());
             let painter = ui.painter();
             let bg = if r.hovered() { Color32::from_rgb(60, 120, 220) } else { Color32::from_rgb(40, 90, 180) };
             painter.rect_filled(r.rect, CornerRadius::same(8), bg);
@@ -414,11 +479,19 @@ impl App {
             self.mode = Mode::Idle;
             return;
         };
+        let dpi = Dpi::from_ctx(&ctx);
         let screen = text_capture::screen::virtual_screen();
+        // w/h 是逻辑像素（配置里按点写的），但 p.anchor 与 screen 是物理的，
+        // 所以摆放统一在物理坐标系里算，算完再换成逻辑交给窗口
         let w = self.cfg.ui.panel_width;
         let h = self.cfg.ui.panel_max_height;
-        let (x, y) = if p.pinned { p.pos } else { place(p.pos, (w as u32, h as u32), screen, 14) };
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(x as f32, y as f32)));
+        let size_phys = dpi.to_physical_size((w, h));
+        let (x, y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
+        let logical = dpi.to_logical_pos((x, y));
+        if (x, y) != p.pos {
+            tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{h}) ppp={}", p.anchor, dpi.ppp());
+        }
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(logical));
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(w, h)));
 
         let mut close = false;
@@ -498,9 +571,9 @@ impl App {
             return;
         }
 
-        // 鼠标离开面板一段时间后自动关（没钉住时）
+        // 鼠标离开面板一段时间后自动关（没钉住时）。鼠标是物理坐标，面板矩形也用物理的。
         let (mx, my) = text_capture::screen::cursor_pos();
-        let inside = mx >= x && my >= y && mx <= x + w as i32 && my <= y + h as i32;
+        let inside = mx >= x && my >= y && mx <= x + size_phys.0 as i32 && my <= y + size_phys.1 as i32;
         if inside {
             self.mouse_left_panel_at = None;
         } else if self.mouse_left_panel_at.is_none() {
@@ -517,9 +590,16 @@ impl App {
     /// 截屏框选：整屏半透明遮罩，拖出一个亮框
     fn draw_region_selector(&mut self, root_ui: &mut egui::Ui, start: Option<(i32, i32)>) {
         let ctx = root_ui.ctx().clone();
+        let dpi = Dpi::from_ctx(&ctx);
+        // 虚拟屏是物理像素，遮罩窗的位置与大小要换成逻辑；
+        // 框出来的矩形留在物理坐标系里，因为 BitBlt 抓的是物理像素
         let (sx, sy, sw, sh) = text_capture::screen::virtual_screen();
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(sx as f32, sy as f32)));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(sw as f32, sh as f32)));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(dpi.to_logical_pos((sx, sy))));
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(dpi.to_logical_size((sw, sh))));
+        if self.focus_selector {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.focus_selector = false;
+        }
         let (mx, my) = text_capture::screen::cursor_pos();
         let mut finish: Option<(i32, i32, u32, u32)> = None;
         let mut cancel = false;
@@ -530,21 +610,22 @@ impl App {
                 let painter = ui.painter();
                 if let Some((ax, ay)) = start {
                     let r = egui::Rect::from_two_pos(
-                        egui::pos2((ax - sx) as f32, (ay - sy) as f32),
-                        egui::pos2((mx - sx) as f32, (my - sy) as f32),
+                        dpi.point_in_window((ax, ay), (sx, sy)),
+                        dpi.point_in_window((mx, my), (sx, sy)),
                     );
                     painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
                     painter.rect_stroke(r, CornerRadius::ZERO, egui::Stroke::new(1.5, Color32::from_rgb(120, 180, 255)), egui::StrokeKind::Inside);
                     painter.text(
                         r.left_top() + egui::vec2(0.0, -18.0),
                         Align2::LEFT_TOP,
-                        format!("{}×{}", r.width() as i32, r.height() as i32),
+                        // 报物理像素：这才是交给识别的那块图的真实尺寸
+                        format!("{}×{}", (ax - mx).abs(), (ay - my).abs()),
                         egui::FontId::proportional(13.0),
                         Color32::WHITE,
                     );
                 } else {
                     painter.text(
-                        egui::pos2(sw as f32 / 2.0, 40.0),
+                        egui::pos2(dpi.to_logical_len(sw as f32) / 2.0, 40.0),
                         Align2::CENTER_CENTER,
                         "拖动框选要翻译的区域，Esc 取消",
                         egui::FontId::proportional(16.0),
@@ -575,7 +656,11 @@ impl App {
             self.mode = Mode::Idle;
         }
         if let Some((x, y, w, h)) = finish {
-            self.start(Job::Region { x, y, w, h }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+            // 先把遮罩撤走再抓图：这一刻整屏还盖着半透明黑罩，立刻 BitBlt 拍到的是被压暗的画面，
+            // 识别率会掉、甚至一个字都认不出来。改成排队，等窗口挪走几帧再交给引擎。
+            tracing::debug!("框选完成，物理矩形({x},{y}) {w}x{h}，等遮罩撤走后再抓图");
+            self.pending_region = Some(((x, y, w, h), Instant::now()));
+            self.mode = Mode::Idle;
         }
     }
 

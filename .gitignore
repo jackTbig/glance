@@ -8,3 +8,7 @@ tests/e2e/test-results
 tests/e2e/node_modules
 tests/e2e/test-results
 extension/node_modules
+
+# 探针产出的存证截图
+*_live.png
+region_strip.png

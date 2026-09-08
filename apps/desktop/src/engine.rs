@@ -81,8 +81,12 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
             }
         },
         Job::Hover { x, y } => match capturer.at_point(x, y) {
-            Ok(c) if !c.is_empty() => (Scene::Hover, c.text, c.source),
+            Ok(c) if !c.is_empty() => {
+                tracing::debug!("悬停取词命中 物理({x},{y}) 来源{} {}字", c.source.label_zh(), c.text.chars().count());
+                (Scene::Hover, c.text, c.source)
+            }
             Ok(_) => {
+                tracing::debug!("悬停取词落空 物理({x},{y})：无障碍接口与文字识别都没拿到文本");
                 let _ = ev.send(Event::Nothing { seq, reason: "这里没有可识别的文字".into() });
                 return;
             }
@@ -92,8 +96,12 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
             }
         },
         Job::Region { x, y, w, h } => match capturer.region(x, y, w, h) {
-            Ok(c) if !c.is_empty() => (Scene::Screenshot, c.text, c.source),
+            Ok(c) if !c.is_empty() => {
+                tracing::debug!("截屏识别命中 物理({x},{y}) {w}x{h} {}字", c.text.chars().count());
+                (Scene::Screenshot, c.text, c.source)
+            }
             Ok(_) => {
+                tracing::debug!("截屏识别落空 物理({x},{y}) {w}x{h}");
                 let _ = ev.send(Event::Nothing { seq, reason: "选区里没识别出文字".into() });
                 return;
             }
