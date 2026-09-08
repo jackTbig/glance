@@ -12,6 +12,8 @@ name = "live-caption"
 path = "src/main.rs"
 
 [dependencies]
+# 翻译核心（三后端封装）已外置到 translate-tool 仓库的共享 crate；改翻译逻辑去那里改
+ai-translate = { path = "../translate-tool/crates/ai-translate" }
 # glow（OpenGL）渲染器：wgpu 在本机 Arc 上不给带 alpha 的合成模式，透明窗会变成不透明黑底
 eframe = { version = "0.36", features = ["glow"] }
 egui = "0.36"

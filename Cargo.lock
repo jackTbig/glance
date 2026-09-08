@@ -160,6 +160,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-translate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2411,6 +2423,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 name = "live-caption"
 version = "1.0.2"
 dependencies = [
+ "ai-translate",
  "anyhow",
  "chrono",
  "crossbeam-channel",
