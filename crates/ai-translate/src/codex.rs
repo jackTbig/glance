@@ -14,8 +14,15 @@ pub fn codex_translate(cfg: &BackendConfig, system_prompt: &str, user_message: &
     if !cfg.codex_model.trim().is_empty() {
         cmd.args(["-m", cfg.codex_model.trim()]);
     }
-    cmd.arg(format!("{system_prompt}\n\n{user_message}")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // prompt 走标准输入而不是命令行参数：Windows 上 codex 是 .cmd，
+    // Rust 1.77+ 对批处理文件的参数做严格校验，含中文/换行的长 prompt 会被拒（batch file arguments are invalid）
+    cmd.arg("-").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("启动 {bin} 失败：{e}"))?;
+    {
+        use std::io::Write;
+        let mut si = child.stdin.take().ok_or_else(|| anyhow::anyhow!("拿不到 codex 的标准输入"))?;
+        si.write_all(format!("{system_prompt}\n\n{user_message}").as_bytes())?;
+    }
     let deadline = Instant::now() + cfg.timeout;
     loop {
         if let Some(status) = child.try_wait()? {
