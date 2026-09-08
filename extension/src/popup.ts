@@ -47,9 +47,10 @@ function render() {
   hoverTile.classList.toggle("on", hoverOn && !off);
   hoverTile.disabled = off;
   const keyName = { alt: "Alt", ctrl: "Ctrl", shift: "Shift", none: "Alt" }[settings.hoverModifier];
+  // 这个格子管的是「自动触发」：关掉后快捷键照样能翻当前段，所以文案要写清楚
   $("hoverDesc").innerHTML = hoverOn
-    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停留，或按 Alt+Shift+H`
-    : "已关闭；Alt+Shift+H 仍可翻当前段";
+    ? `按住 <b class="key" id="hoverKey">${keyName}</b> 停留自动翻`
+    : `自动触发已关；仍可按 ${settings.keyBlock}`;
   // innerHTML 重建后要重新绑事件
   document.getElementById("hoverKey")?.addEventListener("click", (e) => {
     e.stopPropagation(); // 别把点击传给格子（那是开关）
@@ -61,6 +62,9 @@ function render() {
   const iconTile = $<HTMLButtonElement>("tile-icon");
   iconTile.classList.toggle("on", settings.selectionIcon && !off);
   iconTile.disabled = off;
+  $("iconDesc").textContent = settings.selectionIcon
+    ? "选中后弹「译」按钮"
+    : `图标已关；仍可按 ${settings.keySelection}`;
 
   // 拿不到域名（当前页不能注入，或没有 activeTab 授权）时没有站点可停用，整行藏起来
   $("siteRow").hidden = host === "";

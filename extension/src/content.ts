@@ -436,7 +436,7 @@ let lastHovered: HTMLElement | null = null;
 /** 鼠标最后停留的位置：按快捷键翻"当前这段"时要靠它找元素 */
 let lastMouse = { x: 0, y: 0 };
 
-function modifierDown(e: MouseEvent): boolean {
+function modifierDown(e: { altKey: boolean; ctrlKey: boolean; shiftKey: boolean }): boolean {
   switch (settings.hoverModifier) {
     case "alt":
       return e.altKey;
@@ -447,6 +447,46 @@ function modifierDown(e: MouseEvent): boolean {
     default:
       return false;
   }
+}
+
+/** 这次按下的是不是悬停用的那个修饰键 */
+function isHoverModifierKey(e: KeyboardEvent): boolean {
+  switch (settings.hoverModifier) {
+    case "alt":
+      return e.key === "Alt";
+    case "ctrl":
+      return e.key === "Control";
+    case "shift":
+      return e.key === "Shift";
+    default:
+      return false;
+  }
+}
+
+function cancelHover() {
+  if (hoverTimer !== null) {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+  }
+}
+
+/**
+ * 安排一次悬停翻译。两条路都会走到这里：
+ * 1. 按住修饰键的状态下移动鼠标；
+ * 2. 鼠标已经停好了才按下修饰键——**这条最常用**，而它没有新的 mousemove 事件，
+ *    早先只在 mousemove 里判定，导致「先把鼠标停在文字上再按 Alt」完全不触发。
+ */
+function scheduleHoverAt(x: number, y: number, force = false) {
+  if (settings.hoverModifier === "none" || hostDisabled()) return;
+  const el = blockAt(document.elementFromPoint(x, y), (t) => getComputedStyle(t));
+  if (!el) return;
+  if (el === lastHovered && !force) return;
+  lastHovered = el;
+  cancelHover();
+  hoverTimer = window.setTimeout(() => {
+    hoverTimer = null;
+    if (lastHovered === el) void translateHover(el);
+  }, settings.hoverDelayMs);
 }
 
 /**
@@ -546,22 +586,19 @@ function install() {
   );
 
   document.addEventListener("mousemove", (e) => {
-    if (settings.hoverModifier === "none" || hostDisabled()) return;
     if (!modifierDown(e)) {
-      if (hoverTimer !== null) {
-        clearTimeout(hoverTimer);
-        hoverTimer = null;
-      }
+      cancelHover();
+      lastHovered = null;
       return;
     }
-    const el = blockAt(e.target as Element, (x) => getComputedStyle(x));
-    if (!el || el === lastHovered) return;
-    lastHovered = el;
-    if (hoverTimer !== null) clearTimeout(hoverTimer);
-    hoverTimer = window.setTimeout(() => {
-      hoverTimer = null;
-      if (lastHovered === el) void translateHover(el);
-    }, settings.hoverDelayMs);
+    scheduleHoverAt(e.clientX, e.clientY);
+  }, opts);
+
+  document.addEventListener("keyup", (e) => {
+    if (isHoverModifierKey(e)) {
+      cancelHover();
+      lastHovered = null;
+    }
   }, opts);
 
   document.addEventListener("keydown", (e) => {
@@ -569,6 +606,11 @@ function install() {
       closePanel(true);
       removeIcon();
       return;
+    }
+    // 鼠标已经停在某段上、这时才按下修饰键：没有 mousemove 事件，得在这里起判定
+    if (!e.repeat && isHoverModifierKey(e)) {
+      lastHovered = null; // 允许对同一段重新计时
+      scheduleHoverAt(lastMouse.x, lastMouse.y, true);
     }
     // 页面里自己认快捷键。不能只靠 chrome.commands：它最多分配 4 个，
     // 且与浏览器内置键冲突时静默不给（Alt+Shift+T 就永远拿不到）

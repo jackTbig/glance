@@ -191,14 +191,62 @@ test("划词：选中后出图标，点击弹面板给译文", async () => {
   await page.close();
 });
 
-test("悬停：按住 Alt 停在段落上就地插译文", async () => {
+test("悬停：鼠标先停好再按住 Alt（最常见的操作顺序）", async () => {
   const page = await openPage();
   const box = await page.locator("#l2").boundingBox();
+  // 先把鼠标移到段落上，此时不按任何键
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.waitForTimeout(200);
+  // 再按住修饰键——这一步没有 mousemove 事件，只在 mousemove 里判定的话永远不触发
+  await page.keyboard.down("Alt");
+  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.keyboard.up("Alt");
+  await page.close();
+});
+
+test("悬停：先按住 Alt 再移动鼠标也要触发", async () => {
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
   await page.keyboard.down("Alt");
   await page.mouse.move(box!.x + 20, box!.y + 8);
   await page.mouse.move(box!.x + 24, box!.y + 10);
-  await expect(page.locator("#l2 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
   await page.keyboard.up("Alt");
+  await page.close();
+});
+
+test("悬停：改成 Ctrl 后按 Ctrl 生效、按 Alt 不生效", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverModifier: "ctrl" }));
+  const page = await openPage();
+  const box = await page.locator("#l1").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+
+  await page.keyboard.down("Alt");
+  await page.waitForTimeout(600);
+  await expect(page.locator("#l1 .tt-translation")).toHaveCount(0);
+  await page.keyboard.up("Alt");
+
+  await page.keyboard.down("Control");
+  await expect(page.locator("#l1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.keyboard.up("Control");
+
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverModifier: "alt" }));
+  await page.close();
+});
+
+test("悬停：松开修饰键就取消，还没到时间不该翻", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverDelayMs: 1200 }));
+  const page = await openPage();
+  const box = await page.locator("#l2").boundingBox();
+  await page.mouse.move(box!.x + 20, box!.y + 8);
+  await page.keyboard.down("Alt");
+  await page.waitForTimeout(300);
+  await page.keyboard.up("Alt"); // 没到 1200ms 就松手
+  await page.waitForTimeout(1500);
+  await expect(page.locator("#l2 .tt-translation")).toHaveCount(0);
+  await sw.evaluate(async () => chrome.storage.sync.set({ hoverDelayMs: 120 }));
   await page.close();
 });
 
@@ -248,7 +296,7 @@ test("菜单：两个功能格子能开关，状态即时落到设置里", async
 
   await hover.click();
   await expect(hover).not.toHaveClass(/on/);
-  await expect(popup.locator("#hoverDesc")).toHaveText(/已关闭/);
+  await expect(popup.locator("#hoverDesc")).toHaveText(/自动触发已关；仍可按/);
 
   await icon.click();
   await expect(icon).not.toHaveClass(/on/);
@@ -263,6 +311,18 @@ test("菜单：两个功能格子能开关，状态即时落到设置里", async
   await hover.click();
   await icon.click();
   await expect(hover).toHaveClass(/on/);
+  await popup.close();
+});
+
+test("菜单：关掉格子时文案要说清快捷键仍可用", async () => {
+  const popup = await openPopup();
+  await popup.locator("#tile-hover").click();
+  await expect(popup.locator("#hoverDesc")).toHaveText(/仍可按 Alt\+Shift\+H/);
+  await popup.locator("#tile-icon").click();
+  await expect(popup.locator("#iconDesc")).toHaveText(/仍可按 Alt\+Shift\+S/);
+  // 还原
+  await popup.locator("#tile-hover").click();
+  await popup.locator("#tile-icon").click();
   await popup.close();
 });
 
