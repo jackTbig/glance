@@ -1,9 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["apps/desktop", "crates/ai-translate", "crates/text-capture", "tests/mock-llm"]
+members = ["apps/desktop", "apps/caption", "crates/ai-translate", "crates/desktop-shell", "crates/text-capture", "tests/mock-llm"]
+# 裸 `cargo build/test/check` 只碰这几个成员，**故意把 apps/caption 排除在外**。
+# 字幕依赖 whisper-rs，它的 build.rs 要跑 CMake/Ninja 编 Vulkan 着色器，首次 5–10 分钟，
+# 还要求机器上有 Vulkan SDK。实测（live-caption 会话）：`-p`、裸 `cargo build`、`cargo check`
+# 都不会触发它，只有 `--workspace` / `--all` 会。所以：
+#   1. 脚本与 CI 一律显式 `-p`，禁用 `--workspace`；
+#   2. rust-analyzer 默认跑 `cargo check --workspace`，必须限制范围（见 .vscode/settings.json），
+#      否则别人克隆下来一打开编辑器就卡在缺 Vulkan SDK 上——本机有 SDK 的人完全无感。
+default-members = ["apps/desktop", "crates/ai-translate", "crates/desktop-shell", "crates/text-capture", "tests/mock-llm"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [workspace.dependencies]

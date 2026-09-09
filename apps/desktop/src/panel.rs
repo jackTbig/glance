@@ -117,6 +117,38 @@ mod tests {
 
     const SCREEN: (i32, i32, u32, u32) = (0, 0, 1920, 1080);
 
+    /// 面板摆放走的是「物理坐标系里算 → 换成逻辑坐标设窗口」这条链，
+    /// 这里把整条链走一遍，确认 200% 下面板落在鼠标旁边而不是两倍远处
+    #[test]
+    fn panel_placement_chain_stays_next_to_cursor() {
+        let d = desktop_shell::dpi::Dpi::new(2.0);
+        let screen = (0, 0, 3072u32, 1920u32);
+        let cursor = (1000, 600); // 物理
+        let size_phys = d.to_physical_size((420.0, 460.0));
+        let gap_phys = d.to_physical_len(14.0);
+        let placed = place(cursor, size_phys, screen, gap_phys);
+        assert_eq!(placed, (1028, 628), "摆放算在物理坐标系里");
+        let logical = d.to_logical_pos(placed);
+        assert_eq!(logical, egui::pos2(514.0, 314.0));
+        // 逻辑坐标乘回缩放比就是窗口真正出现的物理位置，应当紧挨鼠标
+        let back = d.to_physical_pos(logical);
+        assert!((back.0 - cursor.0).abs() <= 40 && (back.1 - cursor.1).abs() <= 40, "{back:?} 应挨着 {cursor:?}");
+    }
+
+    /// 边界收敛：鼠标贴着右下角时，换算完的窗口整体仍在屏幕内
+    #[test]
+    fn panel_stays_on_screen_near_bottom_right() {
+        let d = desktop_shell::dpi::Dpi::new(2.0);
+        let screen = (0, 0, 3072u32, 1920u32);
+        let size_phys = d.to_physical_size((420.0, 460.0));
+        let placed = place((3060, 1910), size_phys, screen, d.to_physical_len(14.0));
+        let logical = d.to_logical_pos(placed);
+        assert!(logical.x >= 0.0 && logical.y >= 0.0, "{logical:?}");
+        // 逻辑屏是 1536x960，面板 420x460 必须整块装得下
+        assert!(logical.x + 420.0 <= 1536.0 + 0.5, "{logical:?}");
+        assert!(logical.y + 460.0 <= 960.0 + 0.5, "{logical:?}");
+    }
+
     #[test]
     fn dragging_follows_the_cursor_without_drift() {
         let mut p = PanelState::new("取词释义", Source::Uia, (500, 400));

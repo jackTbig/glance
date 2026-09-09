@@ -1,10 +1,11 @@
 //! translate-tool 桌面端
+pub use desktop_shell::{dpi, hotkey};
+
+pub mod caption;
 pub mod config;
 pub mod dict;
-pub mod dpi;
 pub mod engine;
 pub mod extension;
-pub mod hotkey;
 pub mod panel;
 pub mod server;
 pub mod tray;

@@ -132,6 +132,13 @@ pub struct HotkeyCfg {
     /// **开关**划词小图标
     pub toggle_selection: String,
     /// 悬停取词开着时，按住哪个键 + 鼠标停留才调用：alt | ctrl | shift | win
+    /// 字幕：无条件切回可点击。**这一条是穿透模式唯一的退路，别删**——
+    /// 穿透开着时字幕窗对鼠标完全无感，托盘又在简译这边。
+    #[serde(default = "default_caption_clickable")]
+    pub caption_clickable: String,
+    /// 字幕：切换鼠标穿透
+    #[serde(default = "default_caption_passthrough")]
+    pub caption_passthrough: String,
     pub hover_modifier: String,
     /// 悬停多久才触发（毫秒）
     pub hover_delay_ms: u64,
@@ -150,11 +157,21 @@ impl Default for HotkeyCfg {
             // Ctrl+Alt+H 在本机被别的程序占了（探针实测），用 J
             toggle_hover: "Ctrl+Alt+J".into(),
             toggle_selection: "Ctrl+Alt+Y".into(),
+            caption_clickable: default_caption_clickable(),
+            caption_passthrough: default_caption_passthrough(),
             hover_modifier: "ctrl".into(),
             hover_delay_ms: 300,
             selection: String::new(),
         }
     }
+}
+
+fn default_caption_clickable() -> String {
+    "Ctrl+Alt+C".into()
+}
+
+fn default_caption_passthrough() -> String {
+    "Ctrl+Alt+P".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

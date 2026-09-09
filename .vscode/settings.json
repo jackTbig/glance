@@ -1,0 +1,13 @@
+{
+  "//": "rust-analyzer 默认跑 cargo check --workspace，会触发 apps/caption 的 whisper-rs 构建（CMake/Ninja/Vulkan SDK，首次 5-10 分钟）。这里限制到默认成员，缺 Vulkan SDK 的机器也能正常开发简译。要改字幕本身时临时去掉 --exclude 即可。",
+  "rust-analyzer.check.overrideCommand": [
+    "cargo",
+    "check",
+    "--message-format=json",
+    "--workspace",
+    "--exclude",
+    "live-caption",
+    "--all-targets"
+  ],
+  "rust-analyzer.cargo.noDefaultFeatures": false
+}
