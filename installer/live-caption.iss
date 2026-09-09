@@ -1,7 +1,7 @@
 ; live-caption 安装包（Inno Setup 7）
 ; 由 scripts/build_installer.sh 编译；本文件带 BOM 的 UTF-8 由构建脚本生成到 build/ 下再喂给 ISCC
 #define AppName "live-caption"
-#define AppVer "1.0.2"
+#define AppVer "1.1.0"
 #define ExeSrc "D:\DevCache\lc-target\release\live-caption.exe"
 #define ModelTurbo "D:\My_data\Claude\workspace\local-asr\ggml-large-v3-turbo-q5_0.bin"
 #define ModelSmall "D:\models\whisper\ggml-base.en.bin"
@@ -93,5 +93,5 @@ function InitializeSetup: Boolean;
 begin
   Result := True;
   if not FileExists(ExpandConstant('{sys}\vulkan-1.dll')) then
-    MsgBox('未检测到 Vulkan 运行库（vulkan-1.dll）。它随显卡驱动一起安装，请先更新显卡驱动，否则识别无法使用 GPU。安装会继续。', mbInformation, MB_OK);
+    MsgBox('未检测到 Vulkan 运行库（vulkan-1.dll）。它随显卡驱动一起安装。缺少它程序将无法启动（不是只是没有 GPU 加速——vulkan-1.dll 是程序的加载期依赖），请先更新显卡驱动。安装会继续。', mbInformation, MB_OK);
 end;
