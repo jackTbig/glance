@@ -7,13 +7,15 @@ use crate::panel::{place, place_icon, PanelState, Phase};
 use crate::watcher::{Trigger, WatchConfig, Watcher};
 use ai_translate::Scene;
 use crossbeam_channel::Receiver;
-use egui::{Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, RichText, ViewportBuilder, ViewportCommand, ViewportId};
+use egui::{Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, RichText, ViewportCommand, ViewportId};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use text_capture::{Capturer, Source};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 应用中文名（窗口标题、托盘提示都用它）
+pub const APP_NAME_ZH: &str = "简译";
 
 /// 设置窗左侧的分类。分成四类而不是一长串折叠项：
 /// 折叠项要点开才知道里面有什么，且展开后内容全挤在左半边、右边一片空白。
@@ -103,6 +105,8 @@ pub struct App {
     settings_tab: SettingsTab,
     /// 换页后把滚动条拉回顶部
     settings_scroll_top: bool,
+    /// 设置窗这次打开是否已经摆过位置
+    settings_sized: bool,
     draft: Config,
     settings_msg: String,
     status: String,
@@ -222,6 +226,7 @@ impl App {
                 .and_then(|i| SettingsTab::ALL.get(i).copied())
                 .unwrap_or(SettingsTab::Service),
             settings_scroll_top: false,
+            settings_sized: false,
             settings_msg: String::new(),
             status,
             server,
@@ -474,14 +479,16 @@ impl eframe::App for App {
             }
         }
 
-        match self.mode.clone() {
-            Mode::Idle => self.draw_hidden(ui),
-            Mode::Icon { pos, .. } => self.draw_icon(ui, pos),
-            Mode::Panel => self.draw_panel(ui),
-            Mode::Selecting { start } => self.draw_region_selector(ui, start),
-        }
+        // 设置界面独占主视口（原因见 draw_settings 的注释）
         if self.settings_open {
-            self.draw_settings(&ctx);
+            self.draw_settings(ui);
+        } else {
+            match self.mode.clone() {
+                Mode::Idle => self.draw_hidden(ui),
+                Mode::Icon { pos, .. } => self.draw_icon(ui, pos),
+                Mode::Panel => self.draw_panel(ui),
+                Mode::Selecting { start } => self.draw_region_selector(ui, start),
+            }
         }
         // 30 fps 足够，别空转烧 CPU
         ctx.request_repaint_after(Duration::from_millis(33));
@@ -721,105 +728,123 @@ impl App {
         }
     }
 
-    fn draw_settings(&mut self, ctx: &egui::Context) {
-        // ViewportBuilder 的尺寸这里按物理像素落地（实测 200% 屏上给 780 得到的窗口就是 780 物理宽，
-        // 只有想要的一半），所以要自己乘缩放比，否则高分屏上内容会被切掉。
-        let k = crate::dpi::Dpi::from_ctx(ctx).ppp();
-        let vb = ViewportBuilder::default()
-            .with_title("translate-tool 设置")
-            .with_inner_size([450.0 * k, 352.0 * k])
-            .with_min_inner_size([400.0 * k, 300.0 * k]);
+    /// 设置界面画在**主视口**里，不用子视口。
+    ///
+    /// 子视口在这台 200% 缩放的机器上拿不到一致的坐标系：`show_viewport_immediate` 给出的
+    /// 可用区是 920x760「逻辑」，却按 `pixels_per_point = 2` 渲染，而窗口是按 1:1 建的，
+    /// 于是只有左上角四分之一可见，底部按钮栏永远排在窗口外面。主视口的换算是对的
+    /// （`dpi.rs` 那一套），所以把主窗口临时变成设置窗，关掉再缩回屏幕外当浮窗宿主。
+    /// 代价是开着设置时不响应划词与悬停——改设置时本来也不会同时划词。
+    fn draw_settings(&mut self, root_ui: &mut egui::Ui) {
+        let ctx = root_ui.ctx().clone();
+        // Jack 2026-09-09 用鼠标调出来的顺手尺寸（客户区物理像素）。
+        // `ViewportCommand::InnerSize` 在这里按**物理**像素落地，实测给 386 得到的就是 386 物理宽。
+        const W: f32 = 771.0;
+        const H: f32 = 691.0;
+
+        if !self.settings_sized {
+            self.settings_sized = true;
+            let d = crate::dpi::Dpi::from_ctx(&ctx);
+            let (sx, sy, sw, sh) = text_capture::screen::virtual_screen();
+            let at = (sx + (sw - W as u32) as i32 / 2, sy + (sh - H as u32) as i32 / 2);
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
+            ctx.send_viewport_cmd(ViewportCommand::Title(format!("{APP_NAME_ZH} 设置")));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+
         let mut close = false;
-        ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |vp_ui, _class| {
-            let vp_ctx = vp_ui.ctx().clone();
 
-            // 按钮栏固定在底部，不跟着内容滚
-            egui::Panel::bottom("settings-actions").show(vp_ui, |ui| {
-                ui.add_space(7.0);
-                ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("保存并应用").min_size(egui::vec2(84.0, 25.0))).clicked() {
-                        self.apply_settings();
-                    }
-                    if ui.add(egui::Button::new("测试翻译").min_size(egui::vec2(72.0, 25.0))).clicked() {
-                        let cfg = self.draft.translator_config();
-                        self.settings_msg = match ai_translate::Translator::new(cfg) {
-                            Ok(t) => match t.translate(Scene::Selection, "Hello, this is a test.", None, &mut |_| {}) {
-                                Ok(zh) => format!("测试通过：{zh}"),
-                                Err(e) => format!("测试失败：{e}"),
-                            },
-                            Err(e) => format!("配置有误：{e}"),
-                        };
-                    }
-                    if !self.settings_msg.is_empty() {
-                        let bad = self.settings_msg.contains("失败") || self.settings_msg.contains("有误");
-                        let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
-                        ui.add_space(6.0);
-                        // 窄窗口里长消息会把关闭按钮挤出去，截断显示，完整内容放悬停提示
-                        let short: String = self.settings_msg.chars().take(22).collect();
-                        let shown = if short.chars().count() < self.settings_msg.chars().count() {
-                            format!("{short}…")
-                        } else {
-                            short
-                        };
-                        ui.label(RichText::new(shown).size(11.0).color(color)).on_hover_text(&self.settings_msg);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("关闭").min_size(egui::vec2(56.0, 25.0))).clicked() {
-                            close = true;
-                        }
-                    });
-                });
-                ui.add_space(7.0);
-            });
-
-            // 左侧分类导航；运行状态挂在导航下方，不占正文
-            egui::Panel::left("settings-nav").exact_size(96.0).show(vp_ui, |ui| {
-                ui.add_space(8.0);
-                for tab in SettingsTab::ALL {
-                    let selected = self.settings_tab == tab;
-                    if ui
-                        .add_sized([84.0, 25.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(12.0)))
-                        .clicked()
-                    {
-                        self.settings_tab = tab;
-                        self.settings_scroll_top = true; // 换页要回到顶部，否则新页面顶着上一页的滚动位置
-                    }
-                    ui.add_space(2.0);
+        let mut do_apply = false;
+        let mut do_test = false;
+        egui::Panel::left("settings-nav").exact_size(104.0).show(root_ui, |ui| {
+            ui.add_space(8.0);
+            for tab in SettingsTab::ALL {
+                let selected = self.settings_tab == tab;
+                if ui
+                    .add_sized([92.0, 26.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(12.0)))
+                    .clicked()
+                {
+                    self.settings_tab = tab;
+                    self.settings_scroll_top = true; // 换页要回到顶部，否则顶着上一页的滚动位置
                 }
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.label(RichText::new("运行状态").size(11.0).color(Color32::from_gray(110)));
-                ui.add_space(3.0);
-                for line in self.status.split(" · ") {
-                    ui.label(RichText::new(line).size(11.0).color(Color32::from_gray(140)));
-                }
-            });
+                ui.add_space(2.0);
+            }
 
-            egui::CentralPanel::default().show(vp_ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new(self.settings_tab.label()).size(17.0).strong());
-                ui.label(RichText::new(self.settings_tab.hint()).size(11.0).color(Color32::from_gray(140)));
-                ui.add_space(9.0);
-                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-                if self.settings_scroll_top {
-                    self.settings_scroll_top = false;
-                    area = area.vertical_scroll_offset(0.0);
-                }
-                area.show(ui, |ui| match self.settings_tab {
-                    SettingsTab::Service => self.settings_service(ui),
-                    SettingsTab::Trigger => self.settings_trigger(ui),
-                    SettingsTab::Glossary => self.settings_glossary(ui),
-                    SettingsTab::Server => self.settings_server(ui),
-                });
-            });
-
-            if vp_ctx.input(|i| i.viewport().close_requested()) {
+            // 操作按钮放这儿而不是窗口底部：Panel::bottom 与 bottom_up 布局在这个
+            // 窗口里都排不出来（矩形落在可见区外 / 被 ScrollArea 挤掉），导航栏则稳定可见
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+            do_apply = ui.add_sized([92.0, 26.0], egui::Button::new(RichText::new("保存并应用").size(12.0))).clicked();
+            ui.add_space(3.0);
+            do_test = ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("测试翻译").size(12.0))).clicked();
+            ui.add_space(3.0);
+            if ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("关闭").size(12.0))).clicked() {
                 close = true;
             }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.label(RichText::new("运行状态").size(10.0).color(Color32::from_gray(110)));
+            ui.add_space(2.0);
+            for line in self.status.split(" · ") {
+                ui.label(RichText::new(line).size(10.0).color(Color32::from_gray(140)));
+            }
         });
+
+        egui::CentralPanel::default().show(root_ui, |ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new(self.settings_tab.label()).size(16.0).strong());
+            ui.label(RichText::new(self.settings_tab.hint()).size(10.0).color(Color32::from_gray(140)));
+            if !self.settings_msg.is_empty() {
+                let msg = self.settings_msg.clone();
+                let bad = msg.contains("失败") || msg.contains("有误");
+                let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
+                let short: String = msg.chars().take(30).collect();
+                let shown = if short.chars().count() < msg.chars().count() { format!("{short}…") } else { short };
+                ui.add_space(4.0);
+                ui.label(RichText::new(shown).size(11.0).color(color)).on_hover_text(&msg);
+            }
+            ui.add_space(8.0);
+            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            if self.settings_scroll_top {
+                self.settings_scroll_top = false;
+                area = area.vertical_scroll_offset(0.0);
+            }
+            area.show(ui, |ui| match self.settings_tab {
+                SettingsTab::Service => self.settings_service(ui),
+                SettingsTab::Trigger => self.settings_trigger(ui),
+                SettingsTab::Glossary => self.settings_glossary(ui),
+                SettingsTab::Server => self.settings_server(ui),
+            });
+        });
+
+        if do_apply {
+            self.apply_settings();
+        }
+        if do_test {
+            let cfg = self.draft.translator_config();
+            self.settings_msg = match ai_translate::Translator::new(cfg) {
+                Ok(t) => match t.translate(Scene::Selection, "Hello, this is a test.", None, &mut |_| {}) {
+                    Ok(zh) => format!("测试通过：{zh}"),
+                    Err(e) => format!("测试失败：{e}"),
+                },
+                Err(e) => format!("配置有误：{e}"),
+            };
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            close = true;
+        }
         if close {
             self.settings_open = false;
+            self.settings_sized = false;
+            // 变回那个躲在屏幕外的浮窗宿主
+            ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
+            ctx.send_viewport_cmd(ViewportCommand::Title(APP_NAME_ZH.to_string()));
         }
     }
 
@@ -875,7 +900,7 @@ impl App {
                     _ => &mut self.draft.scenes.screenshot,
                 };
                 ui.add_enabled_ui(!fixed, |ui| {
-                    egui::ComboBox::from_id_salt(label).width(120.0).selected_text(field.clone()).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt(label).width(104.0).selected_text(field.clone()).show_ui(ui, |ui| {
                         for b in ["openai", "claude", "codex"] {
                             ui.selectable_value(field, b.to_string(), b);
                         }
@@ -931,7 +956,7 @@ impl App {
                 "none" => "关闭",
                 _ => "Alt",
             };
-            egui::ComboBox::from_id_salt("hovermod").width(120.0).selected_text(cur).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("hovermod").width(104.0).selected_text(cur).show_ui(ui, |ui| {
                 for (v, label) in [("alt", "Alt"), ("ctrl", "Ctrl"), ("shift", "Shift"), ("win", "Win"), ("none", "关闭")] {
                     ui.selectable_value(&mut self.draft.hotkeys.hover_modifier, v.to_string(), label);
                 }
@@ -977,9 +1002,9 @@ impl App {
         let mut remove = None;
         for (i, g) in self.draft.glossary.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(150.0).hint_text("原文，如 pod"));
+                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(112.0).hint_text("原文"));
                 ui.label(RichText::new("→").color(Color32::from_gray(140)));
-                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(150.0).hint_text("固定译法，如 容器组"));
+                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(112.0).hint_text("固定译法"));
                 if ui.button("删除").clicked() {
                     remove = Some(i);
                 }
@@ -1026,6 +1051,7 @@ impl App {
     pub fn open_settings(&mut self) {
         self.draft = self.cfg.clone();
         self.settings_open = true;
+        self.settings_sized = false;
     }
 
     pub fn request_quit(&mut self) {
