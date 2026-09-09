@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/desktop", "crates/ai-translate", "crates/text-capture", "tests/mock-llm"]
+members = ["apps/desktop", "crates/ai-translate", "crates/desktop-shell", "crates/text-capture", "tests/mock-llm"]
 
 [workspace.package]
 version = "0.2.0"

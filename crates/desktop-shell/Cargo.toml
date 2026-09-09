@@ -1,0 +1,21 @@
+[package]
+name = "desktop-shell"
+version.workspace = true
+edition.workspace = true
+description = "简译与实时字幕共用的桌面基建：托盘弹菜单、全局热键、DPI 换算、日志滚动、字体、设置窗版式"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+egui = "0.36"
+global-hotkey = "0.8"
+tray-icon = "0.24"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell",
+  "Win32_System_Threading", "Win32_System_Registry",
+] }

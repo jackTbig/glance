@@ -19,6 +19,7 @@ path = "src/lib.rs"
 [dependencies]
 ai-translate = { path = "../../crates/ai-translate" }
 text-capture = { path = "../../crates/text-capture" }
+desktop-shell = { path = "../../crates/desktop-shell" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

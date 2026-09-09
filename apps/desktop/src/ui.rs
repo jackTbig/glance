@@ -7,7 +7,7 @@ use crate::panel::{place, place_icon, PanelState, Phase};
 use crate::watcher::{Trigger, WatchConfig, Watcher};
 use ai_translate::Scene;
 use crossbeam_channel::Receiver;
-use egui::{Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, RichText, ViewportCommand, ViewportId};
+use egui::{Align2, Color32, CornerRadius, RichText, ViewportCommand, ViewportId};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -134,7 +134,7 @@ enum HotkeyAction {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, cfg: Config) -> anyhow::Result<App> {
-        install_cjk_font(&cc.egui_ctx);
+        desktop_shell::fonts::install(&cc.egui_ctx);
         let translator = Arc::new(Mutex::new(ai_translate::Translator::new(cfg.translator_config())?));
         let capturer = Arc::new(Capturer::new());
         let (engine, events) = Engine::spawn(translator.clone(), capturer.clone());
@@ -239,7 +239,7 @@ impl App {
             settings_msg: String::new(),
             status,
             server,
-            _tray: match crate::tray::build(&format!("{APP_NAME_ZH} · 划词悬停截屏翻译")) {
+            _tray: match crate::tray::build_app_tray(&format!("{APP_NAME_ZH} · 划词悬停截屏翻译")) {
                 Ok(t) => Some(t),
                 Err(e) => {
                     tracing::warn!("{e}");
@@ -502,32 +502,6 @@ fn watch_cfg(cfg: &Config) -> WatchConfig {
         hover_delay: Duration::from_millis(cfg.hotkeys.hover_delay_ms.clamp(80, 5000)),
         ..Default::default()
     }
-}
-
-fn install_cjk_font(ctx: &egui::Context) {
-    let candidates = [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyh.ttf", r"C:\Windows\Fonts\simhei.ttf"];
-    for p in candidates {
-        if let Ok(bytes) = std::fs::read(p) {
-            let mut fonts = FontDefinitions::default();
-            fonts.font_data.insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
-            fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "cjk".into());
-            fonts.families.get_mut(&FontFamily::Monospace).unwrap().push("cjk".into());
-            // 雅黑与 egui 自带字体都没有音标的长音符 ː(U+02D0) 与卡片上的几个符号，
-            // 缺字形不报错、只画成方块豆腐。Segoe UI 覆盖 IPA，Segoe UI Symbol 覆盖符号，
-            // 挂在中文字体后面当兜底（顺序即回退顺序）。
-            let mut at = 1;
-            for (name, path) in [("ipa", r"C:\Windows\Fonts\segoeui.ttf"), ("sym", r"C:\Windows\Fonts\seguisym.ttf")] {
-                if let Ok(b) = std::fs::read(path) {
-                    fonts.font_data.insert(name.into(), Arc::new(FontData::from_owned(b)));
-                    fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(at, name.into());
-                    at += 1;
-                }
-            }
-            ctx.set_fonts(fonts);
-            return;
-        }
-    }
-    tracing::warn!("没找到中文字体，界面里的中文会显示成方块");
 }
 
 impl eframe::App for App {

@@ -920,6 +920,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
+name = "desktop-shell"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "egui",
+ "global-hotkey",
+ "image",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tray-icon",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4597,6 +4612,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossbeam-channel",
+ "desktop-shell",
  "eframe",
  "egui",
  "global-hotkey",
