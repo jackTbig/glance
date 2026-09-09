@@ -7,6 +7,10 @@ use std::time::Duration;
 /// UIA 调用的默认超时；超过就当作取词失败，交给 OCR 兜底
 pub const UIA_TIMEOUT: Duration = Duration::from_millis(600);
 
+/// 悬停取词的长度上限。超过就说明拿到的不是「鼠标那一段」而是整篇文档，
+/// 得换更小的文本单位重取。实测某些应用里 `TextUnit::Paragraph` 会返回 3000+ 字的全文。
+pub const MAX_HOVER_CHARS: usize = 400;
+
 #[cfg(windows)]
 mod win {
     use super::*;
@@ -56,25 +60,53 @@ mod win {
         }
     }
 
+    /// 按一个文本单位取鼠标处的文字；拿不到或不值得翻译返回 None
+    fn text_by_unit(tp: &UITextPattern, pt: Point, unit: TextUnit) -> Option<String> {
+        let range = tp.get_range_from_point(pt).ok()?;
+        range.expand_to_enclosing_unit(unit).ok()?;
+        let t = range.get_text(4000).ok()?;
+        let t = t.trim();
+        if crate::text::worth_translating(t) {
+            Some(t.to_string())
+        } else {
+            None
+        }
+    }
+
     fn text_at_blocking(x: i32, y: i32) -> Option<String> {
         let auto = UIAutomation::new().ok()?;
         let pt = Point::new(x, y);
         let el = auto.element_from_point(pt).ok()?;
-        // 先试 TextPattern 取整段
+
+        // 逐级收窄：段落 → 行 → 词。
+        // 只要「段落」这一级在某些应用里会把整篇文档算作一段（实测拿到过 3667 字），
+        // 悬停就变成了翻整屏。超过上限就换更小的单位重取。
         if let Ok(tp) = el.get_pattern::<UITextPattern>() {
-            if let Ok(range) = tp.get_range_from_point(pt) {
-                let _ = range.expand_to_enclosing_unit(TextUnit::Paragraph);
-                if let Ok(t) = range.get_text(4000) {
-                    if crate::text::worth_translating(&t) {
-                        return Some(t.trim().to_string());
+            let mut best: Option<String> = None;
+            for unit in [TextUnit::Paragraph, TextUnit::Line, TextUnit::Word] {
+                match text_by_unit(&tp, pt, unit) {
+                    Some(t) if t.chars().count() <= MAX_HOVER_CHARS => return Some(t),
+                    Some(t) => {
+                        // 还是太长，记下最短的那个，万一更小的单位也拿不到就截断用它
+                        if best.as_ref().map_or(true, |b: &String| t.chars().count() < b.chars().count()) {
+                            best = Some(t);
+                        }
                     }
+                    None => continue,
                 }
             }
+            if let Some(t) = best {
+                // 三级都超长（整篇没有分段信息）：截到上限，宁可少翻也别把整屏送出去
+                let cut: String = t.chars().take(MAX_HOVER_CHARS).collect();
+                tracing::debug!("UIA 取到 {} 字，三级单位都超长，截断到 {}", t.chars().count(), cut.chars().count());
+                return Some(cut);
+            }
         }
+
         // 退回元素名（按钮、菜单项、标签这类没有 TextPattern 的控件）
         let name = el.get_name().ok()?;
         let n = name.trim();
-        if crate::text::worth_translating(n) && n.chars().count() <= 500 {
+        if crate::text::worth_translating(n) && n.chars().count() <= MAX_HOVER_CHARS {
             return Some(n.to_string());
         }
         None

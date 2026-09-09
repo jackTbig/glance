@@ -109,7 +109,8 @@ impl Capturer {
         Ok(Captured { text: text.trim().to_string(), source: Source::Clipboard, took_ms: t0.elapsed().as_millis() })
     }
 
-    /// 悬停：先问无障碍接口，拿不到就截鼠标周围一块做文字识别
+    /// 悬停：先问无障碍接口，拿不到就截鼠标周围一块做文字识别。
+    /// 识别出来的多行里**只挑鼠标压着的那一行**，不然一悬停就把周围一片都送去翻。
     pub fn at_point(&self, x: i32, y: i32) -> anyhow::Result<Captured> {
         let t0 = std::time::Instant::now();
         if let Some(u) = &self.uia {
@@ -121,9 +122,12 @@ impl Capturer {
         }
         let (w, h) = self.ocr_box;
         let (rx, ry, rw, rh) = screen::rect_around(x, y, w, h);
-        let mut c = self.region(rx, ry, rw, rh)?;
-        c.took_ms = t0.elapsed().as_millis();
-        Ok(c)
+        let engine = self.ocr.as_ref().ok_or_else(|| anyhow::anyhow!("本机没有可用的文字识别引擎"))?;
+        let img = screen::capture_rect(rx, ry, rw, rh)?;
+        let r = engine.recognize(&img)?;
+        // 鼠标在这张截图里的位置，用来挑行
+        let text = pick_line_at(&r, x - rx, y - ry).unwrap_or_else(|| r.text.clone());
+        Ok(Captured { text, source: Source::Ocr, took_ms: t0.elapsed().as_millis() })
     }
 
     /// 截屏区域：识别其中的文字
@@ -138,6 +142,74 @@ impl Capturer {
     /// 该点所属进程的可执行文件名（进程例外用）
     pub fn process_at(&self, x: i32, y: i32) -> Option<String> {
         self.uia.as_ref().and_then(|u| u.process_at(x, y).ok().flatten())
+    }
+}
+
+/// 从识别结果里挑出压着 (x, y) 的那一行；没有正好压住的就取最近的一行（限 1.5 行高内）
+pub fn pick_line_at(r: &OcrResult, x: i32, y: i32) -> Option<String> {
+    if r.lines.is_empty() {
+        return None;
+    }
+    let hit = r.lines.iter().find(|l| {
+        let (lx, ly, lw, lh) = l.rect;
+        x >= lx && x <= lx + lw && y >= ly && y <= ly + lh
+    });
+    if let Some(l) = hit {
+        return Some(l.text.trim().to_string());
+    }
+    // 没压住任何一行：取垂直距离最近的，但别离太远（超过 1.5 行高就认为鼠标不在文字上）
+    let mut best: Option<(i32, &OcrLine)> = None;
+    for l in &r.lines {
+        let (_, ly, _, lh) = l.rect;
+        let center = ly + lh / 2;
+        let d = (center - y).abs();
+        let limit = (lh as f32 * 1.5) as i32;
+        if d <= limit && best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, l));
+        }
+    }
+    best.map(|(_, l)| l.text.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    fn line(text: &str, y: i32) -> OcrLine {
+        OcrLine { text: text.into(), rect: (10, y, 500, 24) }
+    }
+
+    fn result(lines: Vec<OcrLine>) -> OcrResult {
+        let text = lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("
+");
+        OcrResult { lines, text }
+    }
+
+    #[test]
+    fn picks_the_line_under_the_cursor() {
+        let r = result(vec![line("first", 0), line("second", 30), line("third", 60)]);
+        assert_eq!(pick_line_at(&r, 100, 40).as_deref(), Some("second"));
+        assert_eq!(pick_line_at(&r, 100, 5).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn falls_back_to_nearest_line_within_reach() {
+        // 两行的中心分别在 y=12 与 y=52
+        let r = result(vec![line("first", 0), line("second", 40)]);
+        // 落在两行之间的空隙里，取中心更近的那行
+        assert_eq!(pick_line_at(&r, 100, 36).as_deref(), Some("second"), "36 离 52 更近");
+        assert_eq!(pick_line_at(&r, 100, 28).as_deref(), Some("first"), "28 离 12 更近");
+    }
+
+    #[test]
+    fn far_from_any_line_gives_nothing() {
+        let r = result(vec![line("only", 0)]);
+        assert_eq!(pick_line_at(&r, 100, 500), None, "离所有行都很远就别硬凑");
+    }
+
+    #[test]
+    fn empty_result_is_none() {
+        assert_eq!(pick_line_at(&result(vec![]), 0, 0), None);
     }
 }
 

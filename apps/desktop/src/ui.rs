@@ -199,19 +199,16 @@ impl App {
 
     /// 该点所在进程是否在例外列表里。
     /// 命中会静默吞掉悬停与小图标，所以一定要打日志：不然表现就是「按住 Alt 没反应」。
-    fn excluded_at(&self, x: i32, y: i32) -> bool {
+    fn excluded_at(&self, x: i32, y: i32) -> Option<String> {
         if self.cfg.ui.excluded_processes.is_empty() {
-            return false;
+            return None;
         }
-        match self.capturer.process_at(x, y) {
-            Some(p) => {
-                let hit = self.cfg.ui.excluded_processes.iter().any(|e| e.eq_ignore_ascii_case(&p));
-                if hit {
-                    tracing::debug!("({x},{y}) 属于 {p}，在例外进程列表里，不响应");
-                }
-                hit
-            }
-            None => false,
+        let p = self.capturer.process_at(x, y)?;
+        if self.cfg.ui.excluded_processes.iter().any(|e| e.eq_ignore_ascii_case(&p)) {
+            tracing::debug!("({x},{y}) 属于 {p}，在例外进程列表里，不响应");
+            Some(p)
+        } else {
+            None
         }
     }
 
@@ -223,7 +220,7 @@ impl App {
                         tracing::debug!("划词结束于({x},{y})，但设置里关了小图标");
                     } else if matches!(self.mode, Mode::Selecting { .. }) {
                         tracing::debug!("划词结束于({x},{y})，但正在框选，忽略");
-                    } else if !self.excluded_at(x, y) {
+                    } else if self.excluded_at(x, y).is_none() {
                         tracing::debug!("划词结束于物理({x},{y})，弹小图标");
                         self.mode = Mode::Icon { pos: (x, y), since: Instant::now() };
                     }
@@ -231,7 +228,16 @@ impl App {
                 Trigger::Hovered { x, y } => {
                     if !matches!(self.mode, Mode::Idle | Mode::Icon { .. }) {
                         tracing::debug!("悬停触发于({x},{y})，但界面正忙（{:?}），忽略", self.mode);
-                    } else if !self.excluded_at(x, y) {
+                    } else if let Some(proc) = self.excluded_at(x, y) {
+                        // 别静默吞掉：用户看到的会是「按住 Alt 完全没反应」，无从查起
+                        tracing::info!("{proc} 在例外进程列表里，悬停不响应（设置里可移除）");
+                        let mut st = PanelState::new("悬停翻译", Source::Uia, (x, y));
+                        st.phase = Phase::Notice(format!("{proc} 在例外列表里
+设置 → 触发方式里可以移除"));
+                        self.panel = Some(st);
+                        self.mode = Mode::Panel;
+                        self.cur_seq = 0;
+                    } else {
                         self.start(Job::Hover { x, y }, "悬停翻译", (x, y), Source::Uia);
                     }
                 }
@@ -536,6 +542,9 @@ impl App {
                         }
                         Phase::Done => {
                             ui.label(RichText::new(&p.translated).color(Color32::WHITE).size(self.cfg.ui.font_size));
+                        }
+                        Phase::Notice(msg) => {
+                            ui.label(RichText::new(msg).color(Color32::from_gray(170)).size(13.0));
                         }
                         Phase::Failed(e) => {
                             ui.label(RichText::new(e).color(Color32::from_rgb(240, 130, 130)).size(13.0));

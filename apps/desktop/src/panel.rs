@@ -8,6 +8,8 @@ pub enum Phase {
     Working(String),
     Done,
     Failed(String),
+    /// 不是错误，只是告诉用户为什么没翻（比如进程在例外名单里）。没有重试按钮
+    Notice(String),
 }
 
 #[derive(Debug, Clone)]

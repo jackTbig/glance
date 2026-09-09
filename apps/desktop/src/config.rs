@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 /// 应用名，同时决定 %APPDATA% 下的数据目录名
 pub const APP_NAME: &str = "translate-tool";
 
@@ -158,7 +158,9 @@ pub struct UiCfg {
     /// 面板最大宽高
     pub panel_width: f32,
     pub panel_max_height: f32,
-    /// 这些进程内不弹图标、不响应悬停（快捷键仍有效），小写可执行文件名
+    /// 这些进程内不弹图标、不响应悬停（快捷键仍有效），小写可执行文件名。
+    /// **默认为空**：预置名单会让用户在自己常用的窗口里悬停毫无反应，
+    /// 而且失败是静默的，很难想到是被名单挡了（Jack 2026-09-09 实测踩过）。
     pub excluded_processes: Vec<String>,
 }
 
@@ -170,7 +172,7 @@ impl Default for UiCfg {
             font_size: 15.0,
             panel_width: 420.0,
             panel_max_height: 460.0,
-            excluded_processes: vec!["code.exe".into(), "devenv.exe".into(), "windowsterminal.exe".into()],
+            excluded_processes: Vec::new(),
         }
     }
 }
@@ -235,7 +237,16 @@ impl Config {
         if self.version >= CONFIG_VERSION {
             return false;
         }
-        // 以后加新默认值：if self.version < N { ... }
+        if self.version < 2 {
+            // v1 预置了 code/devenv/windowsterminal 三个例外，结果是用户在这些窗口里
+            // 悬停完全没反应且没有任何提示。只在用户没自己改过（三项原样）时清掉。
+            let v1_default = ["code.exe", "devenv.exe", "windowsterminal.exe"];
+            let unchanged = self.ui.excluded_processes.len() == v1_default.len()
+                && v1_default.iter().all(|d| self.ui.excluded_processes.iter().any(|x| x.eq_ignore_ascii_case(d)));
+            if unchanged {
+                self.ui.excluded_processes.clear();
+            }
+        }
         self.version = CONFIG_VERSION;
         true
     }
@@ -336,6 +347,34 @@ mod tests {
         assert_eq!(cfg.backend.openai_model, "x");
         assert_eq!(cfg.backend.claude_model, "sonnet", "没写的字段用默认值");
         assert_eq!(cfg.hotkeys.selection, "Ctrl+Alt+Y");
+    }
+
+    #[test]
+    fn v1_preset_exclusions_are_cleared_on_upgrade() {
+        // v1 预置的三个例外让用户在自己常用的窗口里悬停毫无反应，升级时清掉
+        let mut old: Config = toml::from_str(
+            "version = 1
+[ui]
+excluded_processes = [\"code.exe\", \"devenv.exe\", \"windowsterminal.exe\"]
+",
+        )
+        .unwrap();
+        assert!(old.migrate());
+        assert!(old.ui.excluded_processes.is_empty(), "预置名单应被清掉");
+
+        // 用户自己改过的名单不动
+        let mut mine: Config =
+            toml::from_str("version = 1
+[ui]
+excluded_processes = [\"mygame.exe\"]
+").unwrap();
+        assert!(mine.migrate());
+        assert_eq!(mine.ui.excluded_processes, vec!["mygame.exe".to_string()]);
+    }
+
+    #[test]
+    fn default_has_no_excluded_processes() {
+        assert!(Config::default().ui.excluded_processes.is_empty(), "默认不预置例外，要排除让用户自己加");
     }
 
     #[test]
