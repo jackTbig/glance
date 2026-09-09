@@ -48,9 +48,9 @@ impl SettingsTab {
 }
 
 /// 设置项左侧标签的固定宽度，让每行的控件左边缘对齐
-const LABEL_W: f32 = 92.0;
+const LABEL_W: f32 = 76.0;
 /// 长输入框的宽度
-const FIELD_W: f32 = 288.0;
+const FIELD_W: f32 = 196.0;
 
 /// 用户配的热键被别的程序占了就往下试这些。
 /// 常见组合（Ctrl+Alt+T/S/X/D/W、Ctrl+Shift+D）在实测机器上都已被占用，别放进来。
@@ -101,6 +101,8 @@ pub struct App {
     mouse_left_panel_at: Option<Instant>,
     settings_open: bool,
     settings_tab: SettingsTab,
+    /// 换页后把滚动条拉回顶部
+    settings_scroll_top: bool,
     draft: Config,
     settings_msg: String,
     status: String,
@@ -219,6 +221,7 @@ impl App {
                 .and_then(|v| v.parse::<usize>().ok())
                 .and_then(|i| SettingsTab::ALL.get(i).copied())
                 .unwrap_or(SettingsTab::Service),
+            settings_scroll_top: false,
             settings_msg: String::new(),
             status,
             server,
@@ -724,8 +727,8 @@ impl App {
         let k = crate::dpi::Dpi::from_ctx(ctx).ppp();
         let vb = ViewportBuilder::default()
             .with_title("translate-tool 设置")
-            .with_inner_size([600.0 * k, 440.0 * k])
-            .with_min_inner_size([520.0 * k, 360.0 * k]);
+            .with_inner_size([450.0 * k, 352.0 * k])
+            .with_min_inner_size([400.0 * k, 300.0 * k]);
         let mut close = false;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |vp_ui, _class| {
             let vp_ctx = vp_ui.ctx().clone();
@@ -734,10 +737,10 @@ impl App {
             egui::Panel::bottom("settings-actions").show(vp_ui, |ui| {
                 ui.add_space(7.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new("保存并应用").min_size(egui::vec2(98.0, 27.0))).clicked() {
+                    if ui.add(egui::Button::new("保存并应用").min_size(egui::vec2(84.0, 25.0))).clicked() {
                         self.apply_settings();
                     }
-                    if ui.add(egui::Button::new("测试翻译").min_size(egui::vec2(82.0, 27.0))).clicked() {
+                    if ui.add(egui::Button::new("测试翻译").min_size(egui::vec2(72.0, 25.0))).clicked() {
                         let cfg = self.draft.translator_config();
                         self.settings_msg = match ai_translate::Translator::new(cfg) {
                             Ok(t) => match t.translate(Scene::Selection, "Hello, this is a test.", None, &mut |_| {}) {
@@ -751,10 +754,17 @@ impl App {
                         let bad = self.settings_msg.contains("失败") || self.settings_msg.contains("有误");
                         let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
                         ui.add_space(6.0);
-                        ui.label(RichText::new(&self.settings_msg).size(12.0).color(color));
+                        // 窄窗口里长消息会把关闭按钮挤出去，截断显示，完整内容放悬停提示
+                        let short: String = self.settings_msg.chars().take(22).collect();
+                        let shown = if short.chars().count() < self.settings_msg.chars().count() {
+                            format!("{short}…")
+                        } else {
+                            short
+                        };
+                        ui.label(RichText::new(shown).size(11.0).color(color)).on_hover_text(&self.settings_msg);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("关闭").min_size(egui::vec2(66.0, 27.0))).clicked() {
+                        if ui.add(egui::Button::new("关闭").min_size(egui::vec2(56.0, 25.0))).clicked() {
                             close = true;
                         }
                     });
@@ -763,15 +773,16 @@ impl App {
             });
 
             // 左侧分类导航；运行状态挂在导航下方，不占正文
-            egui::Panel::left("settings-nav").exact_size(118.0).show(vp_ui, |ui| {
+            egui::Panel::left("settings-nav").exact_size(96.0).show(vp_ui, |ui| {
                 ui.add_space(8.0);
                 for tab in SettingsTab::ALL {
                     let selected = self.settings_tab == tab;
                     if ui
-                        .add_sized([104.0, 27.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(13.0)))
+                        .add_sized([84.0, 25.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(12.0)))
                         .clicked()
                     {
                         self.settings_tab = tab;
+                        self.settings_scroll_top = true; // 换页要回到顶部，否则新页面顶着上一页的滚动位置
                     }
                     ui.add_space(2.0);
                 }
@@ -790,7 +801,12 @@ impl App {
                 ui.label(RichText::new(self.settings_tab.label()).size(17.0).strong());
                 ui.label(RichText::new(self.settings_tab.hint()).size(11.0).color(Color32::from_gray(140)));
                 ui.add_space(9.0);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.settings_tab {
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if self.settings_scroll_top {
+                    self.settings_scroll_top = false;
+                    area = area.vertical_scroll_offset(0.0);
+                }
+                area.show(ui, |ui| match self.settings_tab {
                     SettingsTab::Service => self.settings_service(ui),
                     SettingsTab::Trigger => self.settings_trigger(ui),
                     SettingsTab::Glossary => self.settings_glossary(ui),
@@ -859,7 +875,7 @@ impl App {
                     _ => &mut self.draft.scenes.screenshot,
                 };
                 ui.add_enabled_ui(!fixed, |ui| {
-                    egui::ComboBox::from_id_salt(label).width(150.0).selected_text(field.clone()).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt(label).width(120.0).selected_text(field.clone()).show_ui(ui, |ui| {
                         for b in ["openai", "claude", "codex"] {
                             ui.selectable_value(field, b.to_string(), b);
                         }
@@ -893,13 +909,13 @@ impl App {
         );
         ui.add_space(9.0);
         Self::row(ui, "划词翻译", "选中文字后按它，立刻翻译选中的内容", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.selection).desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.selection).desired_width(140.0));
         });
         Self::row(ui, "截屏翻译", "按它进入框选，拖出一块区域后识别并翻译", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.screenshot).desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.screenshot).desired_width(140.0));
         });
         Self::row(ui, "面板开关", "显示或收起最近一次的译文面板", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(140.0));
         });
 
         Self::section(
@@ -915,7 +931,7 @@ impl App {
                 "none" => "关闭",
                 _ => "Alt",
             };
-            egui::ComboBox::from_id_salt("hovermod").width(150.0).selected_text(cur).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("hovermod").width(120.0).selected_text(cur).show_ui(ui, |ui| {
                 for (v, label) in [("alt", "Alt"), ("ctrl", "Ctrl"), ("shift", "Shift"), ("win", "Win"), ("none", "关闭")] {
                     ui.selectable_value(&mut self.draft.hotkeys.hover_modifier, v.to_string(), label);
                 }
@@ -961,9 +977,9 @@ impl App {
         let mut remove = None;
         for (i, g) in self.draft.glossary.iter_mut().enumerate() {
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(210.0).hint_text("原文，如 pod"));
+                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(150.0).hint_text("原文，如 pod"));
                 ui.label(RichText::new("→").color(Color32::from_gray(140)));
-                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(210.0).hint_text("固定译法，如 容器组"));
+                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(150.0).hint_text("固定译法，如 容器组"));
                 if ui.button("删除").clicked() {
                     remove = Some(i);
                 }
@@ -977,7 +993,7 @@ impl App {
             ui.label(RichText::new("还没有术语。遇到总被翻错的专有名词时加进来。").size(12.0).color(Color32::from_gray(135)));
             ui.add_space(10.0);
         }
-        if ui.add(egui::Button::new("＋ 添加一条").min_size(egui::vec2(112.0, 27.0))).clicked() {
+        if ui.add(egui::Button::new("＋ 添加一条").min_size(egui::vec2(96.0, 25.0))).clicked() {
             self.draft.glossary.push(Default::default());
         }
     }
