@@ -16,17 +16,35 @@ mod win {
 
     const CF_UNICODETEXT: u32 = 13;
 
+    /// 打开剪贴板的重试退避（毫秒），总计约 1.9 秒。
+    ///
+    /// 早先是 10 次线性退避共 550 ms，实测扛不住 Windows 的**剪贴板历史服务**（`cbdhsvc_*`）：
+    /// 它用 `AddClipboardFormatListener` 持有会话锁，而这种持有者**不会**出现在
+    /// `GetOpenClipboardWindow()` 里——于是现象是「`OpenClipboard` 一直失败，但查不到谁占着」，
+    /// 很容易误判成自己的代码有问题。开着「剪贴板历史」（Win+V）的机器上尤其容易撞。
+    ///
+    /// 前几档密是为了让常见的瞬时争抢尽快通过（划词是交互路径，不能让用户干等）；
+    /// 后几档拉到秒级才有意义——继续加密集重试只是空转，退避拉长才可能等到锁释放。
+    const OPEN_BACKOFF_MS: &[u64] = &[5, 10, 20, 40, 80, 150, 300, 500, 800];
+
     struct Clip;
     impl Clip {
-        /// 打开剪贴板；别的进程可能正占着，重试几次
+        /// 打开剪贴板；别的进程（含系统的剪贴板历史服务）可能正占着，按退避重试
         fn open() -> anyhow::Result<Clip> {
-            for i in 0..10 {
-                if unsafe { OpenClipboard(std::ptr::null_mut::<std::ffi::c_void>() as HWND) } != 0 {
+            let try_once = || unsafe { OpenClipboard(std::ptr::null_mut::<std::ffi::c_void>() as HWND) } != 0;
+            if try_once() {
+                return Ok(Clip);
+            }
+            for ms in OPEN_BACKOFF_MS {
+                std::thread::sleep(Duration::from_millis(*ms));
+                if try_once() {
                     return Ok(Clip);
                 }
-                std::thread::sleep(Duration::from_millis(10 * (i + 1)));
             }
-            anyhow::bail!("打不开剪贴板（被其他程序占用）")
+            anyhow::bail!(
+                "打不开剪贴板（等了 {} 毫秒仍被占用）。                 常见成因是 Windows 的剪贴板历史服务，Win+V 里可以关掉它试试；                 查不到占用进程是正常的，那类持有者不会出现在 GetOpenClipboardWindow 里",
+                OPEN_BACKOFF_MS.iter().sum::<u64>()
+            )
         }
     }
     impl Drop for Clip {
