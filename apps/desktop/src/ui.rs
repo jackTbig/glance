@@ -48,9 +48,9 @@ impl SettingsTab {
 }
 
 /// 设置项左侧标签的固定宽度，让每行的控件左边缘对齐
-const LABEL_W: f32 = 108.0;
+const LABEL_W: f32 = 92.0;
 /// 长输入框的宽度
-const FIELD_W: f32 = 380.0;
+const FIELD_W: f32 = 288.0;
 
 /// 用户配的热键被别的程序占了就往下试这些。
 /// 常见组合（Ctrl+Alt+T/S/X/D/W、Ctrl+Shift+D）在实测机器上都已被占用，别放进来。
@@ -724,8 +724,8 @@ impl App {
         let k = crate::dpi::Dpi::from_ctx(ctx).ppp();
         let vb = ViewportBuilder::default()
             .with_title("translate-tool 设置")
-            .with_inner_size([780.0 * k, 560.0 * k])
-            .with_min_inner_size([700.0 * k, 460.0 * k]);
+            .with_inner_size([600.0 * k, 440.0 * k])
+            .with_min_inner_size([520.0 * k, 360.0 * k]);
         let mut close = false;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |vp_ui, _class| {
             let vp_ctx = vp_ui.ctx().clone();
@@ -763,21 +763,21 @@ impl App {
             });
 
             // 左侧分类导航；运行状态挂在导航下方，不占正文
-            egui::Panel::left("settings-nav").exact_size(152.0).show(vp_ui, |ui| {
-                ui.add_space(12.0);
+            egui::Panel::left("settings-nav").exact_size(118.0).show(vp_ui, |ui| {
+                ui.add_space(8.0);
                 for tab in SettingsTab::ALL {
                     let selected = self.settings_tab == tab;
                     if ui
-                        .add_sized([136.0, 31.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(14.0)))
+                        .add_sized([104.0, 27.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(13.0)))
                         .clicked()
                     {
                         self.settings_tab = tab;
                     }
-                    ui.add_space(3.0);
+                    ui.add_space(2.0);
                 }
-                ui.add_space(12.0);
-                ui.separator();
                 ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
                 ui.label(RichText::new("运行状态").size(11.0).color(Color32::from_gray(110)));
                 ui.add_space(3.0);
                 for line in self.status.split(" · ") {
@@ -786,10 +786,10 @@ impl App {
             });
 
             egui::CentralPanel::default().show(vp_ui, |ui| {
-                ui.add_space(10.0);
-                ui.heading(self.settings_tab.label());
-                ui.label(RichText::new(self.settings_tab.hint()).size(12.0).color(Color32::from_gray(140)));
-                ui.add_space(12.0);
+                ui.add_space(6.0);
+                ui.label(RichText::new(self.settings_tab.label()).size(17.0).strong());
+                ui.label(RichText::new(self.settings_tab.hint()).size(11.0).color(Color32::from_gray(140)));
+                ui.add_space(9.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.settings_tab {
                     SettingsTab::Service => self.settings_service(ui),
                     SettingsTab::Trigger => self.settings_trigger(ui),
@@ -819,18 +819,18 @@ impl App {
                 ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(135)));
             });
         }
-        ui.add_space(9.0);
+        ui.add_space(7.0);
     }
 
     fn section(ui: &mut egui::Ui, title: &str, hint: &str) {
-        ui.add_space(2.0);
+        ui.add_space(1.0);
         ui.separator();
-        ui.add_space(9.0);
+        ui.add_space(7.0);
         ui.label(RichText::new(title).size(13.0).strong());
         if !hint.is_empty() {
             ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(135)));
         }
-        ui.add_space(9.0);
+        ui.add_space(7.0);
     }
 
     fn settings_service(&mut self, ui: &mut egui::Ui) {
