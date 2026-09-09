@@ -233,6 +233,7 @@ impl App {
         );
         tracing::info!("{status}");
 
+        let open_settings_at_start = std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0");
         Ok(App {
             draft: cfg.clone(),
             cfg,
@@ -253,7 +254,7 @@ impl App {
             mouse_left_panel_at: None,
             notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
-            settings_open: std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0"),
+            settings_open: open_settings_at_start,
             // TT_SETTINGS_TAB=0..3 指定启动时停在哪一页（截图与自测用）
             settings_tab: std::env::var("TT_SETTINGS_TAB")
                 .ok()
@@ -261,7 +262,9 @@ impl App {
                 .and_then(|i| SettingsTab::ALL.get(i).copied())
                 .unwrap_or(SettingsTab::Service),
             settings_scroll_top: false,
-            settings_place_frames: 0,
+            // 语义是「还要摆几帧」：0 表示不用摆。启动即开设置窗时必须一起给上，
+            // 否则窗口留在屏幕外的 -32000，标题栏都变了却看不见（踩过）
+            settings_place_frames: if open_settings_at_start { PLACE_FRAMES } else { 0 },
             settings_msg: String::new(),
             env_items: None,
             status,
