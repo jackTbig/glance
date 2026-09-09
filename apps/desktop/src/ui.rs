@@ -25,10 +25,13 @@ pub enum SettingsTab {
     Trigger,
     Glossary,
     Server,
+    /// 运行环境自检：这台机器缺什么、缺了影响哪个功能、点一下能不能补上
+    Env,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 4] = [SettingsTab::Service, SettingsTab::Trigger, SettingsTab::Glossary, SettingsTab::Server];
+    pub const ALL: [SettingsTab; 5] =
+        [SettingsTab::Service, SettingsTab::Trigger, SettingsTab::Glossary, SettingsTab::Server, SettingsTab::Env];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -36,6 +39,7 @@ impl SettingsTab {
             SettingsTab::Trigger => "触发方式",
             SettingsTab::Glossary => "术语表",
             SettingsTab::Server => "浏览器插件",
+            SettingsTab::Env => "运行环境",
         }
     }
 
@@ -45,6 +49,7 @@ impl SettingsTab {
             SettingsTab::Trigger => "快捷键、悬停、划词图标，以及不想被打扰的程序",
             SettingsTab::Glossary => "让专有名词按你定的译法翻",
             SettingsTab::Server => "安装或更新 Chrome 插件，以及它依赖的本地服务",
+            SettingsTab::Env => "缺什么、影响哪个功能、能不能一键补上",
         }
     }
 }
@@ -66,6 +71,10 @@ const FALLBACK_HOTKEYS: &[&str] = &[
 /// 框选完到真正抓图之间等多久：够窗口挪走、桌面重新合成，又不至于让人觉得卡。
 /// 界面按 33 ms 一帧跑，这里相当于等 5 帧。
 const MASK_CLEAR_DELAY: Duration = Duration::from_millis(180);
+
+/// 打开设置窗后连续摆位置的帧数。界面按 33 ms 一帧跑，5 帧约 165 ms。
+/// 摆完就停，否则用户没法用鼠标调窗口大小。
+const PLACE_FRAMES: u8 = 5;
 
 /// 界面里正在做什么
 #[derive(Debug, Clone, PartialEq)]
@@ -108,9 +117,16 @@ pub struct App {
     /// 换页后把滚动条拉回顶部
     settings_scroll_top: bool,
     /// 设置窗这次打开是否已经摆过位置
-    settings_sized: bool,
+    /// 设置窗还要再摆几帧位置。**不能只摆一帧**：窗口刚从「缩在屏幕外的 1x1 浮窗宿主」
+    /// 切成设置窗时，`InnerSize` / `OuterPosition` 有可能在窗口还没完成状态切换时被丢掉，
+    /// 表现是设置窗打开了（标题栏都变了）却停在 -16000,-16000 看不见。
+    /// 安装版启动路径更长、时序不同，实测就撞上了这个（开发版一直没复现）。
+    settings_place_frames: u8,
     draft: Config,
     settings_msg: String,
+    /// 运行环境自检结果。None = 还没查或要求重查；查一次要读注册表、枚举 PATH、
+    /// 列 OCR 语言包，不能放在每帧重绘里
+    env_items: Option<Vec<desktop_shell::deps::Item>>,
     status: String,
     /// 服务句柄，重启服务时替换
     server: Option<crate::server::ServerHandle>,
@@ -245,8 +261,9 @@ impl App {
                 .and_then(|i| SettingsTab::ALL.get(i).copied())
                 .unwrap_or(SettingsTab::Service),
             settings_scroll_top: false,
-            settings_sized: false,
+            settings_place_frames: 0,
             settings_msg: String::new(),
+            env_items: None,
             status,
             caption: crate::caption::CaptionHost::new(server.as_ref().map(|s| s.port).unwrap_or(0)),
             server,
@@ -927,8 +944,8 @@ impl App {
         const W: f32 = 771.0;
         const H: f32 = 691.0;
 
-        if !self.settings_sized {
-            self.settings_sized = true;
+        if self.settings_place_frames > 0 {
+            self.settings_place_frames -= 1;
             let d = crate::dpi::Dpi::from_ctx(&ctx);
             let (sx, sy, sw, sh) = text_capture::screen::virtual_screen();
             // 摆在左上角、离两边各留一段（Jack 2026-09-09 定的位置：屏幕居中太靠下）
@@ -1010,6 +1027,7 @@ impl App {
                 SettingsTab::Trigger => self.settings_trigger(ui),
                 SettingsTab::Glossary => self.settings_glossary(ui),
                 SettingsTab::Server => self.settings_server(ui),
+                SettingsTab::Env => self.settings_env(ui),
             });
         });
 
@@ -1032,7 +1050,7 @@ impl App {
         }
         if close {
             self.settings_open = false;
-            self.settings_sized = false;
+            self.settings_place_frames = 0;
             // 变回那个躲在屏幕外的浮窗宿主
             ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
             ctx.send_viewport_cmd(ViewportCommand::Title(APP_NAME_ZH.to_string()));
@@ -1214,6 +1232,91 @@ impl App {
         }
     }
 
+    /// 运行环境自检页。
+    ///
+    /// 检查结果缓存在 `env_items` 里，**不每帧重查**：查一次要读注册表、枚举 PATH、
+    /// 列 OCR 语言包，放在 30 fps 的重绘里会明显卡。进页面时查一次，之后靠「重新检查」。
+    fn refresh_env(&mut self) {
+        let app_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        let langs = self.capturer.ocr_languages();
+        self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs));
+    }
+
+    fn settings_env(&mut self, ui: &mut egui::Ui) {
+        use desktop_shell::deps::{run_fix, Status};
+
+        if self.env_items.is_none() {
+            self.refresh_env();
+        }
+        let items = self.env_items.clone().unwrap_or_default();
+        let missing = items.iter().filter(|i| i.status == Status::Missing).count();
+        let optional = items.iter().filter(|i| i.status == Status::Optional).count();
+
+        ui.horizontal(|ui| {
+            let (color, text) = if missing > 0 {
+                (Color32::from_rgb(215, 95, 95), format!("{missing} 项缺失，对应功能用不了"))
+            } else if optional > 0 {
+                (Color32::from_rgb(200, 160, 70), format!("必需项齐全，{optional} 项可选未装"))
+            } else {
+                (Color32::from_rgb(80, 165, 95), "全部齐全".to_string())
+            };
+            let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 4.0, color);
+            ui.label(RichText::new(text).size(12.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("重新检查").clicked() {
+                    self.env_items = None;
+                }
+                if ui.small_button("复制报告").clicked() {
+                    let _ = text_capture::clipboard::set_text(&desktop_shell::deps::report(&items));
+                    self.settings_msg = "报告已复制".into();
+                }
+            });
+        });
+        ui.add_space(8.0);
+
+        let mut do_fix = None;
+        for it in &items {
+            let (dot, name_color) = match it.status {
+                Status::Ok => (Color32::from_rgb(80, 165, 95), Color32::from_gray(215)),
+                Status::Optional => (Color32::from_rgb(200, 160, 70), Color32::from_gray(215)),
+                Status::Missing => (Color32::from_rgb(215, 95, 95), Color32::from_rgb(245, 175, 175)),
+            };
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.5, dot);
+                ui.label(RichText::new(it.name).size(12.5).color(name_color).strong());
+                ui.label(RichText::new(it.status.label()).size(10.0).color(Color32::from_gray(135)));
+            });
+            ui.add(egui::Label::new(RichText::new(&it.detail).size(10.5).color(Color32::from_gray(140))).wrap());
+            // 正常的项不铺开影响与办法：全展开会把真正要处理的两三项淹掉
+            if it.status != Status::Ok {
+                ui.add(egui::Label::new(RichText::new(format!("影响：{}", it.impact)).size(10.5).color(Color32::from_gray(165))).wrap());
+                ui.add(egui::Label::new(RichText::new(format!("办法：{}", it.how)).size(10.5).color(Color32::from_gray(140))).wrap());
+                if let Some(fix) = &it.fix {
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(RichText::new(fix.label()).size(11.0)).min_size(egui::vec2(96.0, 23.0))).clicked() {
+                            do_fix = Some(fix.clone());
+                        }
+                        // 提前说清会弹 UAC / 会联网，别让提权框和网络请求显得突兀
+                        if fix.needs_admin() {
+                            ui.label(RichText::new("会弹管理员授权").size(10.0).color(Color32::from_gray(150)));
+                        }
+                    });
+                }
+            }
+            ui.add_space(9.0);
+        }
+
+        if let Some(fix) = do_fix {
+            self.settings_msg = match run_fix(&fix) {
+                Ok(()) => "已启动安装程序，装完点「重新检查」".into(),
+                Err(e) => format!("失败：{e}"),
+            };
+        }
+    }
+
     fn settings_server(&mut self, ui: &mut egui::Ui) {
         // 插件连没连上：服务端记了最近一次收到扩展请求的时刻
         let seen = self.server.as_ref().map(|s| s.seen.lock().unwrap().clone());
@@ -1301,7 +1404,8 @@ impl App {
     pub fn open_settings(&mut self) {
         self.draft = self.cfg.clone();
         self.settings_open = true;
-        self.settings_sized = false;
+        // 连摆 5 帧（约 165 ms）保证命令落地；只摆一帧会偶发丢失
+        self.settings_place_frames = PLACE_FRAMES;
     }
 
     pub fn request_quit(&mut self) {

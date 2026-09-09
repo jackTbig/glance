@@ -9,7 +9,7 @@
 
 #define AppName "translate-tool"
 #define AppNameZh "简译 Glance"
-#define AppVer "0.3.0"
+#define AppVer "1.0.0"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -64,6 +64,9 @@ Name: "startup"; Description: "开机自动启动（简译常驻托盘）"; Grou
 [Files]
 Source: "{#TargetDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion; Components: glance
 Source: "{#TargetDir}\translate-tool-service.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: glance
+Source: "{#TargetDir}\tt-doctor.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: glance
+; 内嵌运行库不随安装删除：装完之后自检页要能一键重装它（{tmp} 那份装完就没了）
+Source: "{#RepoDir}\apps\caption\installer\deps\vc_redist.x64.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: caption
 Source: "{#RepoDir}\extension\dist\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: glance
 Source: "{#RepoDir}\docs\安装与使用.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme; Components: glance
 ; 字幕的 exe 就放在简译旁边——`caption::find_exe` 头一个就找这里
@@ -76,6 +79,7 @@ Source: "{#RepoDir}\apps\caption\installer\deps\vc_redist.x64.exe"; DestDir: "{t
 [Icons]
 Name: "{group}\{#AppNameZh}"; Filename: "{app}\{#AppExe}"
 Name: "{group}\浏览器插件目录"; Filename: "{app}\extension"
+Name: "{group}\运行环境自检"; Filename: "{app}\tt-doctor.exe"
 Name: "{group}\卸载 {#AppNameZh}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppNameZh}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 Name: "{userstartup}\{#AppNameZh}"; Filename: "{app}\{#AppExe}"; Tasks: startup
@@ -110,14 +114,45 @@ begin
       Result := False;
 end;
 
-// 只在勾了字幕组件时才提醒 Vulkan。简译本身不碰 Vulkan，
-// 对只装简译的用户弹这个框纯属吓人。
+// 装之前先把依赖结论摆给用户。**只检不装**：能自动装的（VC++ 运行库）在 [Run] 里装，
+// 装不了的（Vulkan 随显卡驱动来）说清影响，让用户自己决定要不要继续。
+//
+// 只在勾了字幕组件时才提 Vulkan：简译本身不碰它，对只装简译的用户弹这个框纯属吓人。
+function DepsReport(): String;
+var
+  S: String;
+begin
+  S := '';
+  if IsComponentSelected('caption') then
+  begin
+    if not FileExists(ExpandConstant('{sys}ulkan-1.dll')) then
+      S := S + 'X Vulkan 运行库：未检测到 vulkan-1.dll' + #13#10 +
+               '   影响：「实时字幕」完全无法启动——不是没有 GPU 加速，它是加载期依赖，' + #13#10 +
+               '   缺了 Windows 会直接拒绝启动该程序。简译（翻译工具）本身不受影响。' + #13#10 +
+               '   办法：更新显卡驱动。它随驱动一起装，没有独立的运行库安装包。' + #13#10 + #13#10
+    else
+      S := S + 'OK Vulkan 运行库：已就绪' + #13#10;
+    if VCRedistNeedsInstall then
+      S := S + '!  VC++ 2015-2022 运行库：未安装，本安装包会自动装（已内嵌，无需联网）' + #13#10
+    else
+      S := S + 'OK VC++ 2015-2022 运行库：已安装' + #13#10;
+  end;
+  Result := S;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  R: String;
 begin
   if CurStep = ssInstall then
-    if IsComponentSelected('caption') then
-      if not FileExists(ExpandConstant('{sys}\vulkan-1.dll')) then
-        MsgBox('未检测到 Vulkan 运行库（vulkan-1.dll）。它随显卡驱动一起安装。' + #13#10 +
-               '缺少它「实时字幕」将无法启动——不是只是没有 GPU 加速，vulkan-1.dll 是它的加载期依赖。' + #13#10 +
-               '简译本身不受影响。请先更新显卡驱动。安装会继续。', mbInformation, MB_OK);
+  begin
+    R := DepsReport();
+    if (Pos('X ', R) > 0) and (not WizardSilent) then
+      if MsgBox('安装前环境检查：' + #13#10 + #13#10 + R + #13#10 +
+                '标 X 的项会让对应功能不可用。仍要继续安装吗？' + #13#10 +
+                '（装完后可用开始菜单里的「运行环境自检」随时复查，' + #13#10 +
+                '或在简译设置窗的「运行环境」页里逐项一键修复）',
+                mbConfirmation, MB_YESNO) = IDNO then
+        Abort();
+  end;
 end;

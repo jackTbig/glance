@@ -11,6 +11,7 @@
 //! - 字幕的透明窗每帧重算高度，跟简译固定尺寸的浮窗宿主不是一回事。
 
 pub mod caption_ipc;
+pub mod deps;
 pub mod dpi;
 pub mod fonts;
 pub mod hotkey;

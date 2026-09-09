@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "简译 Glance",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "整页 / 悬停 / 划词翻译，翻译由本机的简译桌面端完成，API Key 不进浏览器。",
   "permissions": [
     "storage",

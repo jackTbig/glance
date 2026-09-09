@@ -12,6 +12,11 @@ path = "src/main.rs"
 name = "translate-tool-service"
 path = "src/bin/service.rs"
 
+# 运行环境自检（控制台）。界面起不来时正是最需要它的时候，所以单独做一个 bin
+[[bin]]
+name = "tt-doctor"
+path = "src/bin/doctor.rs"
+
 [lib]
 name = "translate_tool"
 path = "src/lib.rs"

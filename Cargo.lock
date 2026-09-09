@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "ai-translate"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -970,7 +970,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "desktop-shell"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "egui",
@@ -2524,7 +2524,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "live-caption"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "ai-translate",
  "anyhow",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "mock-llm"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "futures",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "text-capture"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "image",
@@ -4763,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "translate-tool"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "ai-translate",
  "anyhow",

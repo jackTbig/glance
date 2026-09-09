@@ -102,6 +102,19 @@ impl Capturer {
         }
     }
 
+    /// 本机装了哪些 OCR 语言包（BCP-47 标签，如 `zh-Hans-CN`、`en-US`）。
+    /// 运行环境自检用它判断截屏识别能不能work、英文准不准。
+    pub fn ocr_languages(&self) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            ocr::WindowsOcr::available_languages()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    }
+
     /// 划词：当前选中的文本
     pub fn selection(&self) -> anyhow::Result<Captured> {
         let t0 = std::time::Instant::now();
