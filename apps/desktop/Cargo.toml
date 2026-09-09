@@ -33,6 +33,11 @@ global-hotkey = "0.8"
 tray-icon = "0.24"
 tiny_http = "0.12"
 chrono = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+# 把图标与版本信息编进 exe（资源表），这样文件管理器与任务栏都能看到
+winresource = "0.1"
 
 [dev-dependencies]
 mock-llm = { path = "../../tests/mock-llm" }

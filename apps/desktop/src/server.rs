@@ -187,7 +187,7 @@ pub fn spawn(
                         };
                         serde_json::json!({
                             "ok": true,
-                            "app": "translate-tool",
+                            "app": "简译",
                             "version": app_version,
                             "backend": route.backend.as_str(),
                             "model": model,

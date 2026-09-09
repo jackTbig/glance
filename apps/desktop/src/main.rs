@@ -69,10 +69,10 @@ fn main() -> eframe::Result<()> {
     let dir = Config::dir();
     init_logging(&dir);
     if !claim_single_instance() {
-        tracing::warn!("已有一个 translate-tool 在运行，本次启动退出");
+        tracing::warn!("已有一个简译在运行，本次启动退出");
         return Ok(());
     }
-    tracing::info!("translate-tool {} 启动，数据目录 {}", env!("CARGO_PKG_VERSION"), dir.display());
+    tracing::info!("{} {} 启动，数据目录 {}", translate_tool::ui::APP_NAME_ZH, env!("CARGO_PKG_VERSION"), dir.display());
 
     let cfg = match Config::load() {
         Ok(c) => c,
@@ -83,14 +83,19 @@ fn main() -> eframe::Result<()> {
     };
 
     // 根视口是那个平时缩到屏幕外、需要时变成浮窗的窗口
-    let viewport = egui::ViewportBuilder::default()
-        .with_title("translate-tool")
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(translate_tool::ui::APP_NAME_ZH)
         .with_decorations(false)
         .with_transparent(true)
         .with_always_on_top()
         .with_taskbar(false)
         .with_inner_size([1.0, 1.0])
         .with_position([-32000.0, -32000.0]);
+    // 标题栏与任务栏的小图标
+    match translate_tool::tray::icon_rgba() {
+        Ok((rgba, w, h)) => viewport = viewport.with_icon(egui::IconData { rgba, width: w, height: h }),
+        Err(e) => tracing::warn!("窗口图标加载失败：{e}"),
+    }
     let options = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow, // wgpu 在本机 Arc 上不给带 alpha 的合成模式，透明窗会变黑底
@@ -98,7 +103,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "translate-tool",
+        translate_tool::ui::APP_NAME_ZH,
         options,
         Box::new(move |cc| match App::new(cc, cfg) {
             Ok(a) => Ok(Box::new(a) as Box<dyn eframe::App>),

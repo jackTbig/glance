@@ -39,7 +39,7 @@ fn health_reports_ok() {
     assert_eq!(code, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["app"], "translate-tool");
+    assert_eq!(v["app"], "简译");
     h.stop();
 }
 

@@ -230,7 +230,7 @@ impl App {
             settings_msg: String::new(),
             status,
             server,
-            _tray: match crate::tray::build("translate-tool 翻译工具") {
+            _tray: match crate::tray::build(&format!("{APP_NAME_ZH} · 划词悬停截屏翻译")) {
                 Ok(t) => Some(t),
                 Err(e) => {
                     tracing::warn!("{e}");
@@ -746,7 +746,13 @@ impl App {
             self.settings_sized = true;
             let d = crate::dpi::Dpi::from_ctx(&ctx);
             let (sx, sy, sw, sh) = text_capture::screen::virtual_screen();
-            let at = (sx + (sw - W as u32) as i32 / 2, sy + (sh - H as u32) as i32 / 2);
+            // 摆在左上角、离两边各留一段（Jack 2026-09-09 定的位置：屏幕居中太靠下）
+            const MARGIN_LEFT: i32 = 160;
+            const MARGIN_TOP: i32 = 120;
+            let at = (
+                (sx + MARGIN_LEFT).min(sx + sw as i32 - W as i32),
+                (sy + MARGIN_TOP).min(sy + sh as i32 - H as i32),
+            );
             ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(ViewportCommand::Title(format!("{APP_NAME_ZH} 设置")));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));

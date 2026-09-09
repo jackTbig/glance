@@ -9,46 +9,20 @@ pub const MENU_SETTINGS: u32 = 1;
 pub const MENU_PAUSE: u32 = 2;
 pub const MENU_QUIT: u32 = 3;
 
-/// 程序内画一个图标：深蓝圆角块 + 白色「译」的简化笔画（不依赖外部资源文件）
+/// 图标：编译期嵌进来的 PNG（见 `assets/gen_icon.ps1`）。
+/// 32 px 是托盘的常用尺寸；系统需要别的尺寸会自己缩。
+const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon_32.png");
+
+/// 解出 RGBA 像素，给 tray-icon 与 eframe 的窗口图标共用
+pub fn icon_rgba() -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory(ICON_PNG)?.to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    Ok((img.into_raw(), w, h))
+}
+
 pub fn make_icon() -> anyhow::Result<Icon> {
-    const N: u32 = 32;
-    let mut rgba = vec![0u8; (N * N * 4) as usize];
-    let put = |buf: &mut [u8], x: u32, y: u32, c: [u8; 4]| {
-        if x < N && y < N {
-            let o = ((y * N + x) * 4) as usize;
-            buf[o..o + 4].copy_from_slice(&c);
-        }
-    };
-    let bg = [40u8, 90, 180, 255];
-    let fg = [255u8, 255, 255, 255];
-    for y in 0..N {
-        for x in 0..N {
-            // 圆角
-            let corner = |cx: i32, cy: i32| ((x as i32 - cx).pow(2) + (y as i32 - cy).pow(2)) as f32;
-            let r = 7.0f32;
-            let outside = (x < 7 && y < 7 && corner(7, 7) > r * r)
-                || (x >= N - 7 && y < 7 && corner(N as i32 - 8, 7) > r * r)
-                || (x < 7 && y >= N - 7 && corner(7, N as i32 - 8) > r * r)
-                || (x >= N - 7 && y >= N - 7 && corner(N as i32 - 8, N as i32 - 8) > r * r);
-            if !outside {
-                put(&mut rgba, x, y, bg);
-            }
-        }
-    }
-    // 「译」的示意：左侧两点一竖（讠），右侧一个方块
-    for y in 10..22 {
-        put(&mut rgba, 9, y, fg);
-    }
-    put(&mut rgba, 9, 8, fg);
-    for x in 14..24 {
-        put(&mut rgba, x, 10, fg);
-        put(&mut rgba, x, 15, fg);
-        put(&mut rgba, x, 21, fg);
-    }
-    for y in 10..22 {
-        put(&mut rgba, 18, y, fg);
-    }
-    Icon::from_rgba(rgba, N, N).map_err(|e| anyhow::anyhow!("托盘图标构造失败：{e}"))
+    let (rgba, w, h) = icon_rgba()?;
+    Icon::from_rgba(rgba, w, h).map_err(|e| anyhow::anyhow!("托盘图标构造失败：{e}"))
 }
 
 pub fn build(tooltip: &str) -> anyhow::Result<TrayIcon> {
