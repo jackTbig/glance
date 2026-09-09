@@ -1,0 +1,7 @@
+/target
+/config.toml
+/transcripts
+/logs
+/dist
+/installer/deps
+/installer/build
