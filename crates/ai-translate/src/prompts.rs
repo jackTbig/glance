@@ -17,6 +17,24 @@ const HOVER: &str = "输入是用户鼠标悬停的一个段落。输出整段�
 const SCREENSHOT: &str = "输入来自屏幕截图的文字识别结果，可能有错字、断行与多余空格。\
 先在心里纠正明显的识别错误并合并被断开的句子，再翻译；只输出译文。";
 
+/// 取词释义：要的是词典条目而不是一句译文，所以整段提示词独立，不叠 COMMON
+/// （COMMON 那句「只输出译文，不加解释」与这里正相反）。
+///
+/// 行标记格式而不是 JSON：面板是流式上屏的，行格式每收到一行就能画一行，
+/// 模型少给一行也只是少一块内容；JSON 截断则整块作废。
+const WORD: &str = "你是英汉词典。用户取到一个词或短语，请给出词典条目。\
+严格按下面的行格式输出，一行一条，行首标记不能改；不知道的整行省略，不要写「无」或「暂缺」；\
+除这些行外不要输出任何说明、标题或代码块围栏。\n\
+#词 词条本身，保持原样拼写\n\
+#音 英 /国际音标/ 美 /国际音标/\n\
+#释 词性缩写. 该词性下的常见中文释义，多个义项用「；」隔开\n\
+#形 词形变化，如：复数 xxx；过去式 xxx；比较级 xxx\n\
+#例 一个短例句，用原文\n\
+#译 上面那句例句的中文翻译\n\
+其中 #释 按常用程度排序，一个词性一行，最多 4 行；\
+人名、地名、缩写、专有名词也用 #释 给出（词性写 n. 或 abbr.）。\
+短语没有音标与词形变化时，省掉 #音 与 #形 两行。";
+
 /// 系统提示：公共约束 + 场景约束 + 术语对照（若有）
 pub fn system_prompt(scene: Scene, glossary_block: Option<&str>) -> String {
     let scene_part = match scene {
@@ -24,8 +42,9 @@ pub fn system_prompt(scene: Scene, glossary_block: Option<&str>) -> String {
         Scene::Selection => SELECTION,
         Scene::Hover => HOVER,
         Scene::Screenshot => SCREENSHOT,
+        Scene::Word => WORD,
     };
-    let mut s = format!("{COMMON}\n{scene_part}");
+    let mut s = if scene == Scene::Word { scene_part.to_string() } else { format!("{COMMON}\n{scene_part}") };
     if let Some(g) = glossary_block.filter(|g| !g.trim().is_empty()) {
         s.push('\n');
         s.push_str(g);
@@ -46,7 +65,11 @@ pub fn user_message(scene: Scene, text: &str, context: Option<&str>, glossary_bl
         m.push_str(g);
         m.push_str("\n\n");
     }
-    m.push_str(if scene == Scene::FullPage { "请翻译以下各段：\n" } else { "请翻译：\n" });
+    m.push_str(match scene {
+        Scene::FullPage => "请翻译以下各段：\n",
+        Scene::Word => "请给出这个词的词典条目：\n",
+        _ => "请翻译：\n",
+    });
     m.push_str(text);
     m
 }
@@ -67,6 +90,17 @@ mod tests {
         let s = system_prompt(Scene::Hover, Some("术语对照（必须遵守）：\nA → 甲"));
         assert!(s.ends_with("A → 甲"));
         assert_eq!(system_prompt(Scene::Hover, Some("  ")), system_prompt(Scene::Hover, None));
+    }
+
+    #[test]
+    fn word_prompt_is_dictionary_not_translation() {
+        let s = system_prompt(Scene::Word, None);
+        // COMMON 那句「只输出译文，不加解释」会把词典条目掐掉，这条场景必须绕开它
+        assert!(!s.contains("只输出译文"));
+        for marker in ["#词", "#音", "#释", "#形", "#例", "#译"] {
+            assert!(s.contains(marker), "提示词缺少标记 {marker}");
+        }
+        assert!(user_message(Scene::Word, "glance", None, None).ends_with("词典条目：\nglance"));
     }
 
     #[test]

@@ -103,6 +103,8 @@ impl SceneCfg {
             Scene::Selection => &self.selection,
             Scene::Hover => &self.hover,
             Scene::Screenshot => &self.screenshot,
+            // 取词释义不单独配后端：它是划词/悬停的一种结果形态，跟着划词走
+            Scene::Word => &self.selection,
         };
         let b = Backend::parse(s);
         // 整页只能走 openai

@@ -1,5 +1,6 @@
 //! translate-tool 桌面端
 pub mod config;
+pub mod dict;
 pub mod dpi;
 pub mod engine;
 pub mod extension;

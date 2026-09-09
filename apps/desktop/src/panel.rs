@@ -27,6 +27,14 @@ pub struct PanelState {
     pub pos: (i32, i32),
     /// 钉住后不自动关闭，可拖动
     pub pinned: bool,
+    /// 正在拖动：记下按下那一刻的（鼠标物理坐标，面板左上角物理坐标）。
+    /// 拖动中按「当前鼠标 - 起点鼠标」算绝对位移，**不用 egui 的逐帧 drag_delta**：
+    /// 那是窗口内的逻辑坐标，而窗口本身正跟着鼠标走，每帧还要取整成物理像素，
+    /// 误差攒下来卡片会越拖越落后于鼠标。
+    pub drag_from: Option<((i32, i32), (i32, i32))>,
+    /// 上一帧量到的内容高度（逻辑像素）。0 = 还没量过，先按配置的最大高度开。
+    /// 卡片高度跟着内容走，短词条下面才不会拖一大截空白。
+    pub view_h: f32,
     pub opened_at: Instant,
     pub scene_label: &'static str,
 }
@@ -41,6 +49,8 @@ impl PanelState {
             anchor,
             pos: anchor,
             pinned: false,
+            drag_from: None,
+            view_h: 0.0,
             opened_at: Instant::now(),
             scene_label,
         }
@@ -50,9 +60,16 @@ impl PanelState {
         matches!(self.phase, Phase::Working(_))
     }
 
-    /// 该不该自动关闭：没钉住、已出结果、鼠标离开够久
+    /// 拖动中的新左上角（全物理坐标）：起点面板位置 + 鼠标相对起点的位移。
+    /// 每帧都从起点重算而不是累加，所以窗口跟手慢一帧也不会攒出偏差。
+    pub fn drag_to(&self, cursor: (i32, i32)) -> Option<(i32, i32)> {
+        let (c0, p0) = self.drag_from?;
+        Some((p0.0 + cursor.0 - c0.0, p0.1 + cursor.1 - c0.1))
+    }
+
+    /// 该不该自动关闭：没钉住、没在拖、已出结果、鼠标离开够久
     pub fn should_auto_close(&self, mouse_outside_for: Option<Duration>, grace: Duration) -> bool {
-        if self.pinned || self.is_working() {
+        if self.pinned || self.drag_from.is_some() || self.is_working() {
             return false;
         }
         matches!(mouse_outside_for, Some(d) if d >= grace)
@@ -99,6 +116,28 @@ mod tests {
     use super::*;
 
     const SCREEN: (i32, i32, u32, u32) = (0, 0, 1920, 1080);
+
+    #[test]
+    fn dragging_follows_the_cursor_without_drift() {
+        let mut p = PanelState::new("取词释义", Source::Uia, (500, 400));
+        assert_eq!(p.drag_to((510, 410)), None, "没按下就不该动");
+        p.drag_from = Some(((500, 400), (480, 360)));
+        // 分多帧走到同一个终点，结果必须和一步到位完全一致（这正是不用逐帧累加的理由）
+        for c in [(505, 402), (540, 430), (620, 500)] {
+            assert_eq!(p.drag_to(c), Some((480 + c.0 - 500, 360 + c.1 - 400)));
+        }
+        assert_eq!(p.drag_to((620, 500)), Some((600, 460)));
+    }
+
+    #[test]
+    fn dragging_holds_the_card_open() {
+        let mut p = PanelState::new("取词释义", Source::Uia, (0, 0));
+        p.phase = Phase::Done;
+        let grace = Duration::from_millis(500);
+        assert!(p.should_auto_close(Some(Duration::from_secs(2)), grace));
+        p.drag_from = Some(((0, 0), (0, 0)));
+        assert!(!p.should_auto_close(Some(Duration::from_secs(2)), grace), "拖动中不能自己收掉");
+    }
 
     #[test]
     fn places_bottom_right_when_there_is_room() {

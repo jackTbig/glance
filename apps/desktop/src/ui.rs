@@ -249,6 +249,19 @@ impl App {
             paused: false,
             quit: false,
         })
+        .map(|mut app| {
+            // 调试钩子：TT_DEMO_WORD=glance 启动即查一次词并弹卡片（截图与验收用）
+            if let Ok(w) = std::env::var("TT_DEMO_WORD") {
+                if !w.trim().is_empty() {
+                    app.start(Job::Text { scene: Scene::Word, text: w.trim().into() }, Scene::Word.label_zh(), (600, 400), Source::Clipboard);
+                    // 钉住，不然鼠标没停在卡片上，出结果后一会儿就自己收了，截不到
+                    if let Some(p) = app.panel.as_mut() {
+                        p.pinned = true;
+                    }
+                }
+            }
+            app
+        })
     }
 
     fn start(&mut self, job: Job, scene_label: &'static str, anchor: (i32, i32), source: Source) {
@@ -375,10 +388,13 @@ impl App {
             }
             let Some(p) = self.panel.as_mut() else { continue };
             match e {
-                Event::Captured { text, source, took_ms, .. } => {
+                Event::Captured { text, source, scene, took_ms, .. } => {
                     p.original = text;
                     p.source = source;
-                    p.phase = Phase::Working(format!("{} {took_ms}ms · 翻译中…", source.label_zh()));
+                    // 取到的是单个词时引擎会改判成词典场景，标题跟着改，重试也才会走对提示词
+                    p.scene_label = scene.label_zh();
+                    let doing = if scene == Scene::Word { "查词中…" } else { "翻译中…" };
+                    p.phase = Phase::Working(format!("{} {took_ms}ms · {doing}", source.label_zh()));
                 }
                 Event::Delta { text, .. } => {
                     p.translated = text;
@@ -496,6 +512,17 @@ fn install_cjk_font(ctx: &egui::Context) {
             fonts.font_data.insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
             fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "cjk".into());
             fonts.families.get_mut(&FontFamily::Monospace).unwrap().push("cjk".into());
+            // 雅黑与 egui 自带字体都没有音标的长音符 ː(U+02D0) 与卡片上的几个符号，
+            // 缺字形不报错、只画成方块豆腐。Segoe UI 覆盖 IPA，Segoe UI Symbol 覆盖符号，
+            // 挂在中文字体后面当兜底（顺序即回退顺序）。
+            let mut at = 1;
+            for (name, path) in [("ipa", r"C:\Windows\Fonts\segoeui.ttf"), ("sym", r"C:\Windows\Fonts\seguisym.ttf")] {
+                if let Ok(b) = std::fs::read(path) {
+                    fonts.font_data.insert(name.into(), Arc::new(FontData::from_owned(b)));
+                    fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(at, name.into());
+                    at += 1;
+                }
+            }
             ctx.set_fonts(fonts);
             return;
         }
@@ -617,16 +644,25 @@ impl App {
             tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{h}) ppp={}", p.anchor, dpi.ppp());
         }
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(logical));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(w, h)));
+        // 高度跟着上一帧量到的内容走，短词条不拖一大截空白；摆放仍按最大高度算，
+        // 免得卡片一变矮就往下跳一次（place 会在放不下时翻到锚点上方）
+        let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(w, inner_h)));
 
         let mut close = false;
         let mut pin_toggled = false;
         let mut retry = false;
         let mut copy = false;
+        let (mut drag_started, mut dragging, mut drag_stopped) = (false, false, false);
+        let mut content_h = 0.0;
+        // 取词场景才认词典格式：普通译文里偶尔也有 # 开头的行（Markdown 标题、井号话题），
+        // 不限定场景的话一句正常译文会被切成一张残缺的词典卡
+        let entry = (scene_of(p.scene_label) == Scene::Word).then(|| crate::dict::parse(&p.translated)).flatten();
+        let base = self.cfg.ui.font_size;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(28, 28, 32, 246)).corner_radius(CornerRadius::same(10)).inner_margin(12.0))
             .show(root_ui, |ui| {
-                ui.horizontal(|ui| {
+                let head = ui.horizontal(|ui| {
                     ui.label(RichText::new(p.scene_label).color(Color32::from_rgb(150, 180, 255)).size(13.0));
                     ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::GRAY).size(12.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -637,15 +673,39 @@ impl App {
                         if ui.small_button(pin_label).on_hover_text("钉住不自动关闭").clicked() {
                             pin_toggled = true;
                         }
-                        if ui.small_button("⎘").on_hover_text("复制译文").clicked() {
+                        let copy_hint = if entry.is_some() { "复制释义" } else { "复制译文" };
+                        if ui.small_button("⎘").on_hover_text(copy_hint).clicked() {
                             copy = true;
                         }
                     });
                 });
+                // 标题栏当拖动手柄。右边留出三个按钮的宽度不参与拖动：
+                // 手柄压在按钮上会把点击一起吃掉，表现是「关不掉也钉不住」。
+                let mut handle = head.response.rect;
+                handle.max.x = (handle.max.x - 112.0).max(handle.min.x);
+                let dr = ui.interact(handle, ui.id().with("panel-drag"), egui::Sense::drag());
+                if dr.hovered() || dr.dragged() {
+                    ui.ctx().set_cursor_icon(if dr.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+                }
+                drag_started = dr.drag_started();
+                dragging = dr.dragged();
+                drag_stopped = dr.drag_stopped();
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(h - 90.0).show(ui, |ui| {
+                let out = egui::ScrollArea::vertical().max_height(h - 90.0).show(ui, |ui| {
+                    if let Some(e) = &entry {
+                        // 词典卡：词头本身就是原文，不再另起一行灰色原文，省得重复
+                        draw_entry(ui, e, &p.original, base);
+                        if p.is_working() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("查词中…").color(Color32::GRAY).size(12.0));
+                            });
+                        }
+                        return;
+                    }
                     if !p.original.is_empty() {
-                        ui.label(RichText::new(&p.original).color(Color32::from_gray(150)).size(self.cfg.ui.font_size - 1.0));
+                        ui.label(RichText::new(&p.original).color(Color32::from_gray(150)).size(base - 1.0));
                         ui.add_space(6.0);
                     }
                     match &p.phase {
@@ -656,11 +716,11 @@ impl App {
                                     ui.label(RichText::new(msg).color(Color32::GRAY).size(12.0));
                                 });
                             } else {
-                                ui.label(RichText::new(&p.translated).color(Color32::from_gray(230)).size(self.cfg.ui.font_size));
+                                ui.label(RichText::new(&p.translated).color(Color32::from_gray(230)).size(base));
                             }
                         }
                         Phase::Done => {
-                            ui.label(RichText::new(&p.translated).color(Color32::WHITE).size(self.cfg.ui.font_size));
+                            ui.label(RichText::new(&p.translated).color(Color32::WHITE).size(base));
                         }
                         Phase::Notice(msg) => {
                             ui.label(RichText::new(msg).color(Color32::from_gray(170)).size(13.0));
@@ -673,16 +733,37 @@ impl App {
                         }
                     }
                 });
+                // 量内容必须用 ScrollArea 的 content_size，**不能用 ui.min_rect()**：
+                // 后者受当前窗口高度限制，而窗口高度又是上一帧量出来的——一旦变矮就自锁，
+                // 卡片会永远停在第一帧那点高度，内容被拦腰切掉。
+                content_h = head.response.rect.height() + 18.0 + out.content_size.y;
             });
 
         if let Some(p) = self.panel.as_mut() {
             p.pos = (x, y);
+            // 12 的内边距上下各一份
+            p.view_h = content_h + 24.0;
+            if drag_started {
+                // 拖动即钉住：特意挪过位置的卡片再自己消失最恼人
+                p.drag_from = Some((text_capture::screen::cursor_pos(), p.pos));
+                p.pinned = true;
+            }
+            if dragging {
+                if let Some(at) = p.drag_to(text_capture::screen::cursor_pos()) {
+                    p.pos = at;
+                }
+            }
+            if drag_stopped {
+                p.drag_from = None;
+            }
             if pin_toggled {
                 p.pinned = !p.pinned;
             }
         }
         if copy {
-            let _ = text_capture::clipboard::set_text(&p.translated);
+            // 词典卡复制的是整理过的条目，不是带 #标记 的原始回包
+            let text = entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| p.translated.clone());
+            let _ = text_capture::clipboard::set_text(&text);
         }
         if retry {
             let text = p.original.clone();
@@ -1207,11 +1288,56 @@ fn window_handle_of(_frame: &eframe::Frame) -> isize {
     0
 }
 
+/// 画一张词典卡片（版式参考有道取词：词头 → 音标 → 按词性分行的释义 → 词形 → 例句）。
+///
+/// 每块都可能缺：模型不知道就整行省略，流式过程中后面的行还没到。所以每块都单独判空，
+/// 不要写成「有词头就一定有音标」那种连坐。
+fn draw_entry(ui: &mut egui::Ui, e: &crate::dict::Entry, original: &str, base: f32) {
+    // 词头：模型偶尔不回 #词，就拿取到的原文顶上，别让卡片没有标题
+    let head = if e.head.is_empty() { original.trim() } else { e.head.as_str() };
+    if !head.is_empty() {
+        ui.label(RichText::new(head).color(Color32::WHITE).size(base + 9.0).strong());
+    }
+    if !e.phonetic.is_empty() {
+        ui.add_space(1.0);
+        ui.label(RichText::new(&e.phonetic).color(Color32::from_gray(140)).size(base - 3.0));
+    }
+    if !e.senses.is_empty() {
+        ui.add_space(8.0);
+        for s in &e.senses {
+            ui.horizontal_top(|ui| {
+                // 词性列宽固定，多个词性的释义才能左对齐成一栏
+                ui.add_sized(
+                    [34.0, base + 2.0],
+                    egui::Label::new(RichText::new(&s.pos).color(Color32::from_rgb(150, 180, 255)).size(base - 2.0)),
+                );
+                ui.add(egui::Label::new(RichText::new(&s.text).color(Color32::from_gray(235)).size(base)).wrap());
+            });
+            ui.add_space(4.0);
+        }
+    }
+    if !e.forms.is_empty() {
+        ui.add_space(2.0);
+        ui.add(egui::Label::new(RichText::new(&e.forms).color(Color32::from_gray(130)).size(base - 4.0)).wrap());
+    }
+    if !e.example.is_empty() {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(&e.example).color(Color32::from_gray(205)).size(base - 2.0).italics()).wrap());
+        if !e.example_zh.is_empty() {
+            ui.add_space(2.0);
+            ui.add(egui::Label::new(RichText::new(&e.example_zh).color(Color32::from_gray(150)).size(base - 3.0)).wrap());
+        }
+    }
+}
+
 fn scene_of(label: &str) -> Scene {
     match label {
         "整页翻译" => Scene::FullPage,
         "悬停翻译" => Scene::Hover,
         "截屏翻译" => Scene::Screenshot,
+        "取词释义" => Scene::Word,
         _ => Scene::Selection,
     }
 }
@@ -1225,7 +1351,12 @@ mod tests {
         assert_eq!(scene_of("悬停翻译"), Scene::Hover);
         assert_eq!(scene_of("截屏翻译"), Scene::Screenshot);
         assert_eq!(scene_of("划词翻译"), Scene::Selection);
+        assert_eq!(scene_of("取词释义"), Scene::Word);
         assert_eq!(scene_of("乱写"), Scene::Selection);
+        // 重试按钮拿 scene_label 反查场景，标签变了这里必须跟着变
+        for sc in Scene::ALL {
+            assert_eq!(scene_of(sc.label_zh()), sc);
+        }
     }
 
     #[test]

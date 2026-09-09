@@ -50,6 +50,11 @@ fn main() -> anyhow::Result<()> {
     println!("[划词] {:?}ms  {one}", t0.elapsed().as_millis());
 
     let t0 = Instant::now();
+    let w = t.translate(Scene::Word, "glance", None, &mut |_| {})?;
+    println!("[取词] {:?}ms\n{w}", t0.elapsed().as_millis());
+    anyhow::ensure!(w.contains("#词") && w.contains("#释"), "取词没按行标记格式返回");
+
+    let t0 = Instant::now();
     let items = vec![
         Item { id: "1".into(), text: "Rust is a systems programming language.".into(), is_html: false },
         Item { id: "2".into(), text: "Click <a href=\"https://example.com\">here</a> to learn <b>more</b>.".into(), is_html: true },

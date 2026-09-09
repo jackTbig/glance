@@ -20,8 +20,8 @@ pub enum Job {
 /// 工作线程发回界面的进度
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// 取到原文了（还没翻译）
-    Captured { seq: u64, text: String, source: Source, took_ms: u128 },
+    /// 取到原文了（还没翻译）。scene 是**取词后**定的：取到单个词会改判成词典场景
+    Captured { seq: u64, text: String, source: Source, scene: Scene, took_ms: u128 },
     /// 译文增量（流式）
     Delta { seq: u64, text: String },
     Done { seq: u64, text: String, took_ms: u128 },
@@ -111,7 +111,13 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
             }
         },
     };
-    let _ = ev.send(Event::Captured { seq, text: text.clone(), source, took_ms: t0.elapsed().as_millis() });
+    // 取到的只是一个词或短语时，用户要的是释义而不是一句译文（有道那种取词卡）。
+    // 判定放在取词之后：划词与悬停都可能取到单个词，重试走 Job::Text 时场景已经定好了。
+    let scene = match scene {
+        Scene::Selection | Scene::Hover if ai_translate::scene::looks_like_word(&text) => Scene::Word,
+        other => other,
+    };
+    let _ = ev.send(Event::Captured { seq, text: text.clone(), source, scene, took_ms: t0.elapsed().as_millis() });
 
     // 第二步：翻译
     let tr = translator.lock().unwrap().clone();
