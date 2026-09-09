@@ -7,7 +7,9 @@
 ; **两个 exe 而不是一个**：字幕的 vulkan-1.dll 是加载期导入，合成单 exe 后没有
 ; Vulkan ICD 的机器连划词取词都起不来（0xC0000135）。
 
-#define AppName "translate-tool"
+; AppName 是**文件名与目录名**用的短名：无空格，中英文名都在。
+; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
+#define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
 #define AppVer "1.0.0"
 #define AppExe "translate-tool.exe"
