@@ -1,6 +1,8 @@
 pub mod asr;
 pub mod audio;
 pub mod config;
+pub mod control;
+pub mod managed;
 pub mod messages;
 pub mod segmenter;
 pub mod transcript;

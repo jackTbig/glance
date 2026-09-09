@@ -199,6 +199,14 @@ pub struct CaptionApp {
     hist_note: String,
     test_rx: Option<Receiver<Result<String, String>>>,
     test_msg: String,
+    // 托管（被简译拉起）相关。独立运行时 link.is_managed() == false，下面这些都不起作用。
+    link: Arc<crate::managed::Link>,
+    /// 父进程下来的命令，每帧取一次
+    rx_cmd: Option<Receiver<crate::control::Command>>,
+    /// 供父进程读勾选态用（托盘菜单要显示暂停/穿透/迷你的勾）
+    bridge: Option<Arc<crate::control::Bridge>>,
+    /// 已经为失联自救过一次了，别每帧重复
+    rescued: bool,
 }
 
 impl CaptionApp {
@@ -208,6 +216,9 @@ impl CaptionApp {
         cfg: Config,
         paused: Arc<AtomicBool>,
         tx_cfg: Vec<Sender<TranslatorConfig>>,
+        link: Arc<crate::managed::Link>,
+        rx_cmd: Option<Receiver<crate::control::Command>>,
+        bridge: Option<Arc<crate::control::Bridge>>,
     ) -> Self {
         if let Err(e) = install_fonts(&cc.egui_ctx, &cfg.ui.font_path) {
             tracing::warn!("加载中文字体失败：{e}");
@@ -224,23 +235,31 @@ impl CaptionApp {
         let hk_clickable = parse(&cfg.ui.hotkey_clickable, HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC));
         let hk_toggle = parse(&cfg.ui.hotkey_passthrough, HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP));
         let hotkey_toggle_id = hk_toggle.id();
-        let hotkeys = match GlobalHotKeyManager::new() {
-            Ok(m) => {
-                let mut ok = true;
-                for (hk, name) in [(hk_clickable, cfg.ui.hotkey_clickable.as_str()), (hk_toggle, cfg.ui.hotkey_passthrough.as_str())] {
-                    if let Err(e) = m.register(hk) {
-                        tracing::warn!("全局热键 {name} 注册失败（多半被别的程序占了，可在设置里换一个）：{e}");
-                        ok = false;
+        // 托管时**不注册热键**：父进程统一注册后经控制端点转发。
+        // 两个进程各注册一遍的话，后注册的那个必然失败（组合已被占），
+        // 而且 global-hotkey 的错误信息不可信，排查起来看着像「热键莫名失灵」。
+        let hotkeys = if link.is_managed() {
+            tracing::info!("托管模式：热键交给简译注册并转发");
+            None
+        } else {
+            match GlobalHotKeyManager::new() {
+                Ok(m) => {
+                    let mut ok = true;
+                    for (hk, name) in [(hk_clickable, cfg.ui.hotkey_clickable.as_str()), (hk_toggle, cfg.ui.hotkey_passthrough.as_str())] {
+                        if let Err(e) = m.register(hk) {
+                            tracing::warn!("全局热键 {name} 注册失败（多半被别的程序占了，可在设置里换一个）：{e}");
+                            ok = false;
+                        }
                     }
+                    if ok {
+                        tracing::info!("全局热键已注册：{} 切回可点击，{} 切换穿透", cfg.ui.hotkey_clickable, cfg.ui.hotkey_passthrough);
+                    }
+                    Some(m)
                 }
-                if ok {
-                    tracing::info!("全局热键已注册：{} 切回可点击，{} 切换穿透", cfg.ui.hotkey_clickable, cfg.ui.hotkey_passthrough);
+                Err(e) => {
+                    tracing::warn!("全局热键管理器创建失败：{e}");
+                    None
                 }
-                Some(m)
-            }
-            Err(e) => {
-                tracing::warn!("全局热键管理器创建失败：{e}");
-                None
             }
         };
         let file = match TranscriptFile::create(&Config::resolve(&cfg.paths.transcripts_dir).to_string_lossy()) {
@@ -251,11 +270,17 @@ impl CaptionApp {
             }
         };
         let draft = cfg.clone();
-        let tray = match build_tray() {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::warn!("托盘图标创建失败：{e}");
-                None
+        // 托管时不建托盘：用户只该看到简译那一个图标。
+        // 失联时会在 `rescue_from_lost_parent` 里补建——那是唯一的退路，不能省。
+        let tray = if link.is_managed() {
+            None
+        } else {
+            match build_tray() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("托盘图标创建失败：{e}");
+                    None
+                }
             }
         };
         let mut app = Self {
@@ -292,6 +317,10 @@ impl CaptionApp {
             hist_note: String::new(),
             test_rx: None,
             test_msg: String::new(),
+            link,
+            rx_cmd,
+            bridge,
+            rescued: false,
         };
         // 调试钩子：LC_OPEN_SETTINGS=1 启动即打开设置窗（截图脚本用）
         if std::env::var_os("LC_OPEN_SETTINGS").is_some() {
@@ -487,8 +516,49 @@ impl CaptionApp {
         restart
     }
 
-    /// 重启：起一个延迟 2 秒的启动器再退出自己（等本进程释放热键与托盘）
+    /// 执行一条命令。托盘菜单与父进程下发的命令都走这里，
+    /// 保证「托盘点暂停」与「简译菜单点暂停」是同一种行为。
+    /// 返回 (要开设置窗, 要开记录页)——这两件事得等到本帧后面才能做。
+    fn apply_command(&mut self, ctx: &egui::Context, cmd: crate::control::Command) -> (bool, bool) {
+        use crate::control::Command;
+        match cmd {
+            Command::Clickable => {
+                self.passthrough = false;
+                ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+            }
+            Command::TogglePassthrough => {
+                self.passthrough = !self.passthrough;
+                ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(self.passthrough));
+            }
+            Command::TogglePause => {
+                let now = self.paused.load(Ordering::Relaxed);
+                self.paused.store(!now, Ordering::Relaxed);
+            }
+            Command::ToggleMini => {
+                let now = self.mini;
+                self.set_mini(!now);
+            }
+            Command::OpenSettings => return (true, false),
+            Command::OpenTranscript => return (false, true),
+            Command::Quit => {
+                crate::managed::set_exit_code(crate::managed::exit_code::NORMAL);
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
+        (false, false)
+    }
+
+    /// 重启。托管时交给父进程：直接用约定的退出码退出，父进程看到就重新拉起。
+    ///
+    /// 独立运行时才走老路——起一个延迟 2 秒的启动器再退出自己（等本进程释放热键与托盘）。
+    /// 托管下这个 hack 可以整个省掉：热键和托盘本来就不在自己手上。
     fn restart_app(&self, ctx: &egui::Context) {
+        if self.link.is_managed() {
+            tracing::info!("托管模式：以退出码 {} 请求父进程重启本进程", crate::managed::exit_code::RESTART);
+            crate::managed::set_exit_code(crate::managed::exit_code::RESTART);
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            return;
+        }
         if let Ok(exe) = std::env::current_exe() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let cmd = format!("ping -n 3 127.0.0.1 >nul & start \"\" /D \"{}\" \"{}\"", cwd.display(), exe.display());
@@ -1038,6 +1108,21 @@ const MENU_TRANSCRIPT: u32 = 5;
 const MENU_MINI: u32 = 6;
 const MENU_QUIT: u32 = 9;
 
+/// 托盘菜单项 → 命令。托盘与父进程两条入口收敛到同一套语义。
+fn menu_to_command(id: u32) -> Option<crate::control::Command> {
+    use crate::control::Command;
+    Some(match id {
+        MENU_CLICKABLE => Command::Clickable,
+        MENU_PASSTHROUGH => Command::TogglePassthrough,
+        MENU_PAUSE => Command::TogglePause,
+        MENU_MINI => Command::ToggleMini,
+        MENU_SETTINGS => Command::OpenSettings,
+        MENU_TRANSCRIPT => Command::OpenTranscript,
+        MENU_QUIT => Command::Quit,
+        _ => return None,
+    })
+}
+
 /// 自己弹 Windows 原生托盘菜单：`TPM_RETURNCMD` 让 TrackPopupMenu 同步返回所选项，
 /// 不经过 muda 那条 "WM_COMMAND → 窗口子类 → 全局通道" 的转发（实测在 winit 消息循环里时有时无）。
 /// 必须在 UI 线程调用；调用期间会阻塞到菜单关闭。
@@ -1276,6 +1361,42 @@ impl eframe::App for CaptionApp {
         // 托盘：任意键松开 = 弹原生菜单（同步拿回所选项）
         let mut want_settings = false;
         let mut want_records = false;
+
+        // 托管：把父进程下来的命令执行掉。和托盘菜单走同一条 apply_command，
+        // 两条入口语义必须一致——否则「托盘点暂停」和「简译菜单点暂停」会是两种行为。
+        if let Some(rx) = self.rx_cmd.clone() {
+            while let Ok(c) = rx.try_recv() {
+                tracing::info!("父进程命令：{}", c.as_str());
+                let (s, r) = self.apply_command(&ctx, c);
+                want_settings |= s;
+                want_records |= r;
+            }
+        }
+        // 托管：失联自救。穿透开着时窗口对鼠标完全无感，热键又在父进程手上，
+        // 不自救的话用户只剩任务管理器一条路。
+        if self.link.is_lost() && !self.rescued {
+            self.rescued = true;
+            self.passthrough = false;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
+            if self.tray.is_none() {
+                match build_tray() {
+                    Ok(t) => {
+                        self.tray = Some(t);
+                        tracing::warn!("已恢复字幕自己的托盘图标");
+                    }
+                    Err(e) => tracing::error!("失联后补建托盘失败：{e}（穿透已关，窗口仍可点）"),
+                }
+            }
+        }
+        // 托管：把勾选态发布给父进程，它弹托盘菜单时要显示暂停/穿透/迷你的勾
+        if let Some(b) = &self.bridge {
+            b.publish(crate::control::State {
+                paused: self.paused.load(Ordering::Relaxed),
+                passthrough: self.passthrough,
+                mini: self.mini,
+            });
+        }
+
         if self.tray.is_some() {
             let mut click: Option<(i32, i32)> = None;
             while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
@@ -1290,23 +1411,10 @@ impl eframe::App for CaptionApp {
                 let chosen = main_hwnd(frame).and_then(|h| show_native_tray_menu(h, x, y, paused_now, self.passthrough, mini_now));
                 if let Some(cmd) = chosen {
                     tracing::info!("tray menu: {cmd}");
-                    match cmd {
-                        MENU_CLICKABLE => {
-                            self.passthrough = false;
-                            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
-                        }
-                        MENU_PASSTHROUGH => {
-                            self.passthrough = true;
-                            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
-                        }
-                        MENU_PAUSE => self.paused.store(!paused_now, Ordering::Relaxed),
-                        MENU_SETTINGS => want_settings = true,
-                        MENU_TRANSCRIPT => {
-                            want_records = true;
-                        }
-                        MENU_MINI => self.set_mini(!mini_now),
-                        MENU_QUIT => ctx.send_viewport_cmd(ViewportCommand::Close),
-                        _ => {}
+                    if let Some(c) = menu_to_command(cmd) {
+                        let (s, r) = self.apply_command(&ctx, c);
+                        want_settings |= s;
+                        want_records |= r;
                     }
                 }
             }

@@ -1,7 +1,7 @@
 [package]
 name = "live-caption"
-version = "1.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 name = "live_caption"
@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 # 翻译核心（三后端封装）已外置到 translate-tool 仓库的共享 crate；改翻译逻辑去那里改
-ai-translate = { path = "../translate-tool/crates/ai-translate" }
+ai-translate = { path = "../../crates/ai-translate" }
+desktop-shell = { path = "../../crates/desktop-shell" }
 # glow（OpenGL）渲染器：wgpu 在本机 Arc 上不给带 alpha 的合成模式，透明窗会变成不透明黑底
 eframe = { version = "0.36", features = ["glow"] }
 egui = "0.36"
@@ -33,9 +34,8 @@ tray-icon = "0.24"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Registry"] }
 raw-window-handle = "0.6"
 chrono = "0.4"
+# managed 模式下的控制端点（父进程调它查状态、下命令）；只绑 127.0.0.1
+tiny_http = "0.12"
 hound = "3.5"
 # OpenAI 兼容后端（DeepSeek / 通义千问 / 自建网关 / Ollama），rustls 避开本机 schannel 的 TLS 问题
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-
-[profile.release]
-opt-level = 3

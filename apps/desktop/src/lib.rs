@@ -1,6 +1,7 @@
 //! translate-tool 桌面端
 pub use desktop_shell::{dpi, hotkey};
 
+pub mod caption;
 pub mod config;
 pub mod dict;
 pub mod engine;

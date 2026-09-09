@@ -7,31 +7,29 @@ use live_caption::config::Config;
 use live_caption::messages::SegId;
 use live_caption::segmenter::{spawn_segmenter, SegMsg, SegmenterConfig};
 use live_caption::translate::{new_context, spawn_partial_translator, spawn_translator, TranslatorConfig};
+use live_caption::control::{spawn_control, spawn_heartbeat, Bridge};
+use live_caption::managed::{exit_code_now, Args, Link};
 use live_caption::ui::CaptionApp;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-fn init_logging(dir: &str) -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
-    std::fs::create_dir_all(dir)?;
-    let appender = tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .max_log_files(7)
-        .filename_prefix("live-caption")
-        .filename_suffix("log")
-        .build(dir)?;
-    let (nb, guard) = tracing_appender::non_blocking(appender);
-    tracing_subscriber::fmt()
-        .with_writer(nb)
-        .with_ansi(false)
-        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-        .init();
-    Ok(guard)
-}
-
 fn main() -> anyhow::Result<()> {
+    let args = Args::parse(std::env::args());
+    // 日志前缀按托管与否分开：被简译拉起时若和独立实例同名，两个进程同一天会
+    // 打开同一个文件、各持一个句柄交错写，滚动时还互抢，日志基本没法看。
+    let prefix = if args.managed { "live-caption-managed" } else { "live-caption" };
     let mut cfg = Config::load()?;
-    let _guard = init_logging(&Config::resolve(&cfg.paths.logs_dir).to_string_lossy())?;
-    tracing::info!("启动，配置文件 {}", Config::path().display());
+    let logs = Config::resolve(&cfg.paths.logs_dir);
+    desktop_shell::logging::init(logs.parent().unwrap_or(&logs), prefix, "LIVE_CAPTION_LOG", 7);
+    tracing::info!("启动，配置文件 {}，托管={}", Config::path().display(), args.managed);
+
+    // 单实例闸。托管实例与独立实例各用各的名字：用户手动开着一个、简译又拉起一个时，
+    // 两个进程会同时每秒写同一份 config.toml 和同一批日志。
+    let lock_name = if args.managed { "live-caption-managed-single" } else { "live-caption-single" };
+    if !desktop_shell::single_instance::claim(lock_name) {
+        tracing::warn!("已有一个字幕实例在运行（{lock_name}），本次启动退出");
+        return Ok(());
+    }
     // 重装到别的目录（"仅我用"↔"所有用户"、换盘）后，配置里写死的模型路径会失效，这里自动改指到 exe 旁的 models 目录
     match cfg.heal_model_paths() {
         Ok(fixes) => {
@@ -86,6 +84,18 @@ fn main() -> anyhow::Result<()> {
     spawn_translator(TranslatorConfig::from(&cfg.translate), rx_cfg, rx_tr, tx_ui.clone(), context.clone());
     spawn_partial_translator(TranslatorConfig::from(&cfg.translate), rx_cfg2, rx_partial, tx_ui.clone(), context);
 
+    // 托管链路：控制端点（父 → 子）与心跳（子 → 父）方向相反，都只走 127.0.0.1
+    let link = Link::new(args.clone());
+    let (bridge, rx_cmd) = if args.managed {
+        let (tx, rx) = bounded(16);
+        let b = Bridge::new(tx);
+        spawn_control(b.clone(), args.control_port);
+        spawn_heartbeat(link.clone());
+        (Some(b), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("live-caption")
         .with_decorations(false)
@@ -101,8 +111,15 @@ fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "live-caption",
         options,
-        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui, vec![tx_cfg, tx_cfg2])))),
+        Box::new(move |cc| Ok(Box::new(CaptionApp::new(cc, rx_ui, cfg, paused_ui, vec![tx_cfg, tx_cfg2], link, rx_cmd, bridge)))),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // 退出码告诉父进程这次是「用户退出」还是「请求重启」，不区分的话
+    // 改完识别参数的主动重启会被当成崩溃，父进程进重试风暴。
+    let code = exit_code_now();
+    if code != 0 {
+        tracing::info!("以退出码 {code} 退出（请求父进程重启）");
+        std::process::exit(code);
+    }
     Ok(())
 }

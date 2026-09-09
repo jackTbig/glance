@@ -8,6 +8,12 @@ pub use desktop_shell::tray::show_menu;
 pub const MENU_SETTINGS: u32 = 1;
 pub const MENU_PAUSE: u32 = 2;
 pub const MENU_QUIT: u32 = 3;
+// 实时字幕那一块。字幕是子进程，这些项转成控制命令发过去（见 `crate::caption`）。
+pub const MENU_CAPTION_TOGGLE: u32 = 10;
+pub const MENU_CAPTION_PAUSE: u32 = 11;
+pub const MENU_CAPTION_MINI: u32 = 12;
+pub const MENU_CAPTION_CLICKABLE: u32 = 13;
+pub const MENU_CAPTION_SETTINGS: u32 = 14;
 
 /// 图标：编译期嵌进来的 PNG（见 `assets/gen_icon.ps1`）。
 /// 32 px 是托盘的常用尺寸；系统需要别的尺寸会自己缩。
@@ -33,7 +39,16 @@ mod tests {
 
     #[test]
     fn menu_ids_are_distinct() {
-        let ids = [MENU_SETTINGS, MENU_PAUSE, MENU_QUIT];
+        let ids = [
+            MENU_SETTINGS,
+            MENU_PAUSE,
+            MENU_QUIT,
+            MENU_CAPTION_TOGGLE,
+            MENU_CAPTION_PAUSE,
+            MENU_CAPTION_MINI,
+            MENU_CAPTION_CLICKABLE,
+            MENU_CAPTION_SETTINGS,
+        ];
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
         sorted.dedup();

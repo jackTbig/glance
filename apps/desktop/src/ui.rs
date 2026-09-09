@@ -114,6 +114,8 @@ pub struct App {
     status: String,
     /// 服务句柄，重启服务时替换
     server: Option<crate::server::ServerHandle>,
+    /// 实时字幕子进程。装了才可用；简译退出时它会被优雅关掉（见 caption.rs 的 Drop）
+    caption: crate::caption::CaptionHost,
     /// 持有着就在，丢掉图标就没了
     _tray: Option<tray_icon::TrayIcon>,
     paused: bool,
@@ -130,6 +132,10 @@ enum HotkeyAction {
     /// 开着的时候用单键/双键 + 鼠标动作调用（悬停按 Ctrl、划词直接选中）。
     ToggleHover,
     ToggleSelection,
+    /// 字幕：无条件切回可点击。**父进程只转发一个字幕热键的话，必须是这个**——
+    /// 「切换穿透」在状态不同步时可能反而把穿透打开，而这一条永远往安全方向走。
+    CaptionClickable,
+    CaptionPassthrough,
 }
 
 impl App {
@@ -150,6 +156,10 @@ impl App {
             (&cfg.hotkeys.toggle_hover, HotkeyAction::ToggleHover, "悬停开关"),
             (&cfg.hotkeys.toggle_selection, HotkeyAction::ToggleSelection, "划词开关"),
             (&cfg.hotkeys.toggle_panel, HotkeyAction::TogglePanel, "面板"),
+            // 字幕的两个热键由简译统一注册再转发：托管模式下字幕自己不注册，
+            // 两个进程各注册一遍的话后者必然失败（组合已被占）。
+            (&cfg.hotkeys.caption_clickable, HotkeyAction::CaptionClickable, "字幕切回可点击"),
+            (&cfg.hotkeys.caption_passthrough, HotkeyAction::CaptionPassthrough, "字幕穿透"),
         ] {
             match register_with_fallback(&hk, want, &taken) {
                 Some((id, used)) => {
@@ -238,6 +248,7 @@ impl App {
             settings_sized: false,
             settings_msg: String::new(),
             status,
+            caption: crate::caption::CaptionHost::new(server.as_ref().map(|s| s.port).unwrap_or(0)),
             server,
             _tray: match crate::tray::build_app_tray(&format!("{APP_NAME_ZH} · 划词悬停截屏翻译")) {
                 Ok(t) => Some(t),
@@ -349,6 +360,20 @@ impl App {
                     );
                     let _ = self.cfg.save();
                 }
+                HotkeyAction::CaptionClickable | HotkeyAction::CaptionPassthrough => {
+                    let cmd = if action == HotkeyAction::CaptionClickable {
+                        desktop_shell::caption_ipc::Command::Clickable
+                    } else {
+                        desktop_shell::caption_ipc::Command::TogglePassthrough
+                    };
+                    // 字幕没跑就静默忽略：这两个键对没开字幕的用户没有意义，
+                    // 每次按都弹一张卡片反而烦人
+                    if self.caption.running() {
+                        if let Err(e) = self.caption.send(cmd) {
+                            tracing::warn!("字幕热键命令没送到：{e}");
+                        }
+                    }
+                }
                 HotkeyAction::ToggleSelection => {
                     self.cfg.ui.selection_icon = !self.cfg.ui.selection_icon;
                     self.draft.ui.selection_icon = self.cfg.ui.selection_icon;
@@ -412,7 +437,11 @@ impl App {
 
     /// 托盘点击 → 自己弹原生菜单（不挂 muda，见 tray.rs 顶部说明）
     fn drain_tray(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
-        use crate::tray::{MENU_PAUSE, MENU_QUIT, MENU_SETTINGS};
+        use crate::tray::{
+            MENU_CAPTION_CLICKABLE, MENU_CAPTION_MINI, MENU_CAPTION_PAUSE, MENU_CAPTION_SETTINGS, MENU_CAPTION_TOGGLE,
+            MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
+        };
+        use desktop_shell::caption_ipc::Command;
         let mut clicked_at = None;
         while let Ok(ev) = tray_icon::TrayIconEvent::receiver().try_recv() {
             if let tray_icon::TrayIconEvent::Click { position, button, button_state, .. } = ev {
@@ -424,18 +453,52 @@ impl App {
         }
         let Some((x, y)) = clicked_at else { return };
         let hwnd = window_handle_of(frame);
-        let items = vec![
+        let mut items = vec![
             (MENU_SETTINGS, "设置…".to_string(), false),
             (MENU_PAUSE, "暂停取词".to_string(), self.paused),
-            (0, String::new(), false),
-            (MENU_QUIT, "退出".to_string(), false),
         ];
+        // 实时字幕那一块。装了才显示——没装时列一堆点不动的项只会让人以为坏了。
+        // 弹菜单前要**同步**读一次子进程的勾选态：暂停/迷你/穿透三个勾是它的状态，
+        // 父进程自己猜不出来（所以控制端点必须双向，不能只做单向命令）。
+        let caption_running = self.caption.running();
+        let caption_state = if caption_running { self.caption.state() } else { None };
+        if self.caption.installed() {
+            items.push((0, String::new(), false));
+            items.push((MENU_CAPTION_TOGGLE, (if caption_running { "关闭实时字幕" } else { "开启实时字幕" }).to_string(), caption_running));
+            if let Some(st) = caption_state {
+                items.push((MENU_CAPTION_PAUSE, (if st.paused { "字幕：继续识别" } else { "字幕：暂停识别" }).to_string(), st.paused));
+                items.push((MENU_CAPTION_MINI, (if st.mini { "字幕：展开字幕条" } else { "字幕：收起为迷你条" }).to_string(), st.mini));
+                items.push((MENU_CAPTION_CLICKABLE, "字幕：切回可点击".to_string(), !st.passthrough));
+                items.push((MENU_CAPTION_SETTINGS, "字幕设置…".to_string(), false));
+            }
+        }
+        items.push((0, String::new(), false));
+        items.push((MENU_QUIT, "退出".to_string(), false));
         match crate::tray::show_menu(hwnd, x, y, &items) {
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_PAUSE) => {
                 self.paused = !self.paused;
                 self.watcher.set_paused(self.paused);
                 tracing::info!("取词已{}", if self.paused { "暂停" } else { "恢复" });
+            }
+            Some(MENU_CAPTION_TOGGLE) => {
+                if caption_running {
+                    self.caption.stop();
+                } else if let Err(e) = self.caption.start() {
+                    tracing::error!("{e}");
+                    self.notice("实时字幕", format!("{e}"), (x, y));
+                }
+            }
+            Some(id @ (MENU_CAPTION_PAUSE | MENU_CAPTION_MINI | MENU_CAPTION_CLICKABLE | MENU_CAPTION_SETTINGS)) => {
+                let cmd = match id {
+                    MENU_CAPTION_PAUSE => Command::TogglePause,
+                    MENU_CAPTION_MINI => Command::ToggleMini,
+                    MENU_CAPTION_CLICKABLE => Command::Clickable,
+                    _ => Command::OpenSettings,
+                };
+                if let Err(e) = self.caption.send(cmd) {
+                    tracing::warn!("字幕命令 {} 没送到：{e}", cmd.as_str());
+                }
             }
             Some(MENU_QUIT) => self.request_quit(),
             _ => {}
@@ -519,6 +582,9 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events();
         self.drain_tray(&ctx, _frame);
+        // 回收退出的字幕子进程，并按退出码决定要不要重新拉起（改识别参数会请求重启）。
+        // 用 try_wait 不用 wait：后者会把 UI 线程堵死。
+        self.caption.reap();
 
         // 框选完等遮罩真的从屏幕上撤走再抓图（见 draw_region_selector 末尾）
         if let Some((rect, at)) = self.pending_region {
@@ -1239,6 +1305,9 @@ impl App {
     }
 
     pub fn request_quit(&mut self) {
+        // 先收字幕：它没有自己的托盘和热键，留成孤儿进程的话用户只能去任务管理器杀。
+        // 走优雅退出而不是 kill——字幕的 claude 后端有常驻子进程，强杀不回收。
+        self.caption.stop();
         if let Some(s) = &self.server {
             s.stop();
         }
