@@ -15,6 +15,43 @@ use text_capture::{Capturer, Source};
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// 设置窗左侧的分类。分成四类而不是一长串折叠项：
+/// 折叠项要点开才知道里面有什么，且展开后内容全挤在左半边、右边一片空白。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Service,
+    Trigger,
+    Glossary,
+    Server,
+}
+
+impl SettingsTab {
+    pub const ALL: [SettingsTab; 4] = [SettingsTab::Service, SettingsTab::Trigger, SettingsTab::Glossary, SettingsTab::Server];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Service => "翻译服务",
+            SettingsTab::Trigger => "触发方式",
+            SettingsTab::Glossary => "术语表",
+            SettingsTab::Server => "浏览器插件",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            SettingsTab::Service => "接口地址、API Key、各场景用哪个后端",
+            SettingsTab::Trigger => "快捷键、悬停、划词图标，以及不想被打扰的程序",
+            SettingsTab::Glossary => "让专有名词按你定的译法翻",
+            SettingsTab::Server => "插件靠本地服务工作，这里配端口",
+        }
+    }
+}
+
+/// 设置项左侧标签的固定宽度，让每行的控件左边缘对齐
+const LABEL_W: f32 = 108.0;
+/// 长输入框的宽度
+const FIELD_W: f32 = 380.0;
+
 /// 用户配的热键被别的程序占了就往下试这些。
 /// 常见组合（Ctrl+Alt+T/S/X/D/W、Ctrl+Shift+D）在实测机器上都已被占用，别放进来。
 const FALLBACK_HOTKEYS: &[&str] = &[
@@ -63,6 +100,7 @@ pub struct App {
     cur_seq: u64,
     mouse_left_panel_at: Option<Instant>,
     settings_open: bool,
+    settings_tab: SettingsTab,
     draft: Config,
     settings_msg: String,
     status: String,
@@ -173,7 +211,14 @@ impl App {
             logged_icon_at: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
-            settings_open: false,
+            // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
+            settings_open: std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0"),
+            // TT_SETTINGS_TAB=0..3 指定启动时停在哪一页（截图与自测用）
+            settings_tab: std::env::var("TT_SETTINGS_TAB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .and_then(|i| SettingsTab::ALL.get(i).copied())
+                .unwrap_or(SettingsTab::Service),
             settings_msg: String::new(),
             status,
             server,
@@ -674,118 +719,25 @@ impl App {
     }
 
     fn draw_settings(&mut self, ctx: &egui::Context) {
-        let vb = ViewportBuilder::default().with_title("translate-tool 设置").with_inner_size([640.0, 560.0]);
+        // ViewportBuilder 的尺寸这里按物理像素落地（实测 200% 屏上给 780 得到的窗口就是 780 物理宽，
+        // 只有想要的一半），所以要自己乘缩放比，否则高分屏上内容会被切掉。
+        let k = crate::dpi::Dpi::from_ctx(ctx).ppp();
+        let vb = ViewportBuilder::default()
+            .with_title("translate-tool 设置")
+            .with_inner_size([780.0 * k, 560.0 * k])
+            .with_min_inner_size([700.0 * k, 460.0 * k]);
         let mut close = false;
         ctx.show_viewport_immediate(ViewportId::from_hash_of("settings"), vb, |vp_ui, _class| {
             let vp_ctx = vp_ui.ctx().clone();
-            egui::CentralPanel::default().show(vp_ui, |ui| {
-                ui.heading("设置");
-                ui.label(RichText::new(&self.status).size(12.0).color(Color32::GRAY));
-                ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.collapsing("AI 后端", |ui| {
-                        egui::Grid::new("backend").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                            ui.label("接口地址");
-                            ui.text_edit_singleline(&mut self.draft.backend.openai_base_url);
-                            ui.end_row();
-                            ui.label("API Key");
-                            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_api_key).password(true));
-                            ui.end_row();
-                            ui.label("模型");
-                            ui.text_edit_singleline(&mut self.draft.backend.openai_model);
-                            ui.end_row();
-                            ui.label("并发上限");
-                            ui.add(egui::DragValue::new(&mut self.draft.backend.concurrency).range(1..=64));
-                            ui.end_row();
-                            ui.label("每请求段数");
-                            ui.add(egui::DragValue::new(&mut self.draft.backend.batch_size).range(1..=50));
-                            ui.end_row();
-                            ui.label("超时（秒）");
-                            ui.add(egui::DragValue::new(&mut self.draft.backend.timeout_secs).range(5..=300));
-                            ui.end_row();
-                        });
-                    });
-                    ui.collapsing("场景与后端", |ui| {
-                        ui.label(RichText::new("整页翻译固定走 OpenAI 兼容接口：claude 与 codex 是常驻子进程，撑不住几十并发。").size(12.0).color(Color32::GRAY));
-                        egui::Grid::new("scenes").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                            for (label, field) in [
-                                ("整页翻译", &mut self.draft.scenes.full_page),
-                                ("划词翻译", &mut self.draft.scenes.selection),
-                                ("悬停翻译", &mut self.draft.scenes.hover),
-                                ("截屏翻译", &mut self.draft.scenes.screenshot),
-                            ] {
-                                ui.label(label);
-                                egui::ComboBox::from_id_salt(label).selected_text(field.clone()).show_ui(ui, |ui| {
-                                    for b in ["openai", "claude", "codex"] {
-                                        ui.selectable_value(field, b.to_string(), b);
-                                    }
-                                });
-                                ui.end_row();
-                            }
-                        });
-                    });
-                    ui.collapsing("触发方式", |ui| {
-                        egui::Grid::new("hotkeys").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                            ui.label("划词快捷键");
-                            ui.text_edit_singleline(&mut self.draft.hotkeys.selection);
-                            ui.end_row();
-                            ui.label("截屏快捷键");
-                            ui.text_edit_singleline(&mut self.draft.hotkeys.screenshot);
-                            ui.end_row();
-                            ui.label("面板开关");
-                            ui.text_edit_singleline(&mut self.draft.hotkeys.toggle_panel);
-                            ui.end_row();
-                            ui.label("悬停修饰键");
-                            egui::ComboBox::from_id_salt("hovermod")
-                                .selected_text(self.draft.hotkeys.hover_modifier.clone())
-                                .show_ui(ui, |ui| {
-                                    for m in ["alt", "ctrl", "shift", "win", "none"] {
-                                        ui.selectable_value(&mut self.draft.hotkeys.hover_modifier, m.to_string(), m);
-                                    }
-                                });
-                            ui.end_row();
-                            ui.label("悬停延时（毫秒）");
-                            ui.add(egui::DragValue::new(&mut self.draft.hotkeys.hover_delay_ms).range(80..=3000));
-                            ui.end_row();
-                            ui.label("选中后弹小图标");
-                            ui.checkbox(&mut self.draft.ui.selection_icon, "");
-                            ui.end_row();
-                        });
-                    });
-                    ui.collapsing("术语表", |ui| {
-                        let mut remove = None;
-                        for (i, g) in self.draft.glossary.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(180.0).hint_text("原文"));
-                                ui.label("→");
-                                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(180.0).hint_text("固定译法"));
-                                if ui.small_button("删").clicked() {
-                                    remove = Some(i);
-                                }
-                            });
-                        }
-                        if let Some(i) = remove {
-                            self.draft.glossary.remove(i);
-                        }
-                        if ui.button("添加一条").clicked() {
-                            self.draft.glossary.push(Default::default());
-                        }
-                    });
-                    ui.collapsing("本地服务（供 Chrome 插件调用）", |ui| {
-                        ui.checkbox(&mut self.draft.server.enabled, "启用");
-                        ui.horizontal(|ui| {
-                            ui.label("端口");
-                            ui.add(egui::DragValue::new(&mut self.draft.server.port).range(1024..=65535));
-                        });
-                        ui.label(RichText::new("只监听 127.0.0.1，且只接受浏览器扩展的请求。").size(12.0).color(Color32::GRAY));
-                    });
-                });
-                ui.separator();
+
+            // 按钮栏固定在底部，不跟着内容滚
+            egui::Panel::bottom("settings-actions").show(vp_ui, |ui| {
+                ui.add_space(7.0);
                 ui.horizontal(|ui| {
-                    if ui.button("保存并应用").clicked() {
+                    if ui.add(egui::Button::new("保存并应用").min_size(egui::vec2(98.0, 27.0))).clicked() {
                         self.apply_settings();
                     }
-                    if ui.button("测试翻译").clicked() {
+                    if ui.add(egui::Button::new("测试翻译").min_size(egui::vec2(82.0, 27.0))).clicked() {
                         let cfg = self.draft.translator_config();
                         self.settings_msg = match ai_translate::Translator::new(cfg) {
                             Ok(t) => match t.translate(Scene::Selection, "Hello, this is a test.", None, &mut |_| {}) {
@@ -795,18 +747,263 @@ impl App {
                             Err(e) => format!("配置有误：{e}"),
                         };
                     }
-                    if ui.button("关闭").clicked() {
-                        close = true;
+                    if !self.settings_msg.is_empty() {
+                        let bad = self.settings_msg.contains("失败") || self.settings_msg.contains("有误");
+                        let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(&self.settings_msg).size(12.0).color(color));
                     }
-                    ui.label(RichText::new(&self.settings_msg).size(12.0).color(Color32::from_rgb(150, 200, 150)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new("关闭").min_size(egui::vec2(66.0, 27.0))).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(7.0);
+            });
+
+            // 左侧分类导航；运行状态挂在导航下方，不占正文
+            egui::Panel::left("settings-nav").exact_size(152.0).show(vp_ui, |ui| {
+                ui.add_space(12.0);
+                for tab in SettingsTab::ALL {
+                    let selected = self.settings_tab == tab;
+                    if ui
+                        .add_sized([136.0, 31.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(14.0)))
+                        .clicked()
+                    {
+                        self.settings_tab = tab;
+                    }
+                    ui.add_space(3.0);
+                }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(RichText::new("运行状态").size(11.0).color(Color32::from_gray(110)));
+                ui.add_space(3.0);
+                for line in self.status.split(" · ") {
+                    ui.label(RichText::new(line).size(11.0).color(Color32::from_gray(140)));
+                }
+            });
+
+            egui::CentralPanel::default().show(vp_ui, |ui| {
+                ui.add_space(10.0);
+                ui.heading(self.settings_tab.label());
+                ui.label(RichText::new(self.settings_tab.hint()).size(12.0).color(Color32::from_gray(140)));
+                ui.add_space(12.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.settings_tab {
+                    SettingsTab::Service => self.settings_service(ui),
+                    SettingsTab::Trigger => self.settings_trigger(ui),
+                    SettingsTab::Glossary => self.settings_glossary(ui),
+                    SettingsTab::Server => self.settings_server(ui),
                 });
             });
+
             if vp_ctx.input(|i| i.viewport().close_requested()) {
                 close = true;
             }
         });
         if close {
             self.settings_open = false;
+        }
+    }
+
+    /// 一行设置：左标签、右控件，下面跟一行灰色说明。说明为空就不占位。
+    fn row(ui: &mut egui::Ui, label: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_W, 22.0], egui::Label::new(RichText::new(label).size(13.0)));
+            add(ui);
+        });
+        if !hint.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(LABEL_W + 8.0);
+                ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(135)));
+            });
+        }
+        ui.add_space(9.0);
+    }
+
+    fn section(ui: &mut egui::Ui, title: &str, hint: &str) {
+        ui.add_space(2.0);
+        ui.separator();
+        ui.add_space(9.0);
+        ui.label(RichText::new(title).size(13.0).strong());
+        if !hint.is_empty() {
+            ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(135)));
+        }
+        ui.add_space(9.0);
+    }
+
+    fn settings_service(&mut self, ui: &mut egui::Ui) {
+        Self::row(ui, "接口地址", "DeepSeek 填 https://api.deepseek.com；通义千问填 dashscope 的兼容地址", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_base_url).desired_width(FIELD_W));
+        });
+        Self::row(ui, "API Key", "只存在本机配置文件里，不进浏览器插件", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_api_key).password(true).desired_width(FIELD_W));
+        });
+        Self::row(ui, "模型", "", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_model).desired_width(FIELD_W));
+        });
+
+        Self::section(
+            ui,
+            "每个场景用哪个后端",
+            "整页翻译固定走 OpenAI 兼容接口：claude 与 codex 是常驻子进程，每路约 300 MB，撑不住几十并发。",
+        );
+        for (label, fixed) in [("整页翻译", true), ("划词翻译", false), ("悬停翻译", false), ("截屏翻译", false)] {
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_W, 22.0], egui::Label::new(RichText::new(label).size(13.0)));
+                let field = match label {
+                    "整页翻译" => &mut self.draft.scenes.full_page,
+                    "划词翻译" => &mut self.draft.scenes.selection,
+                    "悬停翻译" => &mut self.draft.scenes.hover,
+                    _ => &mut self.draft.scenes.screenshot,
+                };
+                ui.add_enabled_ui(!fixed, |ui| {
+                    egui::ComboBox::from_id_salt(label).width(150.0).selected_text(field.clone()).show_ui(ui, |ui| {
+                        for b in ["openai", "claude", "codex"] {
+                            ui.selectable_value(field, b.to_string(), b);
+                        }
+                    });
+                });
+                if fixed {
+                    ui.label(RichText::new("固定，不可改").size(11.0).color(Color32::from_gray(135)));
+                }
+            });
+            ui.add_space(7.0);
+        }
+
+        Self::section(ui, "性能", "");
+        Self::row(ui, "并发上限", "同时向模型发几个请求。插件整页翻译是一段一个请求，这个值决定同时翻几段", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.backend.concurrency).range(1..=64));
+        });
+        Self::row(ui, "每请求段数", "打包翻译时一次发几段，只影响桌面端的批量场景", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.backend.batch_size).range(1..=50));
+        });
+        Self::row(ui, "超时", "单个请求等多久算超时", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.backend.timeout_secs).range(5..=300).suffix(" 秒"));
+        });
+    }
+
+    fn settings_trigger(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("全局快捷键").size(13.0).strong());
+        ui.label(
+            RichText::new("在任何窗口里都生效。组合被别的程序占用时会自动改用备选，实际用的是哪个看左下角运行状态。")
+                .size(11.0)
+                .color(Color32::from_gray(135)),
+        );
+        ui.add_space(9.0);
+        Self::row(ui, "划词翻译", "选中文字后按它，立刻翻译选中的内容", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.selection).desired_width(170.0));
+        });
+        Self::row(ui, "截屏翻译", "按它进入框选，拖出一块区域后识别并翻译", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.screenshot).desired_width(170.0));
+        });
+        Self::row(ui, "面板开关", "显示或收起最近一次的译文面板", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(170.0));
+        });
+
+        Self::section(
+            ui,
+            "悬停翻译",
+            "按住修饰键、把鼠标停在文字上，自动翻译鼠标压着的那一行。浏览器里请用 Chrome 插件，效果更好。",
+        );
+        Self::row(ui, "修饰键", "选「关闭」就完全不做悬停翻译", |ui| {
+            let cur = match self.draft.hotkeys.hover_modifier.as_str() {
+                "ctrl" => "Ctrl",
+                "shift" => "Shift",
+                "win" => "Win",
+                "none" => "关闭",
+                _ => "Alt",
+            };
+            egui::ComboBox::from_id_salt("hovermod").width(150.0).selected_text(cur).show_ui(ui, |ui| {
+                for (v, label) in [("alt", "Alt"), ("ctrl", "Ctrl"), ("shift", "Shift"), ("win", "Win"), ("none", "关闭")] {
+                    ui.selectable_value(&mut self.draft.hotkeys.hover_modifier, v.to_string(), label);
+                }
+            });
+        });
+        Self::row(ui, "停留多久触发", "鼠标停住这么久才翻译；太短会一划过去就触发", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.hotkeys.hover_delay_ms).range(80..=3000).suffix(" ms"));
+        });
+
+        Self::section(ui, "划词小图标", "");
+        Self::row(ui, "选中后弹图标", "关掉后选中文字不再自动冒出「译」按钮，只能用上面的划词快捷键", |ui| {
+            ui.checkbox(&mut self.draft.ui.selection_icon, "");
+        });
+        Self::row(ui, "图标停留", "多久不点就自动消失", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.ui.icon_timeout_ms).range(500..=10000).suffix(" ms"));
+        });
+
+        Self::section(
+            ui,
+            "例外程序",
+            "在这些程序里不弹小图标、不响应悬停，快捷键仍然有效。每行一个可执行文件名。留空表示不排除任何程序。",
+        );
+        let mut text = self.draft.ui.excluded_processes.join("\n");
+        let r = ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .desired_width(FIELD_W)
+                .desired_rows(3)
+                .hint_text("code.exe\ndevenv.exe"),
+        );
+        if r.changed() {
+            self.draft.ui.excluded_processes =
+                text.lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
+        }
+    }
+
+    fn settings_glossary(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("命中的词会把「原文 → 固定译法」一起发给模型，让专有名词不乱翻。不做硬替换，模型仍按语境调整。")
+                .size(11.0)
+                .color(Color32::from_gray(135)),
+        );
+        ui.add_space(12.0);
+        let mut remove = None;
+        for (i, g) in self.draft.glossary.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut g.src).desired_width(210.0).hint_text("原文，如 pod"));
+                ui.label(RichText::new("→").color(Color32::from_gray(140)));
+                ui.add(egui::TextEdit::singleline(&mut g.dst).desired_width(210.0).hint_text("固定译法，如 容器组"));
+                if ui.button("删除").clicked() {
+                    remove = Some(i);
+                }
+            });
+            ui.add_space(7.0);
+        }
+        if let Some(i) = remove {
+            self.draft.glossary.remove(i);
+        }
+        if self.draft.glossary.is_empty() {
+            ui.label(RichText::new("还没有术语。遇到总被翻错的专有名词时加进来。").size(12.0).color(Color32::from_gray(135)));
+            ui.add_space(10.0);
+        }
+        if ui.add(egui::Button::new("＋ 添加一条").min_size(egui::vec2(112.0, 27.0))).clicked() {
+            self.draft.glossary.push(Default::default());
+        }
+    }
+
+    fn settings_server(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Chrome 插件靠这个本地服务翻译。只监听 127.0.0.1，且只接受浏览器扩展的请求，网页直接调一律拒绝。")
+                .size(11.0)
+                .color(Color32::from_gray(135)),
+        );
+        ui.add_space(12.0);
+        Self::row(ui, "启用", "关掉后 Chrome 插件无法工作", |ui| {
+            ui.checkbox(&mut self.draft.server.enabled, "");
+        });
+        Self::row(ui, "端口", "改完要重启应用，插件那边的端口也要跟着改", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.server.port).range(1024..=65535));
+        });
+
+        Self::section(ui, "插件怎么装", "");
+        for line in [
+            "1. Chrome 地址栏打开 chrome://extensions",
+            "2. 打开右上角「开发者模式」",
+            "3. 点「加载已解压的扩展程序」，选安装目录下的 extension 文件夹",
+        ] {
+            ui.label(RichText::new(line).size(12.0).color(Color32::from_gray(150)));
+            ui.add_space(3.0);
         }
     }
 
