@@ -44,7 +44,7 @@ impl SettingsTab {
             SettingsTab::Service => "接口地址、API Key、各场景用哪个后端",
             SettingsTab::Trigger => "快捷键、悬停、划词图标，以及不想被打扰的程序",
             SettingsTab::Glossary => "让专有名词按你定的译法翻",
-            SettingsTab::Server => "插件靠本地服务工作，这里配端口",
+            SettingsTab::Server => "安装或更新 Chrome 插件，以及它依赖的本地服务",
         }
     }
 }
@@ -1094,28 +1094,87 @@ impl App {
     }
 
     fn settings_server(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            RichText::new("Chrome 插件靠这个本地服务翻译。只监听 127.0.0.1，且只接受浏览器扩展的请求，网页直接调一律拒绝。")
-                .size(11.0)
-                .color(Color32::from_gray(135)),
-        );
-        ui.add_space(12.0);
-        Self::row(ui, "启用", "关掉后 Chrome 插件无法工作", |ui| {
+        // 插件连没连上：服务端记了最近一次收到扩展请求的时刻
+        let seen = self.server.as_ref().map(|s| s.seen.lock().unwrap().clone());
+        let (dot, text) = match &seen {
+            Some(s) if s.at.is_some() => {
+                let secs = s.at.unwrap().elapsed().as_secs();
+                let when = if secs < 60 {
+                    "刚刚".to_string()
+                } else if secs < 3600 {
+                    format!("{} 分钟前", secs / 60)
+                } else {
+                    format!("{} 小时前", secs / 3600)
+                };
+                (Color32::from_rgb(80, 165, 95), format!("插件已连上（最近一次 {when}）"))
+            }
+            _ => (Color32::from_gray(150), "还没有插件连过来".to_string()),
+        };
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 4.0, dot);
+            ui.label(RichText::new(text).size(12.0));
+        });
+        ui.add_space(10.0);
+
+        // 三步走：Chrome 不让程序静默装未上架的扩展，只能把用户领到该点的地方
+        ui.label(RichText::new("装插件（第一次用）").size(13.0).strong());
+        ui.add_space(6.0);
+        let dir = crate::extension::dist_dir();
+        match &dir {
+            Some(d) => {
+                // 路径大概率比栏宽长，必须 wrap，不然只看得到开头一截
+                ui.add(
+                    egui::Label::new(RichText::new(format!("插件目录：{}", d.display())).size(10.0).color(Color32::from_gray(135)))
+                        .wrap(),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new("① 打开扩展页").min_size(egui::vec2(96.0, 25.0))).clicked() {
+                        self.settings_msg = match crate::extension::open_extensions_page() {
+                            Ok(()) => "已打开 Chrome 扩展页，记得开右上角「开发者模式」".into(),
+                            Err(e) => format!("失败：{e}"),
+                        };
+                    }
+                    if ui.add(egui::Button::new("② 打开插件目录").min_size(egui::vec2(96.0, 25.0))).clicked() {
+                        self.settings_msg = match crate::extension::reveal_dir(d) {
+                            Ok(()) => "已打开插件目录，把它拖到扩展页，或用「加载已解压的扩展程序」选它".into(),
+                            Err(e) => format!("失败：{e}"),
+                        };
+                    }
+                });
+                ui.add_space(4.0);
+                if ui.add(egui::Button::new("复制目录路径").min_size(egui::vec2(96.0, 24.0))).clicked() {
+                    self.settings_msg = match crate::extension::copy_path(d) {
+                        Ok(()) => "路径已复制，可直接粘进目录选择框".into(),
+                        Err(e) => format!("复制失败：{e}"),
+                    };
+                }
+            }
+            None => {
+                ui.label(
+                    RichText::new("没找到插件目录。安装版的插件在程序目录下的 extension 子目录；开发时先在 extension 目录里跑 npm run build。")
+                        .size(11.0)
+                        .color(Color32::from_rgb(200, 90, 90)),
+                );
+            }
+        }
+        ui.add_space(6.0);
+        for line in [
+            "打开开发者模式 → 点「加载已解压的扩展程序」→ 选上面那个目录",
+            "装过之后升级桌面端，只需在扩展页点插件卡片上的刷新按钮",
+        ] {
+            ui.add(egui::Label::new(RichText::new(line).size(11.0).color(Color32::from_gray(140))).wrap());
+            ui.add_space(2.0);
+        }
+
+        Self::section(ui, "本地服务", "插件靠它翻译。只监听 127.0.0.1，且只接受浏览器扩展的请求，网页直接调一律拒绝。");
+        Self::row(ui, "启用", "关掉后插件无法工作", |ui| {
             ui.checkbox(&mut self.draft.server.enabled, "");
         });
-        Self::row(ui, "端口", "改完要重启应用，插件那边的端口也要跟着改", |ui| {
+        Self::row(ui, "端口", "改完要重启应用，插件设置里的端口也要跟着改", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.server.port).range(1024..=65535));
         });
-
-        Self::section(ui, "插件怎么装", "");
-        for line in [
-            "1. Chrome 地址栏打开 chrome://extensions",
-            "2. 打开右上角「开发者模式」",
-            "3. 点「加载已解压的扩展程序」，选安装目录下的 extension 文件夹",
-        ] {
-            ui.label(RichText::new(line).size(12.0).color(Color32::from_gray(150)));
-            ui.add_space(3.0);
-        }
     }
 
     pub fn open_settings(&mut self) {

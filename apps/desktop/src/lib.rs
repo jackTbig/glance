@@ -2,6 +2,7 @@
 pub mod config;
 pub mod dpi;
 pub mod engine;
+pub mod extension;
 pub mod hotkey;
 pub mod panel;
 pub mod server;

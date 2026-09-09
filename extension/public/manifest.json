@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "translate-tool 翻译",
+  "name": "简译 Glance",
   "version": "0.1.0",
-  "description": "整页 / 悬停 / 划词翻译，翻译由本机的 translate-tool 桌面端完成，API Key 不进浏览器。",
+  "description": "整页 / 悬停 / 划词翻译，翻译由本机的简译桌面端完成，API Key 不进浏览器。",
   "permissions": [
     "storage",
     "activeTab",
@@ -15,8 +15,14 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "translate-tool 翻译",
-    "default_popup": "popup.html"
+    "default_title": "简译",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon_16.png",
+      "32": "icons/icon_32.png",
+      "48": "icons/icon_48.png",
+      "128": "icons/icon_128.png"
+    }
   },
   "options_page": "options.html",
   "content_scripts": [
@@ -44,5 +50,11 @@
       },
       "description": "翻译选中的文字"
     }
+  },
+  "icons": {
+    "16": "icons/icon_16.png",
+    "32": "icons/icon_32.png",
+    "48": "icons/icon_48.png",
+    "128": "icons/icon_128.png"
   }
 }

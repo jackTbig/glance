@@ -104,9 +104,20 @@ pub fn handle_translate(tr: &Translator, req: TranslateRequest) -> anyhow::Resul
     })
 }
 
+/// 插件最近一次来访：设置页靠它显示「装没装、通不通」
+#[derive(Debug, Clone, Default)]
+pub struct ExtensionSeen {
+    /// 最近一次收到扩展请求的时刻
+    pub at: Option<std::time::Instant>,
+    /// 扩展 id（Origin 里解出来的）
+    pub id: Option<String>,
+}
+
 pub struct ServerHandle {
     pub port: u16,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 与处理线程共享：最近一次插件来访
+    pub seen: Arc<Mutex<ExtensionSeen>>,
 }
 
 impl ServerHandle {
@@ -134,12 +145,14 @@ pub fn spawn(
     let actual = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
     let server = Arc::new(server);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen: Arc<Mutex<ExtensionSeen>> = Arc::new(Mutex::new(ExtensionSeen::default()));
     tracing::info!("本地服务已监听 http://127.0.0.1:{actual}（{WORKERS} 个处理线程）");
     for i in 0..WORKERS {
       let server = server.clone();
       let stop2 = stop.clone();
       let allowed_ids = allowed_ids.clone();
       let translator = translator.clone();
+      let seen = seen.clone();
       std::thread::Builder::new().name(format!("local-server-{i}")).spawn(move || {
         loop {
             if stop2.load(std::sync::atomic::Ordering::SeqCst) {
@@ -166,6 +179,14 @@ pub fn spawn(
                 tracing::warn!("拒绝来源 {origin:?}：{why}");
                 let _ = request.respond(json_response(403, &serde_json::json!({ "error": why }), origin.as_deref()));
                 continue;
+            }
+
+            // 记一笔「插件来过」：设置页据此显示装没装
+            if let Some(o) = origin.as_deref().filter(|o| o.starts_with(EXT_ORIGIN_PREFIX)) {
+                let id = o.trim_start_matches(EXT_ORIGIN_PREFIX).trim_end_matches('/').to_string();
+                let mut g = seen.lock().unwrap();
+                g.at = Some(std::time::Instant::now());
+                g.id = Some(id);
             }
 
             let path = url.split('?').next().unwrap_or("");
@@ -227,7 +248,7 @@ pub fn spawn(
         tracing::debug!("本地服务处理线程 {i} 退出");
       })?;
     }
-    Ok(ServerHandle { port: actual, stop })
+    Ok(ServerHandle { port: actual, stop, seen })
 }
 
 fn cors_response<R: std::io::Read>(resp: tiny_http::Response<R>, origin: Option<&str>) -> tiny_http::Response<R> {
