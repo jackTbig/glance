@@ -57,7 +57,7 @@ const FIELD_W: f32 = 196.0;
 /// 用户配的热键被别的程序占了就往下试这些。
 /// 常见组合（Ctrl+Alt+T/S/X/D/W、Ctrl+Shift+D）在实测机器上都已被占用，别放进来。
 const FALLBACK_HOTKEYS: &[&str] = &[
-    "Ctrl+Alt+Y", "Ctrl+Alt+G", "Ctrl+Alt+Q",
+    "Ctrl+Alt+Y", "Ctrl+Alt+G", "Ctrl+Alt+Q", "Ctrl+Alt+J", "Ctrl+Alt+K", "Ctrl+Alt+U", "Ctrl+Alt+B",
     "Ctrl+Shift+Y", "Ctrl+Shift+Q", "Ctrl+Shift+T",
     "Alt+Shift+Y", "Alt+Shift+Q", "Alt+Shift+Z",
     "Ctrl+Alt+F9", "Ctrl+Alt+F10", "Ctrl+Alt+F11",
@@ -101,6 +101,8 @@ pub struct App {
     /// 当前有效的任务序号，用来丢弃过期事件
     cur_seq: u64,
     mouse_left_panel_at: Option<Instant>,
+    /// 状态提示卡片什么时候自己收掉
+    notice_until: Option<Instant>,
     settings_open: bool,
     settings_tab: SettingsTab,
     /// 换页后把滚动条拉回顶部
@@ -120,9 +122,14 @@ pub struct App {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum HotkeyAction {
-    Selection,
+    /// 一次性动作：直接进入截屏框选
     Screenshot,
     TogglePanel,
+    /// 两段式的第一段：开关某个功能的「待命」状态。
+    /// Jack 2026-09-09 定的模型：三键组合按着别扭，只用来开关功能；
+    /// 开着的时候用单键/双键 + 鼠标动作调用（悬停按 Ctrl、划词直接选中）。
+    ToggleHover,
+    ToggleSelection,
 }
 
 impl App {
@@ -139,8 +146,9 @@ impl App {
         let mut hotkey_notes = Vec::new();
         let mut taken: Vec<String> = Vec::new();
         for (want, action, label) in [
-            (&cfg.hotkeys.selection, HotkeyAction::Selection, "划词"),
             (&cfg.hotkeys.screenshot, HotkeyAction::Screenshot, "截屏"),
+            (&cfg.hotkeys.toggle_hover, HotkeyAction::ToggleHover, "悬停开关"),
+            (&cfg.hotkeys.toggle_selection, HotkeyAction::ToggleSelection, "划词开关"),
             (&cfg.hotkeys.toggle_panel, HotkeyAction::TogglePanel, "面板"),
         ] {
             match register_with_fallback(&hk, want, &taken) {
@@ -217,6 +225,7 @@ impl App {
             logged_icon_at: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
+            notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
             settings_open: std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0"),
             // TT_SETTINGS_TAB=0..3 指定启动时停在哪一页（截图与自测用）
@@ -278,6 +287,9 @@ impl App {
                         self.mode = Mode::Icon { pos: (x, y), since: Instant::now() };
                     }
                 }
+                Trigger::Hovered { x, y } if !self.cfg.ui.hover_enabled => {
+                    tracing::debug!("悬停触发于({x},{y})，但悬停取词没开（按开关热键可开）");
+                }
                 Trigger::Hovered { x, y } => {
                     if !matches!(self.mode, Mode::Idle | Mode::Icon { .. }) {
                         tracing::debug!("悬停触发于({x},{y})，但界面正忙（{:?}），忽略", self.mode);
@@ -306,7 +318,36 @@ impl App {
             let Some((_, action)) = self.hotkey_ids.iter().find(|(id, _)| *id == ev.id).copied() else { continue };
             let (x, y) = text_capture::screen::cursor_pos();
             match action {
-                HotkeyAction::Selection => self.start(Job::Selection, "划词翻译", (x, y), Source::Clipboard),
+                HotkeyAction::ToggleHover => {
+                    self.cfg.ui.hover_enabled = !self.cfg.ui.hover_enabled;
+                    self.draft.ui.hover_enabled = self.cfg.ui.hover_enabled;
+                    self.watcher.set_config(watch_cfg(&self.cfg));
+                    let on = self.cfg.ui.hover_enabled;
+                    let key = HoverModifier::parse(&self.cfg.hotkeys.hover_modifier).label_zh();
+                    tracing::info!("悬停取词{}", if on { "已开启" } else { "已关闭" });
+                    self.notice(
+                        "悬停取词",
+                        if on {
+                            format!("已开启：按住 {key} 把鼠标停在文字上就翻")
+                        } else {
+                            "已关闭：按住修饰键也不再响应".into()
+                        },
+                        (x, y),
+                    );
+                    let _ = self.cfg.save();
+                }
+                HotkeyAction::ToggleSelection => {
+                    self.cfg.ui.selection_icon = !self.cfg.ui.selection_icon;
+                    self.draft.ui.selection_icon = self.cfg.ui.selection_icon;
+                    let on = self.cfg.ui.selection_icon;
+                    tracing::info!("划词小图标{}", if on { "已开启" } else { "已关闭" });
+                    self.notice(
+                        "划词翻译",
+                        if on { "已开启：选中文字后点旁边的「译」".into() } else { "已关闭：选中文字不再弹图标".to_string() },
+                        (x, y),
+                    );
+                    let _ = self.cfg.save();
+                }
                 HotkeyAction::Screenshot => {
                     self.mode = Mode::Selecting { start: None };
                     self.panel = None;
@@ -385,6 +426,16 @@ impl App {
         }
     }
 
+    /// 弹一张只报状态的卡片（没有重试按钮），1.6 秒后自己收
+    fn notice(&mut self, title: &'static str, msg: String, at: (i32, i32)) {
+        let mut st = PanelState::new(title, Source::Uia, at);
+        st.phase = Phase::Notice(msg);
+        self.panel = Some(st);
+        self.mode = Mode::Panel;
+        self.cur_seq = 0;
+        self.notice_until = Some(Instant::now() + Duration::from_millis(1600));
+    }
+
     fn close_panel(&mut self) {
         self.logged_icon_at = None;
         self.panel = None;
@@ -426,7 +477,12 @@ fn register_with_fallback(hk: &GlobalHotKeyManager, want: &str, taken: &[String]
 
 fn watch_cfg(cfg: &Config) -> WatchConfig {
     WatchConfig {
-        hover_modifier: HoverModifier::parse(&cfg.hotkeys.hover_modifier),
+        // 功能没开就让监视线程直接别判定，省得白跑
+        hover_modifier: if cfg.ui.hover_enabled {
+            HoverModifier::parse(&cfg.hotkeys.hover_modifier)
+        } else {
+            HoverModifier::None
+        },
         hover_delay: Duration::from_millis(cfg.hotkeys.hover_delay_ms.clamp(80, 5000)),
         ..Default::default()
     }
@@ -469,6 +525,14 @@ impl eframe::App for App {
                 self.pending_region = None;
                 let (x, y, w, h) = rect;
                 self.start(Job::Region { x, y, w, h }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+            }
+        }
+
+        // 状态提示卡片到点自己收
+        if let Some(t) = self.notice_until {
+            if Instant::now() >= t {
+                self.notice_until = None;
+                self.close_panel();
             }
         }
 
@@ -932,65 +996,65 @@ impl App {
     }
 
     fn settings_trigger(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("全局快捷键").size(13.0).strong());
-        ui.label(
-            RichText::new("在任何窗口里都生效。组合被别的程序占用时会自动改用备选，实际用的是哪个看左下角运行状态。")
-                .size(11.0)
-                .color(Color32::from_gray(135)),
-        );
-        ui.add_space(9.0);
-        Self::row(ui, "划词翻译", "选中文字后按它，立刻翻译选中的内容", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.selection).desired_width(140.0));
+        ui.label(RichText::new("功能分两步：先用三键组合把功能打开（打开＝待命），再用顺手的单键或鼠标动作调用。没打开时怎么按都不响应。").size(11.0).color(Color32::from_gray(135)));
+        ui.add_space(10.0);
+
+        ui.label(RichText::new("① 开关（三键，按着别扭但不常按）").size(13.0).strong());
+        ui.add_space(7.0);
+        Self::row(ui, "悬停取词", "按一下开、再按一下关；当前状态弹卡片告诉你", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_hover).desired_width(120.0));
         });
-        Self::row(ui, "截屏翻译", "按它进入框选，拖出一块区域后识别并翻译", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.screenshot).desired_width(140.0));
-        });
-        Self::row(ui, "面板开关", "显示或收起最近一次的译文面板", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(140.0));
+        Self::row(ui, "划词图标", "同上", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_selection).desired_width(120.0));
         });
 
-        Self::section(
-            ui,
-            "悬停翻译",
-            "按住修饰键、把鼠标停在文字上，自动翻译鼠标压着的那一行。浏览器里请用 Chrome 插件，效果更好。",
-        );
-        Self::row(ui, "修饰键", "选「关闭」就完全不做悬停翻译", |ui| {
+        Self::section(ui, "② 调用（开着的时候用）", "");
+        Self::row(ui, "悬停按住", "开着时按住这个键、鼠标停在文字上就翻鼠标那一行", |ui| {
             let cur = match self.draft.hotkeys.hover_modifier.as_str() {
-                "ctrl" => "Ctrl",
+                "alt" => "Alt",
                 "shift" => "Shift",
                 "win" => "Win",
-                "none" => "关闭",
-                _ => "Alt",
+                _ => "Ctrl",
             };
             egui::ComboBox::from_id_salt("hovermod").width(104.0).selected_text(cur).show_ui(ui, |ui| {
-                for (v, label) in [("alt", "Alt"), ("ctrl", "Ctrl"), ("shift", "Shift"), ("win", "Win"), ("none", "关闭")] {
+                for (v, label) in [("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win")] {
                     ui.selectable_value(&mut self.draft.hotkeys.hover_modifier, v.to_string(), label);
                 }
             });
         });
-        Self::row(ui, "停留多久触发", "鼠标停住这么久才翻译；太短会一划过去就触发", |ui| {
+        Self::row(ui, "停留多久", "鼠标停住这么久才翻；太短会一划过去就触发", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.hotkeys.hover_delay_ms).range(80..=3000).suffix(" ms"));
         });
+        Self::row(ui, "划词", "开着时选中文字，旁边直接弹「译」按钮，不用按键", |ui| {
+            ui.label(RichText::new("选中文字即可").size(11.0).color(Color32::from_gray(135)));
+        });
 
-        Self::section(ui, "划词小图标", "");
-        Self::row(ui, "选中后弹图标", "关掉后选中文字不再自动冒出「译」按钮，只能用上面的划词快捷键", |ui| {
-            ui.checkbox(&mut self.draft.ui.selection_icon, "");
+        Self::section(ui, "当前状态", "也可以在这里直接勾，效果与按开关热键一样");
+        let hover_label = if self.draft.ui.hover_enabled { "开着" } else { "关着" };
+        Self::row(ui, "悬停取词", "", |ui| {
+            ui.checkbox(&mut self.draft.ui.hover_enabled, hover_label);
+        });
+        let icon_label = if self.draft.ui.selection_icon { "开着" } else { "关着" };
+        Self::row(ui, "划词图标", "", |ui| {
+            ui.checkbox(&mut self.draft.ui.selection_icon, icon_label);
         });
         Self::row(ui, "图标停留", "多久不点就自动消失", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.ui.icon_timeout_ms).range(500..=10000).suffix(" ms"));
         });
 
-        Self::section(
-            ui,
-            "例外程序",
-            "在这些程序里不弹小图标、不响应悬停，快捷键仍然有效。每行一个可执行文件名。留空表示不排除任何程序。",
-        );
-        let mut text = self.draft.ui.excluded_processes.join("\n");
+        Self::section(ui, "一次性动作", "按下就直接执行，没有待命状态");
+        Self::row(ui, "截屏翻译", "进入框选，拖出一块区域后识别并翻译", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.screenshot).desired_width(120.0));
+        });
+        Self::row(ui, "面板开关", "显示或收起最近一次的译文面板", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(120.0));
+        });
+
+        Self::section(ui, "例外程序", "这些程序里不弹图标、不响应悬停。每行一个可执行文件名，留空表示不排除。");
+        let mut text = self.draft.ui.excluded_processes.join("
+");
         let r = ui.add(
-            egui::TextEdit::multiline(&mut text)
-                .desired_width(FIELD_W)
-                .desired_rows(3)
-                .hint_text("code.exe\ndevenv.exe"),
+            egui::TextEdit::multiline(&mut text).desired_width(FIELD_W).desired_rows(3).hint_text("code.exe"),
         );
         if r.changed() {
             self.draft.ui.excluded_processes =

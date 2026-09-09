@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 /// 应用名，同时决定 %APPDATA% 下的数据目录名
 pub const APP_NAME: &str = "translate-tool";
 
@@ -121,16 +121,21 @@ impl SceneCfg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HotkeyCfg {
-    /// 划词翻译
-    pub selection: String,
-    /// 截屏翻译
+    /// 一次性动作：按了就进入截屏框选
     pub screenshot: String,
     /// 显示 / 隐藏最近一次结果面板
     pub toggle_panel: String,
-    /// 悬停翻译的修饰键：alt | ctrl | shift | win | none（none = 关闭悬停）
+    /// **开关**悬停取词：开了才待命，关了按修饰键也不响应
+    pub toggle_hover: String,
+    /// **开关**划词小图标
+    pub toggle_selection: String,
+    /// 悬停取词开着时，按住哪个键 + 鼠标停留才调用：alt | ctrl | shift | win
     pub hover_modifier: String,
     /// 悬停多久才触发（毫秒）
     pub hover_delay_ms: u64,
+    /// 旧字段，保留只为读得进老配置；语义已由 toggle_selection 接管
+    #[serde(default, skip_serializing)]
+    pub selection: String,
 }
 
 impl Default for HotkeyCfg {
@@ -138,11 +143,14 @@ impl Default for HotkeyCfg {
         Self {
             // 别用 Ctrl+Alt+T / S / X / D / W：本机实测这些已被其他程序占用（错误码 1409）。
             // 注册失败时 ui.rs 会自动往下试 FALLBACK_HOTKEYS 里的备选。
-            selection: "Ctrl+Alt+Y".into(),
             screenshot: "Ctrl+Alt+G".into(),
             toggle_panel: "Ctrl+Alt+Q".into(),
-            hover_modifier: "alt".into(),
+            // Ctrl+Alt+H 在本机被别的程序占了（探针实测），用 J
+            toggle_hover: "Ctrl+Alt+J".into(),
+            toggle_selection: "Ctrl+Alt+Y".into(),
+            hover_modifier: "ctrl".into(),
             hover_delay_ms: 300,
+            selection: String::new(),
         }
     }
 }
@@ -150,6 +158,8 @@ impl Default for HotkeyCfg {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct UiCfg {
+    /// 悬停取词是否待命。关掉后按住修饰键也不响应（两段式的第一段）
+    pub hover_enabled: bool,
     /// 选中文字后是否在选区旁弹小图标
     pub selection_icon: bool,
     /// 小图标多久不点自动消失（毫秒）
@@ -167,6 +177,7 @@ pub struct UiCfg {
 impl Default for UiCfg {
     fn default() -> Self {
         Self {
+            hover_enabled: true,
             selection_icon: true,
             icon_timeout_ms: 2500,
             font_size: 15.0,
@@ -245,6 +256,19 @@ impl Config {
                 && v1_default.iter().all(|d| self.ui.excluded_processes.iter().any(|x| x.eq_ignore_ascii_case(d)));
             if unchanged {
                 self.ui.excluded_processes.clear();
+            }
+        }
+        if self.version < 3 {
+            // v2 的 hotkeys.selection 是「直接翻译选中内容」，v3 改成两段式：
+            // 三键管开关、简单键管调用。老的那个键顺势变成划词图标的开关键。
+            if !self.hotkeys.selection.trim().is_empty() && self.hotkeys.toggle_selection.trim().is_empty() {
+                self.hotkeys.toggle_selection = std::mem::take(&mut self.hotkeys.selection);
+            }
+            self.hotkeys.selection = String::new();
+            // v2 用 hover_modifier = "none" 表示关闭悬停，v3 用独立的开关表示
+            if self.hotkeys.hover_modifier.trim().eq_ignore_ascii_case("none") {
+                self.ui.hover_enabled = false;
+                self.hotkeys.hover_modifier = "ctrl".into();
             }
         }
         self.version = CONFIG_VERSION;
@@ -346,7 +370,7 @@ mod tests {
         let cfg: Config = toml::from_str("version = 1\n[backend]\nopenai_model = \"x\"\n").unwrap();
         assert_eq!(cfg.backend.openai_model, "x");
         assert_eq!(cfg.backend.claude_model, "sonnet", "没写的字段用默认值");
-        assert_eq!(cfg.hotkeys.selection, "Ctrl+Alt+Y");
+        assert_eq!(cfg.hotkeys.toggle_selection, "Ctrl+Alt+Y");
     }
 
     #[test]
@@ -370,6 +394,45 @@ excluded_processes = [\"mygame.exe\"]
 ").unwrap();
         assert!(mine.migrate());
         assert_eq!(mine.ui.excluded_processes, vec!["mygame.exe".to_string()]);
+    }
+
+    #[test]
+    fn v3_moves_old_selection_key_to_the_toggle() {
+        // v2 的 hotkeys.selection 是「直接翻译选中内容」；v3 改成两段式后，
+        // 这个键顺势变成划词图标的开关键，别让用户的设置凭空消失
+        let mut c: Config =
+            toml::from_str("version = 2
+[hotkeys]
+selection = \"Ctrl+Alt+Y\"
+").unwrap();
+        assert!(c.migrate());
+        assert_eq!(c.hotkeys.toggle_selection, "Ctrl+Alt+Y");
+        assert!(c.hotkeys.selection.is_empty(), "旧字段迁完要清空");
+    }
+
+    #[test]
+    fn v3_turns_hover_none_into_an_explicit_switch() {
+        // v2 用 hover_modifier = "none" 表示关闭悬停；v3 有独立开关了
+        let mut c: Config =
+            toml::from_str("version = 2
+[hotkeys]
+hover_modifier = \"none\"
+").unwrap();
+        assert!(c.migrate());
+        assert!(!c.ui.hover_enabled, "原来是关的，迁完还得是关的");
+        assert_eq!(c.hotkeys.hover_modifier, "ctrl", "修饰键要给个能用的默认值");
+    }
+
+    #[test]
+    fn two_stage_defaults_are_sane() {
+        let c = Config::default();
+        // 第一段：开关用三键
+        for k in [&c.hotkeys.toggle_hover, &c.hotkeys.toggle_selection] {
+            assert_eq!(k.matches('+').count(), 2, "开关键用三键组合：{k}");
+        }
+        // 第二段：调用只按一个修饰键
+        assert!(!c.hotkeys.hover_modifier.contains('+'), "调用键是单个修饰键");
+        assert!(c.ui.hover_enabled && c.ui.selection_icon, "默认两个功能都待命");
     }
 
     #[test]
