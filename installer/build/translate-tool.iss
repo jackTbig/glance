@@ -4,7 +4,7 @@
 ; installer\build\ 为基准，很容易算错（第一次就把 D:\DevCache 算成了 D:\My_data\DevCache）。
 
 #define AppName "translate-tool"
-#define AppVer "0.1.0"
+#define AppVer "0.2.0"
 #define AppExe "translate-tool.exe"
 #ifndef TargetDir
   #define TargetDir "D:\DevCache\tt-target\release"

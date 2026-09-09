@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "ai-translate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "mock-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "futures",
@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "text-capture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "image",
@@ -4591,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "translate-tool"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ai-translate",
  "anyhow",
