@@ -3,6 +3,10 @@ import {
   blockAt,
   collectBlocks,
   DEFAULT_SETTINGS,
+  dictEntryToText,
+  looksLikeWord,
+  parseDictEntry,
+  type DictEntry,
   hasInlineMarkup,
   isTyping,
   MARK_ATTR,
@@ -75,16 +79,39 @@ const CSS = `
   font: 14px/26px system-ui, sans-serif; text-align: center; padding: 0;
   box-shadow: 0 2px 8px rgba(0,0,0,.3);
 }
+/* 划词卡片与桌面端的取词卡片是同一张卡：配色、字号、版式逐项对齐
+   apps/desktop/src/ui.rs 的 draw_panel 与 draw_entry。改这里要同步改那边。 */
 #tt-panel {
-  position: absolute; z-index: 2147483647; max-width: 380px; min-width: 220px;
-  background: rgba(28,28,32,.97); color: #eee; border-radius: 10px; padding: 10px 12px;
-  font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
-  box-shadow: 0 6px 24px rgba(0,0,0,.4);
+  position: absolute; z-index: 2147483647; width: 420px; max-width: calc(100vw - 16px);
+  background: rgba(28,28,32,.965); color: #e6e6e6; border-radius: 10px; padding: 12px;
+  font: 15px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  box-shadow: 0 6px 24px rgba(0,0,0,.4); box-sizing: border-box; text-align: left;
 }
-#tt-panel .tt-head { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #9ab; margin-bottom: 6px; }
-#tt-panel .tt-head button { margin-left: auto; background: none; border: none; color: #9ab; cursor: pointer; font-size: 14px; }
-#tt-panel .tt-src { color: #999; font-size: 12px; margin-bottom: 6px; }
+#tt-panel .tt-head {
+  display: flex; gap: 6px; align-items: center; padding-bottom: 6px; margin-bottom: 8px;
+  border-bottom: 1px solid rgba(255,255,255,.14);
+}
+#tt-panel .tt-title { color: rgb(150,180,255); font-size: 13px; }
+#tt-panel .tt-from { color: #888; font-size: 12px; }
+#tt-panel .tt-head button {
+  background: rgb(222,222,222); border: none; border-radius: 4px; color: #222;
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 6px; min-width: 24px;
+}
+#tt-panel .tt-head button:hover { background: rgb(240,240,240); }
+#tt-panel .tt-head .tt-copy { margin-left: auto; }
+#tt-panel .tt-src { color: rgb(150,150,150); font-size: 14px; margin-bottom: 6px; }
+#tt-panel .tt-body { color: #fff; font-size: 15px; }
 #tt-panel.tt-pinned { border: 1px solid rgba(120,170,255,.5); }
+#tt-panel .tt-dict-head { color: #fff; font-size: 24px; font-weight: 600; line-height: 1.25; }
+#tt-panel .tt-dict-phon { color: rgb(140,140,140); font-size: 12px; margin-top: 2px; }
+#tt-panel .tt-dict-senses { margin-top: 8px; }
+#tt-panel .tt-dict-sense { display: flex; align-items: baseline; margin-bottom: 4px; }
+#tt-panel .tt-dict-pos { flex: 0 0 34px; color: rgb(150,180,255); font-size: 13px; }
+#tt-panel .tt-dict-text { flex: 1; color: rgb(235,235,235); font-size: 15px; }
+#tt-panel .tt-dict-forms { color: rgb(130,130,130); font-size: 11px; margin-top: 2px; }
+#tt-panel .tt-dict-ex { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,.14); }
+#tt-panel .tt-dict-ex-en { color: rgb(205,205,205); font-size: 13px; font-style: italic; }
+#tt-panel .tt-dict-ex-zh { color: rgb(150,150,150); font-size: 12px; margin-top: 2px; }
 `;
 
 function ensureStyle() {
@@ -496,16 +523,34 @@ function closePanel(force = false) {
   panelPinned = false;
 }
 
+/** 卡片「复制」拿走的文本：词典卡是整理后的条目，普通卡是译文 */
+let panelCopyText = "";
+/** 卡片的触发点（页面坐标）。内容到手后卡片会变高，要按它重摆，否则底部被视口切掉 */
+let panelAnchor = { x: 0, y: 0 };
+
 function showPanel(x: number, y: number, title: string, original: string) {
   ensureStyle();
   closePanel(true);
+  panelCopyText = "";
+  panelAnchor = { x, y };
   const p = document.createElement("div");
   p.id = "tt-panel";
-  p.innerHTML = `<div class="tt-head"><span></span><button title="钉住">📍</button><button title="关闭">✕</button></div>
+  // 头部与桌面端一致：场景名 · 来源，右侧 复制 / 钉住 / 关闭
+  p.innerHTML = `<div class="tt-head"><span class="tt-title"></span><span class="tt-from">· 网页</span><button class="tt-copy" title="复制">⎘</button><button title="钉住">📍</button><button title="关闭">✕</button></div>
     <div class="tt-src"></div><div class="tt-body">翻译中…</div>`;
-  (p.querySelector(".tt-head span") as HTMLElement).textContent = title;
+  (p.querySelector(".tt-title") as HTMLElement).textContent = title;
   (p.querySelector(".tt-src") as HTMLElement).textContent = original.length > 160 ? original.slice(0, 160) + "…" : original;
-  const [pin, close] = Array.from(p.querySelectorAll("button")) as HTMLButtonElement[];
+  const [copy, pin, close] = Array.from(p.querySelectorAll("button")) as HTMLButtonElement[];
+  copy.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!panelCopyText) return;
+    try {
+      await navigator.clipboard.writeText(panelCopyText);
+      toast("已复制", 1200);
+    } catch {
+      toast("复制失败：这个页面不允许写剪贴板", 2200);
+    }
+  });
   pin.addEventListener("click", (e) => {
     e.stopPropagation();
     panelPinned = !panelPinned;
@@ -517,14 +562,64 @@ function showPanel(x: number, y: number, title: string, original: string) {
     closePanel(true);
   });
   document.body.appendChild(p);
-  // 摆位：默认右下，越界翻到另一侧
-  const r = p.getBoundingClientRect();
-  const left = Math.max(8, Math.min(x, window.scrollX + window.innerWidth - r.width - 8));
-  const top = y + r.height + 8 > window.scrollY + window.innerHeight ? y - r.height - 12 : y + 12;
-  p.style.left = `${left}px`;
-  p.style.top = `${Math.max(8, top)}px`;
   panel = p;
+  placePanel();
   return p;
+}
+
+/** 摆位：默认在触发点右下，越界翻到另一侧。内容变高后要再调一次 */
+function placePanel() {
+  if (!panel) return;
+  const { x, y } = panelAnchor;
+  const r = panel.getBoundingClientRect();
+  const left = Math.max(window.scrollX + 8, Math.min(x, window.scrollX + window.innerWidth - r.width - 8));
+  const below = y + 12;
+  const top = below + r.height + 8 > window.scrollY + window.innerHeight ? y - r.height - 12 : below;
+  panel.style.left = `${left}px`;
+  panel.style.top = `${Math.max(window.scrollY + 8, top)}px`;
+}
+
+function el(tag: string, cls: string, text?: string): HTMLElement {
+  const d = document.createElement(tag);
+  d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  return d;
+}
+
+/**
+ * 画词典卡。版式与桌面端 `ui::draw_entry` 一一对应：
+ * 词头 → 音标 → 按词性分行的释义（词性列定宽对齐）→ 词形 → 分隔线 → 例句与译文。
+ * 每块都可能缺（模型不知道就整行省略），所以逐块判空，不连坐。
+ * **一律 textContent，不拼 HTML**：内容来自模型输出，拼进 innerHTML 等于把页面交给它。
+ */
+function setPanelDict(e: DictEntry, original: string) {
+  const body = panel?.querySelector(".tt-body") as HTMLElement | null;
+  if (!body) return;
+  // 词头本身就是原文，不再另起一行灰字——与桌面端一致
+  panel?.querySelector(".tt-src")?.remove();
+  body.textContent = "";
+  const head = e.head || original.trim();
+  if (head) body.appendChild(el("div", "tt-dict-head", head));
+  if (e.phonetic) body.appendChild(el("div", "tt-dict-phon", e.phonetic));
+  if (e.senses.length) {
+    const box = el("div", "tt-dict-senses");
+    for (const s of e.senses) {
+      const row = el("div", "tt-dict-sense");
+      row.appendChild(el("span", "tt-dict-pos", s.pos));
+      row.appendChild(el("span", "tt-dict-text", s.text));
+      box.appendChild(row);
+    }
+    body.appendChild(box);
+  }
+  if (e.forms) body.appendChild(el("div", "tt-dict-forms", e.forms));
+  if (e.example) {
+    const ex = el("div", "tt-dict-ex");
+    ex.appendChild(el("div", "tt-dict-ex-en", e.example));
+    if (e.exampleZh) ex.appendChild(el("div", "tt-dict-ex-zh", e.exampleZh));
+    body.appendChild(ex);
+  }
+  panelCopyText = dictEntryToText(e);
+  placePanel();
 }
 
 function setPanelBody(html: string, failed = false) {
@@ -544,13 +639,28 @@ async function translateSelection(x: number, y: number) {
     toast("请先选中要翻译的文字");
     return;
   }
-  showPanel(x, y, "划词翻译", text);
+  // 与桌面端同一套判定（dict.ts 的 looksLikeWord 对应 Rust 的 looks_like_word）：
+  // 取到单个词或短语给词典卡，句子给译文卡。标题也跟桌面端一样叫「取词释义」
+  const word = looksLikeWord(text);
+  showPanel(x, y, word ? "取词释义" : "划词翻译", text);
   try {
-    const [r] = await translate("selection", [{ id: "s", text }]);
-    setPanelBody(r.text ?? r.error ?? "", r.text === undefined);
+    const [r] = await translate(word ? "word" : "selection", [{ id: "s", text }]);
+    if (r.text === undefined) {
+      setPanelBody(r.error ?? "", true);
+    } else {
+      // 模型没按格式回（一条标记都没有）就退回普通译文，别给一张空词典卡
+      const entry = word ? parseDictEntry(r.text) : null;
+      if (entry) {
+        setPanelDict(entry, text);
+      } else {
+        setPanelBody(r.text);
+        panelCopyText = r.text;
+      }
+    }
   } catch (e) {
     setPanelBody(e instanceof Error ? e.message : String(e), true);
   }
+  placePanel();
 }
 
 // ---------------- 悬停 ----------------
@@ -684,6 +794,11 @@ function install() {
 
   document.addEventListener("mouseup", (e) => {
     if (!settings.selectionIcon || hostDisabled()) return;
+    // 点「译」图标（或卡片里的按钮）时 mouseup 也会冒泡到这里。图标的 mousedown 为了保住选区
+    // 做了 preventDefault，所以这时选区还在——不挡的话会在点击处立刻再生成一个图标，
+    // 压在刚弹出的卡片左上角 2.5 秒才消失。
+    const t = e.target as Element | null;
+    if (t?.closest?.("#tt-icon, #tt-panel")) return;
     setTimeout(() => {
       const text = (window.getSelection()?.toString() ?? "").trim();
       removeIcon();

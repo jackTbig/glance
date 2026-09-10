@@ -1,8 +1,11 @@
 /** 插件各部分共用的类型、默认设置与纯函数（纯函数便于在 Node 里单测） */
 
+// 取词词典卡的判定与解析，与桌面端（Rust）一一对应，见 dict.ts 顶部说明
+export * from "./dict";
+
 export const DEFAULT_PORT = 42731;
 
-export type Scene = "full_page" | "selection" | "hover" | "screenshot";
+export type Scene = "full_page" | "selection" | "hover" | "screenshot" | "word";
 
 /** 页面显示模式 */
 export type DisplayMode = "bilingual" | "translation_only" | "original";

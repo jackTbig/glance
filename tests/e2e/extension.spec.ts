@@ -191,6 +191,65 @@ test("划词：选中后出图标，点击弹面板给译文", async () => {
   await page.close();
 });
 
+test("划词：选中单个词弹词典卡，版式与桌面端一致；选中句子仍是译文卡", async () => {
+  const page = await openPage();
+  // 只选中 p1 里的一个词
+  await page.evaluate(() => {
+    const el = document.getElementById("p1")!;
+    const node = el.firstChild as Text;
+    const at = node.data.indexOf("blazingly");
+    const r = document.createRange();
+    r.setStart(node, at);
+    r.setEnd(node, at + "blazingly".length);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 120, clientY: 100 }));
+  });
+  await page.locator("#tt-icon").click({ timeout: 5000 });
+
+  const panel = page.locator("#tt-panel");
+  // 点图标时 mouseup 冒泡回页面，选区还在，曾经会立刻再生成一个图标压在卡片上
+  await page.waitForTimeout(300);
+  await expect(page.locator("#tt-icon")).toHaveCount(0);
+  // 标题与桌面端一致：单个词叫「取词释义」
+  await expect(panel.locator(".tt-title")).toHaveText("取词释义");
+  // 词头、音标、按词性分行的释义、词形、例句与译文逐块都要画出来
+  await expect(panel.locator(".tt-dict-head")).toHaveText("blazingly", { timeout: 30_000 });
+  await expect(panel.locator(".tt-dict-phon")).toContainText("/");
+  await expect(panel.locator(".tt-dict-sense")).toHaveCount(2);
+  await expect(panel.locator(".tt-dict-pos").first()).toHaveText("v.");
+  await expect(panel.locator(".tt-dict-forms")).toContainText("mocked");
+  await expect(panel.locator(".tt-dict-ex-en")).toHaveText("This is a mock entry.");
+  await expect(panel.locator(".tt-dict-ex-zh")).toHaveText("这是一条假条目。");
+  // 词头本身就是原文，不再另起一行灰色原文（桌面端也是这样）
+  await expect(panel.locator(".tt-src")).toHaveCount(0);
+  // 头部三个按钮与桌面端一致：复制 / 钉住 / 关闭
+  await expect(panel.locator("button[title=复制]")).toHaveCount(1);
+  await expect(panel.locator("button[title=钉住]")).toHaveCount(1);
+  // 没有任何 #标记 漏到界面上
+  await expect(panel).not.toContainText("#释");
+
+  await panel.locator("button[title=关闭]").click();
+  await expect(panel).toHaveCount(0);
+
+  // 同一段整句选中：仍是译文卡，不能误判成查词
+  await page.evaluate(() => {
+    const el = document.getElementById("p1")!;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 120, clientY: 100 }));
+  });
+  await page.locator("#tt-icon").click({ timeout: 5000 });
+  await expect(panel.locator(".tt-title")).toHaveText("划词翻译");
+  await expect(panel.locator(".tt-body")).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(panel.locator(".tt-dict-head")).toHaveCount(0);
+  await page.close();
+});
+
 test("悬停：鼠标先停好再按住 Alt（最常见的操作顺序）", async () => {
   const page = await openPage();
   const box = await page.locator("#l2").boundingBox();

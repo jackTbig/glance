@@ -147,20 +147,50 @@ mod tests {
         cfg.base.openai_base_url = mock.base_url.clone();
         let tr = Arc::new(Mutex::new(Translator::new(cfg).unwrap()));
         let (e, rx) = Engine::spawn(tr, Arc::new(Capturer::new()));
-        let a = e.submit(Job::Text { scene: Scene::Selection, text: "hello".into() });
+        // 用一句话而不是单个词：单个词会被改判成取词场景、走词典条目（见下一条测试）
+        let a = e.submit(Job::Text { scene: Scene::Selection, text: "hello world, how are you".into() });
         assert_eq!(a, 1);
-        // 应当先收到 Captured 再收到 Done
-        let mut saw_done = None;
+        assert_eq!(wait_done(&rx).as_deref(), Some("zh=hello world, how are you"));
+    }
+
+    /// 划词取到单个词要改判成 `Scene::Word`、拿到词典条目，而不是一句译文。
+    /// 假后端在提示词含「词典条目」时回行标记条目，所以这条能在自动化里真正走通。
+    #[test]
+    fn single_word_selection_is_rerouted_to_dictionary() {
+        let mock = mock_llm::spawn(0);
+        let mut cfg = ai_translate::TranslatorConfig::default();
+        cfg.base.openai_base_url = mock.base_url.clone();
+        let tr = Arc::new(Mutex::new(Translator::new(cfg).unwrap()));
+        let (e, rx) = Engine::spawn(tr, Arc::new(Capturer::new()));
+        e.submit(Job::Text { scene: Scene::Selection, text: "hello".into() });
+        let mut captured_scene = None;
+        let mut done = None;
         for _ in 0..10 {
             match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Event::Captured { scene, .. }) => captured_scene = Some(scene),
                 Ok(Event::Done { text, .. }) => {
-                    saw_done = Some(text);
+                    done = Some(text);
                     break;
                 }
                 Ok(_) => continue,
                 Err(_) => break,
             }
         }
-        assert_eq!(saw_done.as_deref(), Some("zh=hello"));
+        assert_eq!(captured_scene, Some(Scene::Word), "单个词应改判成取词场景，界面标题靠它变成「取词释义」");
+        let entry = crate::dict::parse(&done.expect("没等到结果")).expect("应当是可解析的词典条目");
+        assert_eq!(entry.head, "hello");
+        assert!(!entry.senses.is_empty());
+    }
+
+    /// 等到 Done 为止，返回译文
+    fn wait_done(rx: &crossbeam_channel::Receiver<Event>) -> Option<String> {
+        for _ in 0..10 {
+            match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(Event::Done { text, .. }) => return Some(text),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
     }
 }

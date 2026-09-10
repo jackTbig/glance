@@ -49,6 +49,20 @@ fn marker_num(text: &str, key: &str) -> Option<u64> {
     text[start..end].trim().parse().ok()
 }
 
+/// 取词场景（提示词含「词典条目」）回一份固定的行标记条目。
+///
+/// 只回 `zh=` 的话，插件与桌面端的词典卡永远走「解析失败 → 退回普通译文」那条路，
+/// 真正的词典版式在自动化里一次都画不出来。词头用请求里的那个词，好让测试断言对得上。
+fn dict_entry(text: &str) -> Option<String> {
+    if !text.contains("词典条目") {
+        return None;
+    }
+    let word = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.ends_with('：') && !l.ends_with(':')).last()?;
+    Some(format!(
+        "#词 {word}\n#音 英 /mɒk/ 美 /mɑːk/\n#释 v. 假装；模仿\n#释 n. 仿制品\n#形 过去式 mocked\n#例 This is a mock entry.\n#译 这是一条假条目。"
+    ))
+}
+
 /// 每行前加 zh=；带 ⟨n⟩ 编号的行把 zh= 放在编号之后；以「：」结尾的指令行跳过
 fn translate_lines(text: &str) -> String {
     let drop = marker_num(text, "drop");
@@ -100,7 +114,7 @@ async fn chat(State(st): State<Shared>, Json(body): Json<serde_json::Value>) -> 
             return (StatusCode::TOO_MANY_REQUESTS, h, "mock: rate limited").into_response();
         }
     }
-    let out = translate_lines(&text);
+    let out = dict_entry(&text).unwrap_or_else(|| translate_lines(&text));
     let stream = body["stream"].as_bool().unwrap_or(false);
     if !stream {
         return Json(serde_json::json!({
@@ -225,5 +239,14 @@ mod tests {
     #[test]
     fn drop_marker_removes_numbered_line() {
         assert_eq!(translate_lines("请翻译以下各段：\n⟨1⟩ a [[drop:2]]\n⟨2⟩ b\n⟨3⟩ c"), "⟨1⟩ zh=a [[drop:2]]\n⟨3⟩ zh=c");
+    }
+
+    #[test]
+    fn word_lookup_gets_a_dictionary_entry() {
+        let out = dict_entry("请给出这个词的词典条目：\nglance").unwrap();
+        assert!(out.starts_with("#词 glance\n"), "{out}");
+        assert!(out.contains("#释 v. ") && out.contains("#例 ") && out.contains("#译 "));
+        // 普通翻译请求不受影响
+        assert!(dict_entry("请翻译：\nhello").is_none());
     }
 }
