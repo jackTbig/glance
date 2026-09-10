@@ -76,6 +76,10 @@ const MASK_CLEAR_DELAY: Duration = Duration::from_millis(180);
 /// 摆完就停，否则用户没法用鼠标调窗口大小。
 const PLACE_FRAMES: u8 = 5;
 
+/// 摆位最多重试几轮。有上限是为了不跟窗口管理器较劲成死循环——
+/// 用户把窗口拖走之后，读回的位置本来就该跟目标不一致。
+const MAX_PLACE_RETRIES: u8 = 3;
+
 /// 界面里正在做什么
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -105,6 +109,9 @@ pub struct App {
     pending_region: Option<((i32, i32, u32, u32), Instant)>,
     /// 刚进入框选：给遮罩窗要一次焦点，不然 Esc 取消收不到按键
     focus_selector: bool,
+    /// 挂起的托盘左键单击（位置 + 按下时刻）。等过了系统双击间隔还没等到双击，才弹菜单——
+    /// 双击的第一次 UP 与单击在消息层面无法区分，只能靠等
+    pending_tray_click: Option<((i32, i32), Instant)>,
     /// 上次记进日志的小图标位置。界面 30 fps 重画，不去重的话一秒刷 30 行
     logged_icon_at: Option<(i32, i32)>,
     /// 当前有效的任务序号，用来丢弃过期事件
@@ -122,6 +129,11 @@ pub struct App {
     /// 表现是设置窗打开了（标题栏都变了）却停在 -16000,-16000 看不见。
     /// 安装版启动路径更长、时序不同，实测就撞上了这个（开发版一直没复现）。
     settings_place_frames: u8,
+    /// 摆位的目标（逻辑坐标）。摆完读回实际位置与它比对，偏了就重摆；对上了就清空——
+    /// 留着的话用户拖动设置窗会被一直拽回原位
+    settings_want_pos: Option<egui::Pos2>,
+    /// 已经重摆过几次，防止和窗口管理器互相较劲成死循环
+    settings_place_retries: u8,
     draft: Config,
     settings_msg: String,
     /// 运行环境自检结果。None = 还没查或要求重查；查一次要读注册表、枚举 PATH、
@@ -249,6 +261,7 @@ impl App {
             panel: None,
             pending_region: None,
             focus_selector: false,
+            pending_tray_click: None,
             logged_icon_at: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
@@ -265,6 +278,8 @@ impl App {
             // 语义是「还要摆几帧」：0 表示不用摆。启动即开设置窗时必须一起给上，
             // 否则窗口留在屏幕外的 -32000，标题栏都变了却看不见（踩过）
             settings_place_frames: if open_settings_at_start { PLACE_FRAMES } else { 0 },
+            settings_want_pos: None,
+            settings_place_retries: 0,
             settings_msg: String::new(),
             env_items: None,
             status,
@@ -462,16 +477,32 @@ impl App {
             MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
         };
         use desktop_shell::caption_ipc::Command;
-        let mut clicked_at = None;
-        while let Ok(ev) = tray_icon::TrayIconEvent::receiver().try_recv() {
-            if let tray_icon::TrayIconEvent::Click { position, button, button_state, .. } = ev {
-                let _ = button;
-                if button_state == tray_icon::MouseButtonState::Up {
-                    clicked_at = Some((position.x as i32, position.y as i32));
+        use desktop_shell::tray::{Action, Input};
+        use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+
+        // 双击托盘 = 开设置窗；单击弹菜单。判定逻辑（含「双击要撤销挂起的单击」）
+        // 在 `desktop_shell::tray::reduce` 里，有单测盯着时序。
+        let mut inputs = Vec::new();
+        while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
+            match ev {
+                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => inputs.push(Input::LeftDouble),
+                TrayIconEvent::Click { position, button, button_state: MouseButtonState::Up, .. } => {
+                    let at = (position.x as i32, position.y as i32);
+                    inputs.push(if button == MouseButton::Left { Input::LeftUp(at) } else { Input::RightUp(at) });
                 }
+                _ => {}
             }
         }
-        let Some((x, y)) = clicked_at else { return };
+        let interval = desktop_shell::tray::double_click_interval();
+        let (x, y) = match desktop_shell::tray::reduce(inputs, &mut self.pending_tray_click, Instant::now(), interval) {
+            Action::Activate => {
+                tracing::info!("双击托盘，打开设置窗");
+                self.open_settings();
+                return;
+            }
+            Action::Menu(at) => at,
+            Action::Nothing => return,
+        };
         let hwnd = window_handle_of(frame);
         let mut items = vec![
             (MENU_SETTINGS, "设置…".to_string(), false),
@@ -590,6 +621,28 @@ fn watch_cfg(cfg: &Config) -> WatchConfig {
 impl eframe::App for App {
     fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
+    }
+
+    /// 窗口被系统判定为不可见时，eframe **只跑这里、不跑 `ui()`**
+    /// （见 eframe 的 `update_logic_only`）。本应用平时就把主窗口缩成 1×1 丢在
+    /// -32000，关掉设置窗之后 Windows 会发 `Occluded(true)`，于是 `ui()` 停摆——
+    /// 表现是「关了设置窗以后托盘双击、热键全都没反应了」，而进程还活着，极难查。
+    ///
+    /// 所以事件泵必须在这里也跑一遍，并在有活儿时 `request_repaint` 把绘制拉回来。
+    /// **往 `ui()` 开头加新的事件泵时，记得同步加到这里。**
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.quit {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            return;
+        }
+        self.drain_hotkeys();
+        self.drain_triggers();
+        self.drain_events();
+        self.drain_tray(ctx, frame);
+        self.caption.reap();
+        // 有事要显示就把绘制拉回来；没事也保持一个低频心跳，
+        // 否则托盘与热键这类外部事件没有任何东西驱动
+        ctx.request_repaint_after(Duration::from_millis(if self.settings_open || self.mode != Mode::Idle { 16 } else { 100 }));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -962,7 +1015,33 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Title(format!("{APP_NAME_ZH} 设置")));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
+            tracing::debug!(
+                "设置窗摆位：剩 {} 帧 ppp={} 目标物理{:?} → 逻辑{:?}",
+                self.settings_place_frames,
+                d.ppp(),
+                at,
+                d.to_logical_pos(at)
+            );
             ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.settings_want_pos = Some(d.to_logical_pos(at));
+        } else if let Some(want) = self.settings_want_pos {
+            // **闭环校验**：连发几帧仍会偶发摆歪（实测出现过 (-280,-16)，目标是 (80,60)）。
+            // 窗口从「屏幕外的 1x1 浮窗宿主」切成带边框的设置窗时，`Decorations` / `InnerSize` /
+            // `OuterPosition` 三条命令的落地顺序不保证，位置可能基于中间态算出来。
+            // 盲目多摆几帧治不了偶发，所以读回实际位置比对——不对就再摆一轮。
+            let actual = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
+            if let Some(actual) = actual {
+                let off = (actual.x - want.x).abs().max((actual.y - want.y).abs());
+                if off > 4.0 && self.settings_place_retries < MAX_PLACE_RETRIES {
+                    self.settings_place_retries += 1;
+                    self.settings_place_frames = PLACE_FRAMES;
+        self.settings_place_retries = 0;
+                    tracing::warn!("设置窗摆歪了（实际{actual:?} 期望{want:?}），第 {} 次重摆", self.settings_place_retries);
+                } else {
+                    // 摆对了（或重试用尽）就别再管，否则用户拖动窗口会被拽回来
+                    self.settings_want_pos = None;
+                }
+            }
         }
 
         let mut close = false;
@@ -1049,14 +1128,27 @@ impl App {
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
+            tracing::debug!("设置窗收到关闭请求");
+            // **必须撤销这次关闭**：设置窗借的是 ROOT 视口，放任它关掉就是整个进程退出。
+            // 用户点标题栏的 ✕ 只是想关设置，不是想退出常驻托盘的应用。
+            // 真要退出走托盘菜单的「退出」（`request_quit`）。
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             close = true;
         }
         if close {
             self.settings_open = false;
             self.settings_place_frames = 0;
-            // 变回那个躲在屏幕外的浮窗宿主
+            self.settings_want_pos = None;
+            // 变回那个躲在屏幕外的浮窗宿主。**四条命令必须在这一帧全发完**，
+            // 不能推到后面的帧：窗口一旦缩到屏幕外，eframe 会判定它 occluded 而
+            // 只跑 `App::logic` 不跑 `App::ui`（见 epi_integration 的 update_logic_only），
+            // 于是任何「关闭之后的帧」里的逻辑都停摆，标题与边框永远改不回来。
+            // 这一帧设置窗还看得见，ui() 一定在跑，是最后的机会。
             ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
             ctx.send_viewport_cmd(ViewportCommand::Title(APP_NAME_ZH.to_string()));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1.0, 1.0)));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(-32000.0, -32000.0)));
+            tracing::debug!("设置窗已关闭，已发出恢复浮窗宿主的命令");
         }
     }
 

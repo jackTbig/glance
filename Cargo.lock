@@ -980,6 +980,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tray-icon",
+ "windows-link 0.1.3",
  "windows-sys 0.61.2",
 ]
 
