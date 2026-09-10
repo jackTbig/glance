@@ -166,6 +166,10 @@ impl Default for HotkeyCfg {
     }
 }
 
+fn default_panel_close_grace_ms() -> u64 {
+    3000
+}
+
 fn default_caption_clickable() -> String {
     "Ctrl+Alt+C".into()
 }
@@ -183,6 +187,11 @@ pub struct UiCfg {
     pub selection_icon: bool,
     /// 小图标多久不点自动消失（毫秒）
     pub icon_timeout_ms: u64,
+    /// 出结果后，鼠标不在译文面板上多久就自动收起（毫秒）。
+    /// **计时从出结果那一刻起算**，不是从面板弹出起算——悬停取词时鼠标本来就停在原文上，
+    /// 从弹出起算的话宽限期在翻译过程中就耗光了，译文一显示就秒关。
+    #[serde(default = "default_panel_close_grace_ms")]
+    pub panel_close_grace_ms: u64,
     pub font_size: f32,
     /// 面板最大宽高
     pub panel_width: f32,
@@ -199,6 +208,7 @@ impl Default for UiCfg {
             hover_enabled: true,
             selection_icon: true,
             icon_timeout_ms: 2500,
+            panel_close_grace_ms: default_panel_close_grace_ms(),
             font_size: 15.0,
             panel_width: 420.0,
             panel_max_height: 460.0,

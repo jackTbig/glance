@@ -439,6 +439,9 @@ impl App {
     }
 
     fn drain_events(&mut self) {
+        // 这一轮有没有出结果。出结果的那一刻要把「鼠标离开面板」的计时清零，
+        // 否则宽限期在翻译过程中就耗光了——见下面 `done` 的用法。
+        let mut done = false;
         while let Ok(e) = self.events.try_recv() {
             let seq = match &e {
                 Event::Captured { seq, .. } | Event::Delta { seq, .. } | Event::Done { seq, .. } | Event::Failed { seq, .. } | Event::Nothing { seq, .. } => *seq,
@@ -463,10 +466,25 @@ impl App {
                     p.translated = text;
                     p.phase = Phase::Done;
                     tracing::info!("{} 完成 {took_ms}ms", p.scene_label);
+                    done = true;
                 }
-                Event::Failed { error, .. } => p.phase = Phase::Failed(error),
-                Event::Nothing { reason, .. } => p.phase = Phase::Failed(reason),
+                Event::Failed { error, .. } => {
+                    p.phase = Phase::Failed(error);
+                    done = true;
+                }
+                Event::Nothing { reason, .. } => {
+                    p.phase = Phase::Failed(reason);
+                    done = true;
+                }
             }
+        }
+
+        // **出结果之后才开始算「鼠标离开了多久」**。
+        // 计时原本从面板弹出的第一帧就起跑，而悬停/划词时鼠标停在原文上、本来就不在面板里，
+        // 翻译又要一两秒——等译文到手，宽限期早就耗光了，于是「结果一显示就秒关」。
+        // 用户报的就是这个。清零之后，从看到结果那一刻起才有完整的宽限时间。
+        if done {
+            self.mouse_left_panel_at = None;
         }
     }
 
@@ -903,7 +921,7 @@ impl App {
         }
         let outside_for = self.mouse_left_panel_at.map(|t| t.elapsed());
         if let Some(p) = &self.panel {
-            if p.should_auto_close(outside_for, Duration::from_millis(1200)) {
+            if p.should_auto_close(outside_for, Duration::from_millis(self.cfg.ui.panel_close_grace_ms)) {
                 self.close_panel();
             }
         }
@@ -1274,6 +1292,9 @@ impl App {
         });
         Self::row(ui, "图标停留", "多久不点就自动消失", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.ui.icon_timeout_ms).range(500..=10000).suffix(" ms"));
+        });
+        Self::row(ui, "译文停留", "出结果后鼠标不在译文卡片上多久就收起；钉住或拖动过的不受此限", |ui| {
+            ui.add(egui::DragValue::new(&mut self.draft.ui.panel_close_grace_ms).range(1000..=30000).suffix(" ms"));
         });
 
         Self::section(ui, "一次性动作", "按下就直接执行，没有待命状态");

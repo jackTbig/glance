@@ -9,6 +9,7 @@ mod win {
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
     };
+    use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
@@ -41,9 +42,18 @@ mod win {
                     return Ok(Clip);
                 }
             }
+            // **`ERROR_ACCESS_DENIED`(5) 与「被别人占着」是两回事**，混着报会把排障带偏：
+            // 前者是这个进程压根没被允许开剪贴板（安全软件的剪贴板管控、UIPI 完整性级别、
+            // 非前台进程受限），重试多久都没用；后者才是争抢，退避重试有意义。
+            let err = unsafe { GetLastError() };
+            let waited = OPEN_BACKOFF_MS.iter().sum::<u64>();
+            if err == 5 {
+                anyhow::bail!(
+                    "打不开剪贴板：系统拒绝访问（错误码 5）。                     这不是被别的程序占着——多半是安全软件的剪贴板管控，或本进程完整性级别不够。                     重试无用，已等了 {waited} 毫秒。"
+                );
+            }
             anyhow::bail!(
-                "打不开剪贴板（等了 {} 毫秒仍被占用）。                 常见成因是 Windows 的剪贴板历史服务，Win+V 里可以关掉它试试；                 查不到占用进程是正常的，那类持有者不会出现在 GetOpenClipboardWindow 里",
-                OPEN_BACKOFF_MS.iter().sum::<u64>()
+                "打不开剪贴板（错误码 {err}，等了 {waited} 毫秒仍不放行）。                 常见成因是 Windows 的剪贴板历史服务；查不到占用进程是正常的，                 用 NULL 句柄开的剪贴板不会出现在 GetOpenClipboardWindow 里。                 系统级卡死时 PowerShell 的 Set-Clipboard 也会失败，重启 explorer.exe 可恢复。"
             )
         }
     }

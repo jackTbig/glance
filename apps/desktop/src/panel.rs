@@ -161,6 +161,29 @@ mod tests {
         assert_eq!(p.drag_to((620, 500)), Some((600, 460)));
     }
 
+    /// 用户报过的 bug：悬停取词「显示完成后马上消失」。
+    ///
+    /// 成因是「鼠标离开面板」的计时从面板弹出就起跑，而悬停时鼠标本来就停在原文上、
+    /// 不在面板里；翻译要一两秒，等译文到手宽限期早已耗光，于是 `Done` 的那一帧就满足关闭条件。
+    /// 修法是出结果时把计时清零（`ui::drain_events` 里的 `done`），这里钉住那个语义。
+    #[test]
+    fn result_gets_a_full_grace_period_even_if_mouse_never_entered() {
+        let grace = Duration::from_millis(3000);
+        let mut p = PanelState::new("悬停翻译", Source::Uia, (0, 0));
+
+        // 翻译中：鼠标一直在外面待了很久也不能关
+        assert!(!p.should_auto_close(Some(Duration::from_secs(5)), grace), "翻译中不能关");
+
+        // 出结果的那一刻，调用方会把计时清零 —— 传 None 表示「刚清零，还没开始算」
+        p.phase = Phase::Done;
+        assert!(!p.should_auto_close(None, grace), "刚出结果就关正是用户报的 bug");
+
+        // 清零之后重新计时，没到宽限期仍不关
+        assert!(!p.should_auto_close(Some(grace / 2), grace));
+        // 够久了才关
+        assert!(p.should_auto_close(Some(grace), grace));
+    }
+
     #[test]
     fn dragging_holds_the_card_open() {
         let mut p = PanelState::new("取词释义", Source::Uia, (0, 0));
