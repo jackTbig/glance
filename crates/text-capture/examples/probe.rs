@@ -33,7 +33,8 @@ fn main() {
                 println!("{i}... 在任意窗口里选中一段文字（别松开焦点）");
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            match c.selection() {
+            // 倒计时期间用户自己的程序就在前台，不用切
+            match c.selection(None) {
                 Ok(r) => println!("[{}] {}ms\n{}", r.source.label_zh(), r.took_ms, r.text),
                 Err(e) => println!("失败: {e}"),
             }

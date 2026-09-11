@@ -85,7 +85,9 @@ const MAX_PLACE_RETRIES: u8 = 3;
 enum Mode {
     Idle,
     /// 选区旁的小图标
-    Icon { pos: (i32, i32), since: Instant },
+    /// `target`：弹图标那一刻的前台窗口，也就是有选区的程序。点图标会把前台抢成简译自己，
+    /// 取词前必须切回它，否则模拟的 Ctrl+C 发给了简译，报「没有选中文字」（2026-09-11 Jack 报）
+    Icon { pos: (i32, i32), since: Instant, target: Option<isize> },
     /// 译文面板
     Panel,
     /// 截屏框选中
@@ -343,7 +345,9 @@ impl App {
                         tracing::debug!("划词结束于({x},{y})，但正在框选，忽略");
                     } else if self.excluded_at(x, y).is_none() {
                         tracing::debug!("划词结束于物理({x},{y})，弹小图标");
-                        self.mode = Mode::Icon { pos: (x, y), since: Instant::now() };
+                        let target = text_capture::clipboard::foreign_foreground_window();
+                        tracing::debug!("划词图标的取词目标窗口：{target:?}");
+                        self.mode = Mode::Icon { pos: (x, y), since: Instant::now(), target };
                     }
                 }
                 Trigger::Hovered { x, y } if !self.cfg.ui.hover_enabled => {
@@ -431,7 +435,8 @@ impl App {
                     if self.panel.is_some() {
                         self.close_panel();
                     } else {
-                        self.start(Job::Selection, "划词翻译", (x, y), Source::Clipboard);
+                        // 热键触发：用户的程序本来就在前台，不用切
+                        self.start(Job::Selection { target: None }, "划词翻译", (x, y), Source::Clipboard);
                     }
                 }
             }
@@ -707,7 +712,7 @@ impl eframe::App for App {
         } else {
             match self.mode.clone() {
                 Mode::Idle => self.draw_hidden(ui),
-                Mode::Icon { pos, .. } => self.draw_icon(ui, pos),
+                Mode::Icon { pos, target, .. } => self.draw_icon(ui, pos, target),
                 Mode::Panel => self.draw_panel(ui),
                 Mode::Selecting { start } => self.draw_region_selector(ui, start),
             }
@@ -726,7 +731,7 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |_| {});
     }
 
-    fn draw_icon(&mut self, ui: &mut egui::Ui, pos: (i32, i32)) {
+    fn draw_icon(&mut self, ui: &mut egui::Ui, pos: (i32, i32), target: Option<isize>) {
         let ctx = ui.ctx().clone();
         let dpi = Dpi::from_ctx(&ctx);
         // 摆放算在物理坐标系里（锚点来自 GetCursorPos），图标边长是逻辑像素，先换成物理
@@ -752,7 +757,7 @@ impl App {
             }
         });
         if clicked {
-            self.start(Job::Selection, "划词翻译", pos, Source::Clipboard);
+            self.start(Job::Selection { target }, "划词翻译", pos, Source::Clipboard);
         }
     }
 

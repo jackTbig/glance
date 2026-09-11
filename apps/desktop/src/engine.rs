@@ -7,8 +7,8 @@ use text_capture::{Capturer, Source};
 /// 界面发给工作线程的活
 #[derive(Debug, Clone)]
 pub enum Job {
-    /// 划词：自己去取选中文本
-    Selection,
+    /// 划词：自己去取选中文本。`target` 是有选区的窗口，见 `Capturer::selection`
+    Selection { target: Option<isize> },
     /// 悬停：取该点的文字
     Hover { x: i32, y: i32 },
     /// 截屏区域
@@ -69,7 +69,7 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
     // 第一步：拿到原文与场景
     let (scene, text, source) = match job {
         Job::Text { scene, text } => (scene, text, Source::Clipboard),
-        Job::Selection => match capturer.selection() {
+        Job::Selection { target } => match capturer.selection(target) {
             Ok(c) if !c.is_empty() => (Scene::Selection, c.text, c.source),
             Ok(_) => {
                 let _ = ev.send(Event::Nothing { seq, reason: "没有选中文字".into() });

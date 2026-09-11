@@ -116,9 +116,11 @@ impl Capturer {
     }
 
     /// 划词：当前选中的文本
-    pub fn selection(&self) -> anyhow::Result<Captured> {
+    /// `target`：有选区的窗口（弹划词图标时记下的）。点图标会把前台抢走，必须先切回它再复制。
+    /// 热键触发时用户的程序本来就在前台，传 None。
+    pub fn selection(&self, target: Option<isize>) -> anyhow::Result<Captured> {
         let t0 = std::time::Instant::now();
-        let text = clipboard::selected_text()?;
+        let text = clipboard::selected_text_from(target)?;
         Ok(Captured { text: text.trim().to_string(), source: Source::Clipboard, took_ms: t0.elapsed().as_millis() })
     }
 

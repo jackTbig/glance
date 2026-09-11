@@ -1,5 +1,11 @@
 //! 划词：保存剪贴板 → 模拟 Ctrl+C → 读取新内容 → 还原剪贴板
 //!
+//! **模拟的 Ctrl+C 只会发给前台窗口。** 用户点「译」图标时，简译自己的窗口会被激活成前台，
+//! 那一下 Ctrl+C 就发给了简译，有选区的程序根本没收到——剪贴板不变，被判成「没有选中文字」
+//! （2026-09-11 Jack 报）。所以从图标触发的取词一律走 [`selected_text_from`]：
+//! 先把弹图标那一刻记下的前台窗口切回来、确认切过去了，再发 Ctrl+C。
+//! 回归探针：`cargo run -p text-capture --example focus_probe`。
+//!
 //! 已知限制：还原只还原 Unicode 文本。原剪贴板里是图片或文件时，划词后会丢失。
 
 #[cfg(windows)]
@@ -13,6 +19,10 @@ mod win {
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
+    };
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
     };
 
     const CF_UNICODETEXT: u32 = 13;
@@ -129,6 +139,67 @@ mod win {
     }
 
     /// 取当前选中的文本。整个过程保存并还原原剪贴板内容。
+    /// 当前前台窗口，**不属于本进程时**才返回。
+    ///
+    /// 弹划词图标那一刻调用：这时前台就是用户刚拖选文字的程序。
+    /// 属于本进程（比如用户在简译自己的卡片上拖了一下）就返回 None，别把自己记成取词目标。
+    pub fn foreign_foreground_window() -> Option<isize> {
+        unsafe {
+            let h = GetForegroundWindow();
+            if h.is_null() {
+                return None;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            (pid != std::process::id()).then_some(h as isize)
+        }
+    }
+
+    /// 把指定窗口切回前台，并确认真的切过去了。
+    ///
+    /// 用户刚点了简译的图标，简译此刻是前台，有权把前台交出去；
+    /// 仍然先把输入队列挂到前台线程与目标线程上——没有前台权限时 SetForegroundWindow 会被系统忽略
+    /// （托盘弹菜单用的是同一招）。
+    fn bring_to_front(target: isize) -> bool {
+        unsafe {
+            if GetForegroundWindow() as isize == target {
+                return true;
+            }
+            let me = GetCurrentThreadId();
+            let fg_thread = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            let target_thread = GetWindowThreadProcessId(target as HWND, std::ptr::null_mut());
+            AttachThreadInput(me, fg_thread, 1);
+            AttachThreadInput(me, target_thread, 1);
+            BringWindowToTop(target as HWND);
+            SetForegroundWindow(target as HWND);
+            AttachThreadInput(me, target_thread, 0);
+            AttachThreadInput(me, fg_thread, 0);
+        }
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < deadline {
+            if unsafe { GetForegroundWindow() } as isize == target {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        false
+    }
+
+    /// 从指定窗口取选中的文字：先切回它，再模拟 Ctrl+C。`target` 为 None 就用当前前台（热键触发时）。
+    ///
+    /// 切不回去就报错，不假装「没有选中文字」——那样用户会以为是自己没选好，反复重选。
+    pub fn selected_text_from(target: Option<isize>) -> anyhow::Result<String> {
+        if let Some(t) = target {
+            if unsafe { IsWindow(t as HWND) } == 0 {
+                anyhow::bail!("选中文字的那个窗口已经关了，请重新选中再试");
+            }
+            if !bring_to_front(t) {
+                anyhow::bail!("没能切回选中文字的那个窗口，请先点一下那个窗口再重新选中");
+            }
+        }
+        selected_text()
+    }
+
     pub fn selected_text() -> anyhow::Result<String> {
         let saved = get_text().unwrap_or_default();
         let before = unsafe { GetClipboardSequenceNumber() };
@@ -145,9 +216,26 @@ mod win {
             }
         }
         if !changed {
-            return Ok(String::new()); // 没有选中内容，或目标程序不支持复制
+            // 没有选中内容、目标程序不支持复制，或者 Ctrl+C 根本没发到有选区的窗口。
+            // 记下前台窗口的进程：「前台是简译自己」一眼就能看出是焦点被抢走了
+            let fg = unsafe { GetForegroundWindow() };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+            tracing::debug!(
+                "模拟 Ctrl+C 后剪贴板没有变化：前台窗口 {:?} 属于进程 {pid}（本进程 {}）",
+                fg,
+                std::process::id()
+            );
+            return Ok(String::new());
         }
-        let text = get_text().unwrap_or_default();
+        // 读失败别吞掉：剪贴板被拒绝访问时也会表现成「取到空文本」，不留痕迹就查不到
+        let text = match get_text() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("剪贴板已更新，但读取失败：{e}");
+                String::new()
+            }
+        };
         // 还原原内容（原来就是空的话不用动）
         if !saved.is_empty() {
             let _ = set_text(&saved);
@@ -157,7 +245,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{get_text, selected_text, set_text};
+pub use win::{foreign_foreground_window, get_text, selected_text, selected_text_from, set_text};
 
 #[cfg(not(windows))]
 pub fn get_text() -> anyhow::Result<String> {
@@ -170,6 +258,14 @@ pub fn set_text(_t: &str) -> anyhow::Result<()> {
 #[cfg(not(windows))]
 pub fn selected_text() -> anyhow::Result<String> {
     anyhow::bail!("当前平台不支持划词")
+}
+#[cfg(not(windows))]
+pub fn selected_text_from(_target: Option<isize>) -> anyhow::Result<String> {
+    anyhow::bail!("当前平台不支持划词")
+}
+#[cfg(not(windows))]
+pub fn foreign_foreground_window() -> Option<isize> {
+    None
 }
 
 #[cfg(all(test, windows))]
