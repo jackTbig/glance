@@ -596,6 +596,15 @@ impl App {
         self.mouse_left_panel_at = None;
     }
 
+    /// 设置窗里有没有还没保存的改动。
+    ///
+    /// 直接比 `draft` 与 `cfg`：打开设置窗时 `draft` 从 `cfg` 克隆，保存成功时 `cfg` 取 `draft`。
+    /// 所以**任何绕开设置窗改 `cfg` 的地方都要同步改 `draft`**（热键开关悬停/划词就是这么做的），
+    /// 否则用户什么都没动，保存按钮也亮着。
+    fn settings_dirty(&self) -> bool {
+        self.draft != self.cfg
+    }
+
     fn apply_settings(&mut self) {
         match ai_translate::Translator::new(self.draft.translator_config()) {
             Ok(t) => {
@@ -1058,7 +1067,6 @@ impl App {
                 if off > 4.0 && self.settings_place_retries < MAX_PLACE_RETRIES {
                     self.settings_place_retries += 1;
                     self.settings_place_frames = PLACE_FRAMES;
-        self.settings_place_retries = 0;
                     tracing::warn!("设置窗摆歪了（实际{actual:?} 期望{want:?}），第 {} 次重摆", self.settings_place_retries);
                 } else {
                     // 摆对了（或重试用尽）就别再管，否则用户拖动窗口会被拽回来
@@ -1068,6 +1076,11 @@ impl App {
         }
 
         let mut close = false;
+
+        // 存完又改了：「已保存并生效」这句话就过时了，留着会和亮起的保存按钮自相矛盾
+        if self.settings_dirty() && self.settings_msg.starts_with("已保存") {
+            self.settings_msg.clear();
+        }
 
         let mut do_apply = false;
         let mut do_test = false;
@@ -1090,7 +1103,12 @@ impl App {
             ui.add_space(10.0);
             ui.separator();
             ui.add_space(8.0);
-            do_apply = ui.add_sized([92.0, 26.0], egui::Button::new(RichText::new("保存并应用").size(12.0))).clicked();
+            // 有没保存的改动时按钮填成主色，一眼看出「改了还没存」；存完（draft 与 cfg 相等）自动变回来
+            let dirty = self.settings_dirty();
+            do_apply = ui
+                .add_sized([92.0, 26.0], save_button(dirty))
+                .on_hover_text(if dirty { "有改动还没保存" } else { "没有改动" })
+                .clicked();
             ui.add_space(3.0);
             do_test = ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("测试翻译").size(12.0))).clicked();
             ui.add_space(3.0);
@@ -1525,6 +1543,7 @@ impl App {
     pub fn open_settings(&mut self) {
         self.draft = self.cfg.clone();
         self.settings_open = true;
+        self.settings_place_retries = 0;
         // 连摆 5 帧（约 165 ms）保证命令落地；只摆一帧会偶发丢失
         self.settings_place_frames = PLACE_FRAMES;
     }
@@ -1600,6 +1619,19 @@ fn draw_entry(ui: &mut egui::Ui, e: &crate::dict::Entry, original: &str, base: f
     }
 }
 
+/// 有未保存改动时「保存并应用」填成的颜色：与划词小图标同一个蓝，界面上只有一种强调色
+const SAVE_DIRTY_FILL: Color32 = Color32::from_rgb(40, 90, 180);
+
+/// 设置窗的「保存并应用」按钮。`dirty` 时填主色、白字，否则就是普通按钮
+fn save_button(dirty: bool) -> egui::Button<'static> {
+    let text = RichText::new("保存并应用").size(12.0);
+    if dirty {
+        egui::Button::new(text.color(Color32::WHITE).strong()).fill(SAVE_DIRTY_FILL)
+    } else {
+        egui::Button::new(text)
+    }
+}
+
 fn scene_of(label: &str) -> Scene {
     match label {
         "整页翻译" => Scene::FullPage,
@@ -1625,6 +1657,29 @@ mod tests {
         for sc in Scene::ALL {
             assert_eq!(scene_of(sc.label_zh()), sc);
         }
+    }
+
+    /// 画一帧按钮，收集它画出来的矩形填充色
+    fn fills_of(dirty: bool) -> Vec<Color32> {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.add(save_button(dirty));
+        });
+        // 没有渲染器来消费字体纹理，不清掉的话 epaint 在 Drop 里断言失败
+        out.textures_delta.clear();
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) => Some(r.fill),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn save_button_is_highlighted_only_when_dirty() {
+        assert!(fills_of(true).contains(&SAVE_DIRTY_FILL), "有改动时按钮要填主色");
+        assert!(!fills_of(false).contains(&SAVE_DIRTY_FILL), "没改动时按钮不该是主色");
     }
 
     #[test]
