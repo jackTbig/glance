@@ -11,7 +11,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.0.0"
+#define AppVer "1.0.1"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -127,7 +127,7 @@ begin
   S := '';
   if IsComponentSelected('caption') then
   begin
-    if not FileExists(ExpandConstant('{sys}ulkan-1.dll')) then
+    if not FileExists(ExpandConstant('{sys}\vulkan-1.dll')) then
       S := S + 'X Vulkan 运行库：未检测到 vulkan-1.dll' + #13#10 +
                '   影响：「实时字幕」完全无法启动——不是没有 GPU 加速，它是加载期依赖，' + #13#10 +
                '   缺了 Windows 会直接拒绝启动该程序。简译（翻译工具）本身不受影响。' + #13#10 +
