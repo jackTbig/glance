@@ -9,8 +9,8 @@ use text_capture::{Capturer, Source};
 pub enum Job {
     /// 划词：自己去取选中文本。`target` 是有选区的窗口，见 `Capturer::selection`
     Selection { target: Option<isize> },
-    /// 悬停：取该点的文字
-    Hover { x: i32, y: i32 },
+    /// 悬停：取该点的文字。`skip_target_lang` = 取到的已经是目标语言时不出卡片
+    Hover { x: i32, y: i32, skip_target_lang: bool },
     /// 截屏区域
     Region { x: i32, y: i32, w: u32, h: u32 },
     /// 已有文本，直接翻（重试按钮用）
@@ -28,6 +28,8 @@ pub enum Event {
     Failed { seq: u64, error: String },
     /// 什么都没取到
     Nothing { seq: u64, reason: String },
+    /// 取到了，但不用翻（已经是目标语言），**界面要静默收掉卡片**，不是报错
+    Skipped { seq: u64 },
 }
 
 pub struct Engine {
@@ -66,6 +68,8 @@ impl Engine {
 
 fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &Arc<Capturer>, ev: &Sender<Event>) {
     let t0 = std::time::Instant::now();
+    // 方向现取：设置里改完立刻生效，不用重启
+    let dir = translator.lock().unwrap().config().direction;
     // 第一步：拿到原文与场景
     let (scene, text, source) = match job {
         Job::Text { scene, text } => (scene, text, Source::Clipboard),
@@ -80,9 +84,15 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
                 return;
             }
         },
-        Job::Hover { x, y } => match capturer.at_point(x, y) {
+        Job::Hover { x, y, skip_target_lang } => match capturer.at_point(x, y) {
             Ok(c) if !c.is_empty() => {
                 tracing::debug!("悬停取词命中 物理({x},{y}) 来源{} {}字", c.source.label_zh(), c.text.chars().count());
+                // 已经是目标语言就别弹卡片：鼠标扫过中文一路弹窗最烦人
+                if skip_target_lang && dir.already_target(&c.text) {
+                    tracing::debug!("悬停取到的已经是目标语言（{}），不弹卡片", dir.label_zh());
+                    let _ = ev.send(Event::Skipped { seq });
+                    return;
+                }
                 (Scene::Hover, c.text, c.source)
             }
             Ok(_) => {
@@ -114,7 +124,7 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
     // 取到的只是一个词或短语时，用户要的是释义而不是一句译文（有道那种取词卡）。
     // 判定放在取词之后：划词与悬停都可能取到单个词，重试走 Job::Text 时场景已经定好了。
     let scene = match scene {
-        Scene::Selection | Scene::Hover if ai_translate::scene::looks_like_word(&text) => Scene::Word,
+        Scene::Selection | Scene::Hover if ai_translate::scene::looks_like_word_in(&text, dir) => Scene::Word,
         other => other,
     };
     let _ = ev.send(Event::Captured { seq, text: text.clone(), source, scene, took_ms: t0.elapsed().as_millis() });

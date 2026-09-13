@@ -5,6 +5,7 @@
 pub mod backend;
 pub mod batch;
 pub mod claude;
+pub mod direction;
 pub mod codex;
 pub mod engine;
 pub mod glossary;
@@ -18,6 +19,7 @@ pub mod translator;
 pub mod util;
 
 pub use backend::{Backend, BackendConfig};
+pub use direction::Direction;
 pub use engine::{test_translate, Engine};
 pub use glossary::{Glossary, GlossaryEntry};
 pub use retry::RetryPolicy;

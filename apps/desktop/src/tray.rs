@@ -8,6 +8,8 @@ pub use desktop_shell::tray::show_menu;
 pub const MENU_SETTINGS: u32 = 1;
 pub const MENU_PAUSE: u32 = 2;
 pub const MENU_QUIT: u32 = 3;
+/// 一键换翻译方向（英译中 ⇄ 中译英）。设置窗里也有，但这个是随手就能点到的
+pub const MENU_DIRECTION: u32 = 4;
 // 实时字幕那一块。字幕是子进程，这些项转成控制命令发过去（见 `crate::caption`）。
 pub const MENU_CAPTION_TOGGLE: u32 = 10;
 pub const MENU_CAPTION_PAUSE: u32 = 11;

@@ -55,6 +55,27 @@ impl Scene {
 ///
 /// 判据只认拉丁字母的词：目标语言本来就是中文，中文段会被跳过；
 /// 日韩文的汉字与中文难以区分，一并排除，免得把中文段误判成查词。
+/// 按方向判「够不够格当查词」。
+///
+/// 中译英时要认**短的中文词**，否则「渲染」「并发」这种词会被当成句子翻、拿不到释义；
+/// 英译中仍然只认拉丁词（理由见 [`looks_like_word`]）。
+pub fn looks_like_word_in(s: &str, dir: crate::direction::Direction) -> bool {
+    match dir {
+        crate::direction::Direction::ToChinese => looks_like_word(s),
+        crate::direction::Direction::ToEnglish => looks_like_chinese_word(s),
+    }
+}
+
+/// 短中文词：去掉首尾标点后 1..=8 个字、全是汉字、不跨行。
+/// 长度上限比英文那边小：中文一个字信息量大，超过八个字基本就是短句了。
+pub fn looks_like_chinese_word(s: &str) -> bool {
+    let t = s.trim().trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace() || "「」『』（）《》，。；：！？、“”‘’".contains(c));
+    let n = t.chars().count();
+    (1..=8).contains(&n)
+        && !t.contains('\n')
+        && t.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c) || ('\u{3400}'..='\u{4dbf}').contains(&c))
+}
+
 pub fn looks_like_word(s: &str) -> bool {
     // 首尾的引号、括号、句读都不算词的一部分（划词很容易多带一个）
     let t = s.trim().trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace() || "「」『』（）《》，。；：！？、“”‘’".contains(c));
@@ -89,6 +110,22 @@ fn is_cjk(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 中译英时要认中文词，否则中文词拿不到词典卡；英译中时仍然只认拉丁词
+    #[test]
+    fn word_lookup_follows_direction() {
+        use crate::direction::Direction;
+        for s in ["渲染", "并发", "内存泄漏"] {
+            assert!(looks_like_word_in(s, Direction::ToEnglish), "中译英应当认中文词：{s}");
+            assert!(!looks_like_word_in(s, Direction::ToChinese), "英译中不认中文词：{s}");
+        }
+        for s in ["glance", "open source"] {
+            assert!(looks_like_word_in(s, Direction::ToChinese), "英译中认拉丁词：{s}");
+            assert!(!looks_like_word_in(s, Direction::ToEnglish), "中译英不把英文词当查词：{s}");
+        }
+        // 长中文是句子，不是词
+        assert!(!looks_like_word_in("这是一句很长的中文句子用来测试", Direction::ToEnglish));
+    }
 
     #[test]
     fn word_lookup_only_for_short_latin_terms() {

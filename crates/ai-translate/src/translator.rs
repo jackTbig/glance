@@ -7,6 +7,7 @@ use crate::html_guard;
 use crate::openai::OpenAi;
 use crate::prompts;
 use crate::retry::{with_retry, RetryPolicy};
+use crate::direction::Direction;
 use crate::scene::Scene;
 use crate::semaphore::Semaphore;
 use std::collections::HashMap;
@@ -38,6 +39,8 @@ pub struct TranslatorConfig {
     pub batch_size: usize,
     pub retry: RetryPolicy,
     pub glossary: Glossary,
+    /// 翻译方向（默认英译中）。影响提示词、「已经是目标语言」的判据与查词规则
+    pub direction: Direction,
 }
 
 impl Default for TranslatorConfig {
@@ -49,6 +52,7 @@ impl Default for TranslatorConfig {
             batch_size: 10,
             retry: RetryPolicy::default(),
             glossary: Glossary::default(),
+            direction: Direction::default(),
         }
     }
 }
@@ -143,7 +147,7 @@ impl Translator {
             return Ok(String::new());
         }
         let route = self.inner.cfg.route(scene);
-        let sys = prompts::system_prompt(scene, None);
+        let sys = prompts::system_prompt(scene, None, self.inner.cfg.direction);
         let msg = self.user_message(scene, text, context);
         match route.backend {
             Backend::OpenAi => {
@@ -193,7 +197,7 @@ impl Translator {
         let mut results: Vec<Option<ItemResult>> = (0..n).map(|_| None).collect();
         let mut pending: Vec<usize> = Vec::new();
         for (i, it) in items.iter().enumerate() {
-            if it.text.trim().is_empty() || is_mostly_chinese(&it.text) {
+            if it.text.trim().is_empty() || self.inner.cfg.direction.already_target(&it.text) {
                 results[i] = Some(ItemResult { id: it.id.clone(), result: Ok(it.text.clone()) });
             } else {
                 pending.push(i);
@@ -246,7 +250,7 @@ impl Translator {
             })
             .collect();
         let packed = batch::pack(&protected.iter().map(|p| p.text.as_str()).collect::<Vec<_>>());
-        let sys = prompts::system_prompt(scene, None);
+        let sys = prompts::system_prompt(scene, None, self.inner.cfg.direction);
         let msg = self.user_message(scene, &packed, None);
         let reply = with_retry(&self.inner.cfg.retry, || {
             let _p = self.inner.sem.acquire();

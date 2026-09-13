@@ -143,6 +143,8 @@ pub struct App {
     place_tries: u8,
     /// 当前有效的任务序号，用来丢弃过期事件
     cur_seq: u64,
+    /// 已经发了任务、但还没弹卡片（悬停用，见 `start_deferred`）：(场景标题, 来源, 锚点)
+    pending_panel: Option<(&'static str, Source, (i32, i32))>,
     mouse_left_panel_at: Option<Instant>,
     /// 状态提示卡片什么时候自己收掉
     notice_until: Option<Instant>,
@@ -296,6 +298,7 @@ impl App {
             logged_card_w: None,
             logged_content_w: None,
             cur_seq: 0,
+            pending_panel: None,
             mouse_left_panel_at: None,
             notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
@@ -374,6 +377,18 @@ impl App {
         self.mouse_left_panel_at = None;
     }
 
+    /// 与 [`Self::start`] 一样发任务，但**先不弹卡片**：等第一条有内容的回包再弹。
+    ///
+    /// 悬停专用。悬停是鼠标扫过就触发的被动动作，取到的若是目标语言（比如英译中时扫到中文），
+    /// 整张卡片都不该出现；先弹再收会闪一下，比不弹更烦人。
+    fn start_deferred(&mut self, job: Job, scene_label: &'static str, anchor: (i32, i32), source: Source) {
+        tracing::info!("{scene_label} 开始（先不弹卡片），锚点物理({},{}) job={job:?}", anchor.0, anchor.1);
+        self.cur_seq = self.engine.submit(job);
+        self.panel = None;
+        self.pending_panel = Some((scene_label, source, anchor));
+        self.mouse_left_panel_at = None;
+    }
+
     /// 该点所在进程是否在例外列表里。
     /// 命中会静默吞掉悬停与小图标，所以一定要打日志：不然表现就是「按住 Alt 没反应」。
     fn excluded_at(&self, x: i32, y: i32) -> Option<String> {
@@ -420,7 +435,10 @@ impl App {
                         self.mode = Mode::Panel;
                         self.cur_seq = 0;
                     } else {
-                        self.start(Job::Hover { x, y }, "悬停翻译", (x, y), Source::Uia);
+                        // 悬停不立刻弹卡片：取到的可能是目标语言（那就整张不出），
+                        // 先记下来，等真取到要翻的内容再弹
+                        let skip = self.cfg.ui.hover_skip_target_lang;
+                        self.start_deferred(Job::Hover { x, y, skip_target_lang: skip }, "悬停翻译", (x, y), Source::Uia);
                     }
                 }
             }
@@ -504,10 +522,29 @@ impl App {
         let mut done = false;
         while let Ok(e) = self.events.try_recv() {
             let seq = match &e {
-                Event::Captured { seq, .. } | Event::Delta { seq, .. } | Event::Done { seq, .. } | Event::Failed { seq, .. } | Event::Nothing { seq, .. } => *seq,
+                Event::Captured { seq, .. }
+                | Event::Delta { seq, .. }
+                | Event::Done { seq, .. }
+                | Event::Failed { seq, .. }
+                | Event::Nothing { seq, .. }
+                | Event::Skipped { seq } => *seq,
             };
             if seq != self.cur_seq {
                 continue; // 过期
+            }
+            // 不用翻：静默收掉，连卡片都不弹（开关在设置里，默认开）
+            if let Event::Skipped { .. } = e {
+                tracing::info!("取到的已经是目标语言，跳过翻译（设置里可关掉「遇目标语言不弹卡片」）");
+                self.pending_panel = None;
+                self.close_panel();
+                continue;
+            }
+            // 延后弹卡片的任务（悬停）：到这里说明确实有要翻的内容，补弹
+            if self.panel.is_none() {
+                if let Some((label, source, anchor)) = self.pending_panel.take() {
+                    self.panel = Some(PanelState::new(label, source, anchor));
+                    self.mode = Mode::Panel;
+                }
             }
             let Some(p) = self.panel.as_mut() else { continue };
             match e {
@@ -540,6 +577,8 @@ impl App {
                     p.phase = Phase::Failed(reason);
                     done = true;
                 }
+                // 上面已经处理并 continue 了，这里只是让编译器满意
+                Event::Skipped { .. } => {}
             }
         }
 
@@ -556,7 +595,7 @@ impl App {
     fn drain_tray(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         use crate::tray::{
             MENU_CAPTION_CLICKABLE, MENU_CAPTION_MINI, MENU_CAPTION_PAUSE, MENU_CAPTION_SETTINGS, MENU_CAPTION_TOGGLE,
-            MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
+            MENU_DIRECTION, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
         };
         use desktop_shell::caption_ipc::Command;
         use desktop_shell::tray::{Action, Input};
@@ -589,6 +628,11 @@ impl App {
         let mut items = vec![
             (MENU_SETTINGS, "设置…".to_string(), false),
             (MENU_PAUSE, "暂停取词".to_string(), self.paused),
+            (
+                MENU_DIRECTION,
+                format!("翻译方向：{}", ai_translate::Direction::parse(&self.cfg.direction).label_zh()),
+                false,
+            ),
         ];
         // 实时字幕那一块。装了才显示——没装时列一堆点不动的项只会让人以为坏了。
         // 弹菜单前要**同步**读一次子进程的勾选态：暂停/迷你/穿透三个勾是它的状态，
@@ -609,6 +653,7 @@ impl App {
         items.push((MENU_QUIT, "退出".to_string(), false));
         match crate::tray::show_menu(hwnd, x, y, &items) {
             Some(MENU_SETTINGS) => self.open_settings(),
+            Some(MENU_DIRECTION) => self.flip_direction(),
             Some(MENU_PAUSE) => {
                 self.paused = !self.paused;
                 self.watcher.set_paused(self.paused);
@@ -662,6 +707,22 @@ impl App {
     /// 否则用户什么都没动，保存按钮也亮着。
     fn settings_dirty(&self) -> bool {
         self.draft != self.cfg
+    }
+
+    /// 换翻译方向（托盘菜单）。**必须重建 translator**：方向进的是提示词，
+    /// 只改配置不重建的话，切了以后还按老方向翻，用户会以为开关坏了
+    fn flip_direction(&mut self) {
+        let next = ai_translate::Direction::parse(&self.cfg.direction).flip();
+        self.cfg.direction = next.as_str().to_string();
+        self.draft.direction = self.cfg.direction.clone();
+        match ai_translate::Translator::new(self.cfg.translator_config()) {
+            Ok(t) => *self.translator.lock().unwrap() = t,
+            Err(e) => tracing::warn!("换方向后重建翻译器失败：{e}"),
+        }
+        tracing::info!("翻译方向切换为{}", next.label_zh());
+        let (x, y) = text_capture::screen::cursor_pos();
+        self.notice("翻译方向", format!("已切换为{}", next.label_zh()), (x, y));
+        let _ = self.cfg.save();
     }
 
     fn apply_settings(&mut self) {
@@ -1422,6 +1483,14 @@ impl App {
     }
 
     fn settings_service(&mut self, ui: &mut egui::Ui) {
+        Self::row(ui, "翻译方向", "决定所有场景翻成哪种语言；托盘菜单里也能随手切", |ui| {
+            let cur = ai_translate::Direction::parse(&self.draft.direction);
+            egui::ComboBox::from_id_salt("direction").width(104.0).selected_text(cur.label_zh()).show_ui(ui, |ui| {
+                for d in [ai_translate::Direction::ToChinese, ai_translate::Direction::ToEnglish] {
+                    ui.selectable_value(&mut self.draft.direction, d.as_str().to_string(), d.label_zh());
+                }
+            });
+        });
         Self::row(ui, "接口地址", "DeepSeek 填 https://api.deepseek.com；通义千问填 dashscope 的兼容地址", |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_base_url).desired_width(FIELD_W));
         });
@@ -1517,6 +1586,10 @@ impl App {
         });
         Self::row(ui, "图标停留", "多久不点就自动消失", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.ui.icon_timeout_ms).range(500..=10000).suffix(" ms"));
+        });
+        let skip_label = if self.draft.ui.hover_skip_target_lang { "不弹卡片" } else { "照样弹" };
+        Self::row(ui, "遇目标语言", "悬停取到的已经是目标语言时（英译中时扫到中文）要不要出卡片", |ui| {
+            ui.checkbox(&mut self.draft.ui.hover_skip_target_lang, skip_label);
         });
         Self::row(ui, "译文停留", "出结果后鼠标不在译文卡片上多久就收起；钉住或拖动过的不受此限", |ui| {
             ui.add(egui::DragValue::new(&mut self.draft.ui.panel_close_grace_ms).range(1000..=30000).suffix(" ms"));

@@ -18,6 +18,14 @@ pub struct Config {
     pub ui: UiCfg,
     pub server: ServerCfg,
     pub glossary: Vec<GlossaryItem>,
+    /// 翻译方向：en2zh（默认，英译中）/ zh2en（中译英）。
+    /// 认不出来的值一律当默认方向，别因为手改错配置就翻不动
+    #[serde(default = "default_direction")]
+    pub direction: String,
+}
+
+fn default_direction() -> String {
+    ai_translate::Direction::default().as_str().to_string()
 }
 
 impl Default for Config {
@@ -30,6 +38,7 @@ impl Default for Config {
             ui: UiCfg::default(),
             server: ServerCfg::default(),
             glossary: Vec::new(),
+            direction: default_direction(),
         }
     }
 }
@@ -200,6 +209,15 @@ pub struct UiCfg {
     /// **默认为空**：预置名单会让用户在自己常用的窗口里悬停毫无反应，
     /// 而且失败是静默的，很难想到是被名单挡了（Jack 2026-09-09 实测踩过）。
     pub excluded_processes: Vec<String>,
+    /// 悬停取到的文字**已经是目标语言**时，干脆不弹卡片（Jack 2026-09-14 要求）。
+    /// 悬停是被动触发的：鼠标扫过中文就弹一张「这已经是中文」的卡片非常烦人。
+    /// 划词与截屏是用户主动点的，不受这个开关影响——不弹反而像是没反应。
+    #[serde(default = "default_true")]
+    pub hover_skip_target_lang: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UiCfg {
@@ -213,6 +231,7 @@ impl Default for UiCfg {
             panel_width: 420.0,
             panel_max_height: 460.0,
             excluded_processes: Vec::new(),
+            hover_skip_target_lang: true,
         }
     }
 }
@@ -373,6 +392,7 @@ impl Config {
                 max_retries: b.max_retries.min(10),
                 base_delay: std::time::Duration::from_secs(1),
             },
+            direction: ai_translate::Direction::parse(&self.direction),
             glossary: ai_translate::Glossary::new(
                 self.glossary
                     .iter()
@@ -386,6 +406,24 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direction_defaults_to_chinese_and_round_trips() {
+        let c = Config::default();
+        assert_eq!(c.translator_config().direction, ai_translate::Direction::ToChinese, "默认英译中");
+        let mut c2 = Config::default();
+        c2.direction = "zh2en".into();
+        assert_eq!(c2.translator_config().direction, ai_translate::Direction::ToEnglish);
+        // 手改坏了也要能翻译，回到默认方向
+        let mut c3 = Config::default();
+        c3.direction = "乱写".into();
+        assert_eq!(c3.translator_config().direction, ai_translate::Direction::ToChinese);
+    }
+
+    #[test]
+    fn hover_skips_target_language_by_default() {
+        assert!(Config::default().ui.hover_skip_target_lang, "鼠标扫过中文默认不弹卡片");
+    }
 
     #[test]
     fn default_round_trips_through_toml() {
