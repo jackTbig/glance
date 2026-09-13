@@ -984,7 +984,14 @@ impl App {
                 dragging = dr.dragged();
                 drag_stopped = dr.drag_stopped();
                 ui.separator();
-                let out = egui::ScrollArea::vertical().max_height(h - 90.0).show(ui, |ui| {
+                // **横向必须铺满卡片**：默认 `auto_shrink` 两个方向都开，横向会把内容区
+                // 连同滚动条一起缩到「最宽那一行」的宽度——截屏识别出来的多是短行（最宽约 400），
+                // 于是卡片明明很宽，文字和滚动条却挤在左边一条，右边一大片空白
+                // （2026-09-13 Jack 截图实证）。纵向仍然跟着内容收缩，短译文才不拖一截空白。
+                let out = egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .max_height(h - 90.0)
+                    .show(ui, |ui| {
                     if let Some(e) = &entry {
                         // 词典卡：词头本身就是原文，不再另起一行灰色原文，省得重复
                         draw_entry(ui, e, &p.original, base);
