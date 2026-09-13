@@ -450,6 +450,7 @@ impl App {
                     let _ = self.cfg.save();
                 }
                 HotkeyAction::Screenshot => {
+                    tracing::info!("进入截屏框选");
                     self.mode = Mode::Selecting { start: None };
                     self.panel = None;
                     self.pending_region = None;
@@ -1071,21 +1072,33 @@ impl App {
         let to_phys = move |p: egui::Pos2| -> (i32, i32) {
             (((win.x + p.x) * ppp).round() as i32, ((win.y + p.y) * ppp).round() as i32)
         };
+        // 反向：虚拟屏物理坐标 → 窗口内逻辑坐标（画框用）
+        let to_local = move |(x, y): (i32, i32)| -> egui::Pos2 {
+            egui::pos2(x as f32 / ppp - win.x, y as f32 / ppp - win.y)
+        };
         let mut finish: Option<(i32, i32, u32, u32)> = None;
         let mut cancel = false;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(0, 0, 0, 90)))
             .show(root_ui, |ui| {
-                // 按下点与当前点都取自指针事件，画框直接用窗口内坐标，中间不过一道换算，
-                // 所以画出来的框与鼠标严格一致
-                let press = ui.input(|i| i.pointer.press_origin());
-                let cur = ui.input(|i| i.pointer.latest_pos());
+                // 当前点取自指针事件（不是每帧轮询系统鼠标），框才跟得上手。
+                // **起点必须自己记**：egui 的 `press_origin` 在松开那一帧就被清空了，
+                // 而我们恰好在那一帧算最终矩形——读它的话既画不出框也出不来卡片
+                // （2026-09-13 Jack 实测：框没了、译文卡片也没了）。
+                let (cur, press, pressed_now, released_now) = ui.input(|i| {
+                    (
+                        i.pointer.latest_pos().or(i.pointer.interact_pos()),
+                        i.pointer.press_origin(),
+                        i.pointer.any_pressed(),
+                        i.pointer.any_released(),
+                    )
+                });
                 let painter = ui.painter();
-                if let (true, Some(a), Some(c)) = (start.is_some(), press, cur) {
-                    let (ax, ay) = to_phys(a);
+                if let (Some(s), Some(c)) = (start, cur) {
+                    let (ax, ay) = s;
                     let (mx, my) = to_phys(c);
-                    let r = egui::Rect::from_two_pos(a, c);
+                    let r = egui::Rect::from_two_pos(to_local(s), c);
                     painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
                     painter.rect_stroke(r, CornerRadius::ZERO, egui::Stroke::new(1.5, Color32::from_rgb(120, 180, 255)), egui::StrokeKind::Inside);
                     painter.text(
@@ -1105,18 +1118,31 @@ impl App {
                         Color32::WHITE,
                     );
                 }
-                let resp = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
-                if resp.drag_started() {
-                    self.mode = Mode::Selecting { start: press.map(to_phys) };
+                let _resp = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
+                // **按下那一帧就记起点**，不等 egui 判定「开始拖动」：那要先走完拖拽阈值，
+                // 期间鼠标已经移开一截，框的起点就落在按下点后面
+                // （2026-09-13 实测差了 90 物理像素，Jack 报的「框与鼠标有偏差」就是这个）
+                if pressed_now && start.is_none() {
+                    let from = press.or(cur).map(to_phys);
+                    tracing::info!(
+                        "框选开始于物理{from:?}（窗口原点逻辑{win:?} ppp={ppp} 指针窗口内{cur:?} 系统鼠标{:?}）",
+                        text_capture::screen::cursor_pos()
+                    );
+                    self.mode = Mode::Selecting { start: from };
                 }
-                if resp.drag_stopped() {
-                    if let (Some(a), Some(c)) = (press, cur) {
-                        let ((ax, ay), (mx, my)) = (to_phys(a), to_phys(c));
+                if released_now {
+                    if let (Some((ax, ay)), Some(c)) = (start, cur) {
+                        let (mx, my) = to_phys(c);
+                        tracing::info!(
+                            "框选结束于物理({mx},{my})（指针窗口内{c:?} 系统鼠标{:?}）",
+                            text_capture::screen::cursor_pos()
+                        );
                         let (x0, y0) = (ax.min(mx), ay.min(my));
                         let (w, h) = ((ax - mx).unsigned_abs(), (ay - my).unsigned_abs());
                         if w >= 12 && h >= 12 {
                             finish = Some((x0, y0, w, h));
                         } else {
+                            tracing::info!("框选区域太小（{w}x{h}），取消");
                             cancel = true;
                         }
                     }
