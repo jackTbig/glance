@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { EXTENSION_ID } from "../../extension/tests/manifest.test.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../..");
@@ -97,6 +98,12 @@ test.beforeAll(async () => {
   await sw.evaluate(async (port) => {
     await chrome.storage.sync.set({ port, hoverModifier: "alt", hoverDelayMs: 120, selectionIcon: true, defaultDisplay: "bilingual" });
   }, SERVICE_PORT);
+});
+
+test("插件 ID 固定：换加载目录也不会变成另一个插件（设置就不会丢）", async () => {
+  const sw = ctx.serviceWorkers()[0];
+  const id = await sw.evaluate(() => chrome.runtime.id);
+  expect(id).toBe(EXTENSION_ID);
 });
 
 test.afterAll(async () => {

@@ -80,6 +80,15 @@ const PLACE_FRAMES: u8 = 5;
 /// 用户把窗口拖走之后，读回的位置本来就该跟目标不一致。
 const MAX_PLACE_RETRIES: u8 = 3;
 
+/// 空闲时把主窗口丢到哪儿（**逻辑**坐标）。
+///
+/// **别再写 -32000**：egui 收的是逻辑坐标，200% 缩放下会乘成物理 -64000，
+/// 超出 Win32 窗口坐标上限被系统夹到 -16384，于是「发了没到位 → 再发 → 窗口回报移动 →
+/// 又重绘」每帧循环，空闲时吃掉整整一个核（2026-09-13 Jack 报「没操作也占 CPU」）。
+/// -8000 在 200% 下是物理 -16000，仍在屏幕外，且系统不会夹。
+const HIDDEN_POS: egui::Pos2 = egui::pos2(-8000.0, -8000.0);
+const HIDDEN_SIZE: egui::Vec2 = egui::vec2(1.0, 1.0);
+
 /// 界面里正在做什么
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -116,6 +125,15 @@ pub struct App {
     pending_tray_click: Option<((i32, i32), Instant)>,
     /// 上次记进日志的小图标位置。界面 30 fps 重画，不去重的话一秒刷 30 行
     logged_icon_at: Option<(i32, i32)>,
+    /// 上一次发出去的「窗口摆到哪、多大」（逻辑坐标）。**没变就不要再发**——
+    /// 每帧重发会让窗口回报 Resized/Moved，egui 收到又立刻重绘，自己把自己喂成死循环：
+    /// 空闲时实测吃掉将近一整个核（2026-09-13 Jack 报「没操作也占 CPU」）。
+    last_place: Option<(egui::Pos2, egui::Vec2)>,
+    /// 帧率自查：空闲时本该 10 fps 上下，跑到几百帧就是有人在自激重绘（会吃掉一整个核）
+    fps: (Instant, u32, u32),
+    /// 同一个摆放目标已经重发了几次。**必须封顶**：目标若是系统不接受的位置，
+    /// 「没到位就重发」会变成每帧重发的死循环
+    place_tries: u8,
     /// 当前有效的任务序号，用来丢弃过期事件
     cur_seq: u64,
     mouse_left_panel_at: Option<Instant>,
@@ -264,6 +282,9 @@ impl App {
             pending_region: None,
             focus_selector: false,
             pending_tray_click: None,
+            last_place: None,
+            fps: (Instant::now(), 0, 0),
+            place_tries: 0,
             logged_icon_at: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
@@ -313,7 +334,7 @@ impl App {
     }
 
     fn start(&mut self, job: Job, scene_label: &'static str, anchor: (i32, i32), source: Source) {
-        tracing::debug!("{scene_label} 开始，锚点物理({},{}) job={job:?}", anchor.0, anchor.1);
+        tracing::info!("{scene_label} 开始，锚点物理({},{}) job={job:?}", anchor.0, anchor.1);
         self.cur_seq = self.engine.submit(job);
         self.panel = Some(PanelState::new(scene_label, source, anchor));
         self.mode = Mode::Panel;
@@ -346,7 +367,7 @@ impl App {
                     } else if self.excluded_at(x, y).is_none() {
                         tracing::debug!("划词结束于物理({x},{y})，弹小图标");
                         let target = text_capture::clipboard::foreign_foreground_window();
-                        tracing::debug!("划词图标的取词目标窗口：{target:?}");
+                        tracing::info!("划词结束，弹图标；取词目标窗口 {target:?}");
                         self.mode = Mode::Icon { pos: (x, y), since: Instant::now(), target };
                     }
                 }
@@ -473,11 +494,15 @@ impl App {
                     tracing::info!("{} 完成 {took_ms}ms", p.scene_label);
                     done = true;
                 }
+                // 失败与落空必须留 INFO 级日志：安装版默认只写 INFO，
+                // 1.0.3 用户报「没有选中文字 / 取词无效」时日志里一个字都没有，无从查起
                 Event::Failed { error, .. } => {
+                    tracing::warn!("{} 失败：{error}", p.scene_label);
                     p.phase = Phase::Failed(error);
                     done = true;
                 }
                 Event::Nothing { reason, .. } => {
+                    tracing::info!("{} 没取到：{reason}", p.scene_label);
                     p.phase = Phase::Failed(reason);
                     done = true;
                 }
@@ -672,6 +697,7 @@ impl eframe::App for App {
         self.drain_events();
         self.drain_tray(ctx, frame);
         self.caption.reap();
+        self.count_frame(false);
         // 有事要显示就把绘制拉回来；没事也保持一个低频心跳，
         // 否则托盘与热键这类外部事件没有任何东西驱动
         ctx.request_repaint_after(Duration::from_millis(if self.settings_open || self.mode != Mode::Idle { 16 } else { 100 }));
@@ -726,17 +752,61 @@ impl eframe::App for App {
                 Mode::Selecting { start } => self.draw_region_selector(ui, start),
             }
         }
-        // 30 fps 足够，别空转烧 CPU
-        ctx.request_repaint_after(Duration::from_millis(33));
+        self.count_frame(true);
+        // 有东西在屏幕上时 30 fps，空闲时 10 fps——事件泵跟着这个节奏跑，
+        // 再慢会让热键与托盘点击有明显延迟
+        ctx.request_repaint_after(Duration::from_millis(if self.settings_open || self.mode != Mode::Idle { 33 } else { 100 }));
     }
 }
 
 impl App {
+    /// 摆放主窗口（逻辑坐标）。**与上一次相同就不发**，理由见 `last_place`。
+    ///
+    /// 光比较目标还不够：命令偶尔会丢（设置窗那边踩过），所以顺带把窗口报回来的实际位置
+    /// 与目标比一比，偏了就再发一次——既不空转，又能自己纠偏。
+    /// 每秒记一行帧数（ui / logic 各一个计数）。空闲时应当是个位数，
+    /// 数字异常大就说明重绘在自激——2026-09-13 排「没操作也占 CPU」时加的。
+    fn count_frame(&mut self, drew: bool) {
+        if drew {
+            self.fps.1 += 1;
+        } else {
+            self.fps.2 += 1;
+        }
+        if self.fps.0.elapsed() >= Duration::from_secs(1) {
+            tracing::debug!("每秒帧数：绘制 {} 次，只跑逻辑 {} 次", self.fps.1, self.fps.2);
+            self.fps = (Instant::now(), 0, 0);
+        }
+    }
+
+    fn place_window(&mut self, ctx: &egui::Context, pos: egui::Pos2, size: egui::Vec2) {
+        let same_target = self.last_place == Some((pos, size));
+        let landed = ctx
+            .input(|i| i.viewport().outer_rect.map(|r| r.min))
+            .is_none_or(|actual| (actual.x - pos.x).abs() <= 2.0 && (actual.y - pos.y).abs() <= 2.0);
+        if !same_target {
+            self.place_tries = 0;
+        }
+        // 到位了、或者同一个目标已经试够次数，就不再发——**不封顶就会每帧重发**
+        if same_target && (landed || self.place_tries >= MAX_PLACE_RETRIES) {
+            return;
+        }
+        self.place_tries = self.place_tries.saturating_add(1);
+        if !landed && self.place_tries >= MAX_PLACE_RETRIES {
+            tracing::warn!(
+                "窗口摆不到目标{pos:?}，试了 {} 次就不试了，窗口实际在 {:?}",
+                self.place_tries,
+                ctx.input(|i| i.viewport().outer_rect)
+            );
+        }
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+        self.last_place = Some((pos, size));
+    }
+
     /// 空闲时把主窗口缩到看不见的一格（egui 的根视口不能真的隐藏）
     fn draw_hidden(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1.0, 1.0)));
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(-32000.0, -32000.0)));
+        self.place_window(&ctx, HIDDEN_POS, HIDDEN_SIZE);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |_| {});
     }
 
@@ -752,11 +822,22 @@ impl App {
             self.logged_icon_at = Some((x, y));
             tracing::debug!("小图标：锚点物理({},{}) → 摆到物理({x},{y}) → 逻辑{logical:?} ppp={}", pos.0, pos.1, dpi.ppp());
         }
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(logical));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(ICON, ICON)));
+        self.place_window(&ctx, logical, egui::vec2(ICON, ICON));
         let mut clicked = false;
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let r = ui.allocate_response(egui::vec2(ICON, ICON), egui::Sense::click());
+            // 点了没反应时分清是 egui 没收到按键，还是收到了但没判成点击
+            ui.input(|i| {
+                if i.pointer.any_pressed() || i.pointer.any_released() {
+                    tracing::debug!(
+                        "小图标收到鼠标按键：按下={} 松开={} 位置={:?} 图标区={:?}",
+                        i.pointer.any_pressed(),
+                        i.pointer.any_released(),
+                        i.pointer.interact_pos(),
+                        r.rect
+                    );
+                }
+            });
             let painter = ui.painter();
             let bg = if r.hovered() { Color32::from_rgb(60, 120, 220) } else { Color32::from_rgb(40, 90, 180) };
             painter.rect_filled(r.rect, CornerRadius::same(8), bg);
@@ -766,6 +847,11 @@ impl App {
             }
         });
         if clicked {
+            // 关键证据：点图标这一下有没有把前台抢成简译自己（None = 前台就是简译）
+            tracing::info!(
+                "点了划词图标：此刻前台外部窗口 {:?}，弹图标时记下的目标 {target:?}",
+                text_capture::clipboard::foreign_foreground_window()
+            );
             self.start(Job::Selection { target }, "划词翻译", pos, Source::Clipboard);
         }
     }
@@ -788,11 +874,10 @@ impl App {
         if (x, y) != p.pos {
             tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{h}) ppp={}", p.anchor, dpi.ppp());
         }
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(logical));
         // 高度跟着上一帧量到的内容走，短词条不拖一大截空白；摆放仍按最大高度算，
         // 免得卡片一变矮就往下跳一次（place 会在放不下时翻到锚点上方）
         let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(w, inner_h)));
+        self.place_window(&ctx, logical, egui::vec2(w, inner_h));
 
         let mut close = false;
         let mut pin_toggled = false;
@@ -948,8 +1033,7 @@ impl App {
         // 虚拟屏是物理像素，遮罩窗的位置与大小要换成逻辑；
         // 框出来的矩形留在物理坐标系里，因为 BitBlt 抓的是物理像素
         let (sx, sy, sw, sh) = text_capture::screen::virtual_screen();
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(dpi.to_logical_pos((sx, sy))));
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(dpi.to_logical_size((sw, sh))));
+        self.place_window(&ctx, dpi.to_logical_pos((sx, sy)), dpi.to_logical_size((sw, sh)));
         if self.focus_selector {
             ctx.send_viewport_cmd(ViewportCommand::Focus);
             self.focus_selector = false;
@@ -1047,6 +1131,7 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Title(format!("{APP_NAME_ZH} 设置")));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
+            self.last_place = None; // 设置窗自己管摆位，别让缓存挡住后续的摆放
             tracing::debug!(
                 "设置窗摆位：剩 {} 帧 ppp={} 目标物理{:?} → 逻辑{:?}",
                 self.settings_place_frames,
@@ -1187,8 +1272,10 @@ impl App {
             // 这一帧设置窗还看得见，ui() 一定在跑，是最后的机会。
             ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
             ctx.send_viewport_cmd(ViewportCommand::Title(APP_NAME_ZH.to_string()));
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1.0, 1.0)));
-            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(-32000.0, -32000.0)));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(HIDDEN_SIZE));
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(HIDDEN_POS));
+            self.last_place = Some((HIDDEN_POS, HIDDEN_SIZE));
+            self.place_tries = 0;
             tracing::debug!("设置窗已关闭，已发出恢复浮窗宿主的命令");
         }
     }

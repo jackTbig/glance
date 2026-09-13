@@ -193,7 +193,16 @@ mod win {
             if unsafe { IsWindow(t as HWND) } == 0 {
                 anyhow::bail!("选中文字的那个窗口已经关了，请重新选中再试");
             }
-            if !bring_to_front(t) {
+            let before = unsafe { GetForegroundWindow() } as isize;
+            let t0 = Instant::now();
+            let ok = bring_to_front(t);
+            tracing::info!(
+                "划词切回目标窗口 {t:#x}：{}，用时 {} ms（切之前前台 {before:#x}{}）",
+                if ok { "成功" } else { "失败" },
+                t0.elapsed().as_millis(),
+                if before == t { "，本来就是它" } else { "" }
+            );
+            if !ok {
                 anyhow::bail!("没能切回选中文字的那个窗口，请先点一下那个窗口再重新选中");
             }
         }
@@ -221,7 +230,7 @@ mod win {
             let fg = unsafe { GetForegroundWindow() };
             let mut pid = 0u32;
             unsafe { GetWindowThreadProcessId(fg, &mut pid) };
-            tracing::debug!(
+            tracing::info!(
                 "模拟 Ctrl+C 后剪贴板没有变化：前台窗口 {:?} 属于进程 {pid}（本进程 {}）",
                 fg,
                 std::process::id()
@@ -236,6 +245,7 @@ mod win {
                 String::new()
             }
         };
+        tracing::info!("模拟 Ctrl+C 后剪贴板已更新，取到 {} 字", text.chars().count());
         // 还原原内容（原来就是空的话不用动）
         if !saved.is_empty() {
             let _ = set_text(&saved);

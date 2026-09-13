@@ -33,7 +33,8 @@ fn main() -> eframe::Result<()> {
         .with_always_on_top()
         .with_taskbar(false)
         .with_inner_size([1.0, 1.0])
-        .with_position([-32000.0, -32000.0]);
+        // 逻辑坐标，别写 -32000：200% 缩放下会被系统夹住，见 ui.rs 的 HIDDEN_POS
+        .with_position([-8000.0, -8000.0]);
     // 标题栏与任务栏的小图标
     match translate_tool::tray::icon_rgba() {
         Ok((rgba, w, h)) => viewport = viewport.with_icon(egui::IconData { rgba, width: w, height: h }),
