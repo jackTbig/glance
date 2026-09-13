@@ -128,6 +128,10 @@ pub struct App {
     pending_tray_click: Option<((i32, i32), Instant)>,
     /// 上次记进日志的小图标位置。界面 30 fps 重画，不去重的话一秒刷 30 行
     logged_icon_at: Option<(i32, i32)>,
+    /// 上次记进日志的卡片宽度，同样是为了不每帧刷屏
+    logged_card_w: Option<f32>,
+    /// 上次记进日志的内容排版宽度。**窗口宽了而它没跟着宽 = 内容没铺满**
+    logged_content_w: Option<f32>,
     /// 上一次发出去的「窗口摆到哪、多大」（逻辑坐标）。**没变就不要再发**——
     /// 每帧重发会让窗口回报 Resized/Moved，egui 收到又立刻重绘，自己把自己喂成死循环：
     /// 空闲时实测吃掉将近一整个核（2026-09-13 Jack 报「没操作也占 CPU」）。
@@ -289,6 +293,8 @@ impl App {
             fps: (Instant::now(), 0, 0),
             place_tries: 0,
             logged_icon_at: None,
+            logged_card_w: None,
+            logged_content_w: None,
             cur_seq: 0,
             mouse_left_panel_at: None,
             notice_until: None,
@@ -329,6 +335,30 @@ impl App {
                     // 钉住，不然鼠标没停在卡片上，出结果后一会儿就自己收了，截不到
                     if let Some(p) = app.panel.as_mut() {
                         p.pinned = true;
+                    }
+                }
+            }
+            // 调试钩子：TT_DEMO_REGION=x,y,w,h 启动即对这块屏幕做一次截屏翻译并钉住卡片。
+            // 截屏链路靠热键触发，而注入的按键不一定能触发系统热键，自动化只能走这条路。
+            if let Ok(r) = std::env::var("TT_DEMO_REGION") {
+                let n: Vec<i32> = r.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                if let [x, y, w, h] = n[..] {
+                    app.start(
+                        Job::Region { x, y, w: w as u32, h: h as u32 },
+                        "截屏翻译",
+                        (x, y + h),
+                        Source::Ocr,
+                    );
+                    if let Some(p) = app.panel.as_mut() {
+                        p.source_rect = Some((x, y, w as u32, h as u32));
+                        p.pinned = true;
+                        // TT_DEMO_TEXT 直接把文字塞进卡片，绕开识别与翻译：
+                        // 排版问题与识别无关，锁屏时又抓不到有字的画面
+                        if let Ok(t) = std::env::var("TT_DEMO_TEXT") {
+                            p.original = t.clone();
+                            p.translated = t;
+                            p.phase = crate::panel::Phase::Done;
+                        }
                     }
                 }
             }
@@ -880,7 +910,8 @@ impl App {
         let (mut x, mut y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
         // 截屏翻译：卡片与框选区同宽、左边缘对齐，看起来才是「这块区域的译文」。
         // 钉住或拖过之后就不再跟框走，用户挪到哪儿就在哪儿。
-        if let (Some(region), false) = (p.source_rect, p.pinned) {
+        // 钉住只是「不自动关闭」，不该改变几何；只有用户亲手拖过才停止跟着框走
+        if let (Some(region), false) = (p.source_rect, p.user_moved) {
             let max_w = dpi.to_physical_len(self.cfg.ui.panel_width * 2.5).max(1) as u32;
             let ((nx, ny), wp) = crate::panel::align_to_region(
                 region,
@@ -901,6 +932,14 @@ impl App {
         // 免得卡片一变矮就往下跳一次（place 会在放不下时翻到锚点上方）
         let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
         self.place_window(&ctx, logical, egui::vec2(w, inner_h));
+        if self.logged_card_w != Some(w) {
+            self.logged_card_w = Some(w);
+            tracing::info!(
+                "卡片宽度：目标逻辑 {w:.0}，窗口实际 {:?}，egui 画布 {:?}",
+                ctx.input(|i| i.viewport().inner_rect.map(|r| r.size())),
+                ctx.content_rect().size()
+            );
+        }
 
         let mut close = false;
         let mut pin_toggled = false;
@@ -908,6 +947,7 @@ impl App {
         let mut copy = false;
         let (mut drag_started, mut dragging, mut drag_stopped) = (false, false, false);
         let mut content_h = 0.0;
+        let mut content_w = 0.0;
         // 取词场景才认词典格式：普通译文里偶尔也有 # 开头的行（Markdown 标题、井号话题），
         // 不限定场景的话一句正常译文会被切成一张残缺的词典卡
         let entry = (scene_of(p.scene_label) == Scene::Word).then(|| crate::dict::parse(&p.translated)).flatten();
@@ -990,16 +1030,22 @@ impl App {
                 // 后者受当前窗口高度限制，而窗口高度又是上一帧量出来的——一旦变矮就自锁，
                 // 卡片会永远停在第一帧那点高度，内容被拦腰切掉。
                 content_h = head.response.rect.height() + 18.0 + out.content_size.y;
+                content_w = out.content_size.x;
             });
 
         if let Some(p) = self.panel.as_mut() {
             p.pos = (x, y);
             // 12 的内边距上下各一份
             p.view_h = content_h + 24.0;
+            if self.logged_content_w.map_or(true, |v: f32| (v - content_w).abs() > 1.0) {
+                self.logged_content_w = Some(content_w);
+                tracing::info!("卡片内容实际排到 {content_w:.0} 宽（卡片可用宽度约 {:.0}）", w - 24.0);
+            }
             if drag_started {
                 // 拖动即钉住：特意挪过位置的卡片再自己消失最恼人
                 p.drag_from = Some((text_capture::screen::cursor_pos(), p.pos));
                 p.pinned = true;
+                p.user_moved = true;
             }
             if dragging {
                 if let Some(at) = p.drag_to(text_capture::screen::cursor_pos()) {
