@@ -80,6 +80,9 @@ const PLACE_FRAMES: u8 = 5;
 /// 用户把窗口拖走之后，读回的位置本来就该跟目标不一致。
 const MAX_PLACE_RETRIES: u8 = 3;
 
+/// 截屏卡片跟着框宽走时的下限（逻辑像素）。框选得再窄，卡片也要放得下一行字
+const MIN_REGION_PANEL_W: f32 = 240.0;
+
 /// 空闲时把主窗口丢到哪儿（**逻辑**坐标）。
 ///
 /// **别再写 -32000**：egui 收的是逻辑坐标，200% 缩放下会乘成物理 -64000，
@@ -723,6 +726,10 @@ impl eframe::App for App {
                 self.pending_region = None;
                 let (x, y, w, h) = rect;
                 self.start(Job::Region { x, y, w, h }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+                // 卡片与框选区同宽、左边缘对齐（Jack 2026-09-13 要求），摆放时按它算
+                if let Some(p) = self.panel.as_mut() {
+                    p.source_rect = Some((x, y, w, h));
+                }
             }
         }
 
@@ -866,10 +873,25 @@ impl App {
         let screen = text_capture::screen::virtual_screen();
         // w/h 是逻辑像素（配置里按点写的），但 p.anchor 与 screen 是物理的，
         // 所以摆放统一在物理坐标系里算，算完再换成逻辑交给窗口
-        let w = self.cfg.ui.panel_width;
+        let mut w = self.cfg.ui.panel_width;
         let h = self.cfg.ui.panel_max_height;
         let size_phys = dpi.to_physical_size((w, h));
-        let (x, y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
+        let (mut x, mut y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
+        // 截屏翻译：卡片与框选区同宽、左边缘对齐，看起来才是「这块区域的译文」。
+        // 钉住或拖过之后就不再跟框走，用户挪到哪儿就在哪儿。
+        if let (Some(region), false) = (p.source_rect, p.pinned) {
+            let max_w = dpi.to_physical_len(self.cfg.ui.panel_width * 2.5).max(1) as u32;
+            let ((nx, ny), wp) = crate::panel::align_to_region(
+                region,
+                (x, y),
+                dpi.to_physical_len(MIN_REGION_PANEL_W).max(1) as u32,
+                max_w.min(screen.2),
+                screen,
+            );
+            x = nx;
+            y = ny;
+            w = dpi.to_logical_len(wp as f32);
+        }
         let logical = dpi.to_logical_pos((x, y));
         if (x, y) != p.pos {
             tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{h}) ppp={}", p.anchor, dpi.ppp());
@@ -1038,19 +1060,32 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Focus);
             self.focus_selector = false;
         }
-        let (mx, my) = text_capture::screen::cursor_pos();
+        // **框跟手全靠这两点**（Jack 2026-09-13 报「框与鼠标有偏差」）：
+        // 1. 位置取 egui 的指针事件，不再每帧 `GetCursorPos` 轮询——轮询是按帧采样的，
+        //    拖快了框就落在鼠标后面；
+        // 2. 换算基准用窗口**实际**的左上角，不假设遮罩窗正好落在虚拟屏原点——
+        //    差一点点，整条框就整体偏一点。
+        let win = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min)).unwrap_or(dpi.to_logical_pos((sx, sy)));
+        let ppp = dpi.ppp();
+        // 窗口内逻辑坐标 → 虚拟屏物理坐标
+        let to_phys = move |p: egui::Pos2| -> (i32, i32) {
+            (((win.x + p.x) * ppp).round() as i32, ((win.y + p.y) * ppp).round() as i32)
+        };
         let mut finish: Option<(i32, i32, u32, u32)> = None;
         let mut cancel = false;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(0, 0, 0, 90)))
             .show(root_ui, |ui| {
+                // 按下点与当前点都取自指针事件，画框直接用窗口内坐标，中间不过一道换算，
+                // 所以画出来的框与鼠标严格一致
+                let press = ui.input(|i| i.pointer.press_origin());
+                let cur = ui.input(|i| i.pointer.latest_pos());
                 let painter = ui.painter();
-                if let Some((ax, ay)) = start {
-                    let r = egui::Rect::from_two_pos(
-                        dpi.point_in_window((ax, ay), (sx, sy)),
-                        dpi.point_in_window((mx, my), (sx, sy)),
-                    );
+                if let (true, Some(a), Some(c)) = (start.is_some(), press, cur) {
+                    let (ax, ay) = to_phys(a);
+                    let (mx, my) = to_phys(c);
+                    let r = egui::Rect::from_two_pos(a, c);
                     painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 20));
                     painter.rect_stroke(r, CornerRadius::ZERO, egui::Stroke::new(1.5, Color32::from_rgb(120, 180, 255)), egui::StrokeKind::Inside);
                     painter.text(
@@ -1072,10 +1107,11 @@ impl App {
                 }
                 let resp = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
                 if resp.drag_started() {
-                    self.mode = Mode::Selecting { start: Some((mx, my)) };
+                    self.mode = Mode::Selecting { start: press.map(to_phys) };
                 }
                 if resp.drag_stopped() {
-                    if let Some((ax, ay)) = start {
+                    if let (Some(a), Some(c)) = (press, cur) {
+                        let ((ax, ay), (mx, my)) = (to_phys(a), to_phys(c));
                         let (x0, y0) = (ax.min(mx), ay.min(my));
                         let (w, h) = ((ax - mx).unsigned_abs(), (ay - my).unsigned_abs());
                         if w >= 12 && h >= 12 {

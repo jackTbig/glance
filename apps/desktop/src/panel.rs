@@ -37,6 +37,9 @@ pub struct PanelState {
     pub view_h: f32,
     pub opened_at: Instant,
     pub scene_label: &'static str,
+    /// 这张卡片的内容来自屏幕上的哪一块（虚拟屏物理矩形）。**只有截屏翻译有**。
+    /// 有值时卡片与框选区同宽、左边缘对齐（Jack 2026-09-13 要求）。
+    pub source_rect: Option<(i32, i32, u32, u32)>,
 }
 
 impl PanelState {
@@ -53,6 +56,7 @@ impl PanelState {
             view_h: 0.0,
             opened_at: Instant::now(),
             scene_label,
+            source_rect: None,
         }
     }
 
@@ -77,6 +81,25 @@ impl PanelState {
 }
 
 /// 把面板摆在触发点旁边，且不出屏幕。优先放右下，放不下依次尝试左下、右上、左上。
+/// 卡片与截屏框对齐：宽度取框宽（夹在 `min_w`..`max_w` 之间——框太窄的话卡片里一行放不下几个字），
+/// 左边缘对齐框的左边缘，超出屏幕右边就收回屏内。纵向位置沿用 `place` 算好的。
+///
+/// 返回（左上角物理坐标，卡片物理宽度）。
+pub fn align_to_region(
+    region: (i32, i32, u32, u32),
+    placed: (i32, i32),
+    min_w: u32,
+    max_w: u32,
+    screen: (i32, i32, u32, u32),
+) -> ((i32, i32), u32) {
+    let (rx, _ry, rw, _rh) = region;
+    let (sx, _sy, sw, _sh) = screen;
+    let w = rw.clamp(min_w.min(max_w), max_w);
+    let right = sx + sw as i32;
+    let x = rx.min(right - w as i32).max(sx);
+    ((x, placed.1), w)
+}
+
 pub fn place(
     anchor: (i32, i32),
     size: (u32, u32),
@@ -114,6 +137,29 @@ pub fn place_icon(anchor: (i32, i32), size: u32, screen: (i32, i32, u32, u32), g
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 截屏卡片要与框同宽、左边缘对齐——用户框哪块，译文就压在那块下面同样宽
+    #[test]
+    fn card_matches_the_screenshot_box() {
+        let screen = (0, 0, 3072, 1920);
+        let ((x, y), w) = align_to_region((400, 300, 800, 200), (517, 514), 240, 2000, screen);
+        assert_eq!((x, w), (400, 800), "左边缘与宽度都跟着框走");
+        assert_eq!(y, 514, "纵向位置沿用 place 算好的");
+    }
+
+    #[test]
+    fn card_stays_readable_and_on_screen() {
+        let screen = (0, 0, 3072, 1920);
+        // 框太窄：卡片不跟着缩到读不了
+        let ((_, _), w) = align_to_region((100, 100, 60, 40), (0, 0), 240, 2000, screen);
+        assert_eq!(w, 240);
+        // 框太宽：夹到上限
+        let ((_, _), w) = align_to_region((0, 0, 3000, 100), (0, 0), 240, 2000, screen);
+        assert_eq!(w, 2000);
+        // 靠右的框：卡片收回屏内，不许探出右边
+        let ((x, _), w) = align_to_region((2900, 100, 400, 100), (0, 0), 240, 2000, screen);
+        assert!(x + w as i32 <= 3072, "卡片右边缘 {} 超出屏幕", x + w as i32);
+    }
 
     const SCREEN: (i32, i32, u32, u32) = (0, 0, 1920, 1080);
 
