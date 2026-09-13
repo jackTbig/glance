@@ -1491,6 +1491,18 @@ impl App {
                 }
             });
         });
+        Self::row(ui, "服务商", "选一个就自动填好下面的接口地址与模型；手改地址后这里显示「自定义」", |ui| {
+            let cur = crate::presets::label_of(&self.draft.backend.openai_base_url);
+            egui::ComboBox::from_id_salt("provider").width(104.0).selected_text(cur).show_ui(ui, |ui| {
+                for p in crate::presets::PRESETS {
+                    // 选中就填字段；Key 不动——每家的 Key 不一样，替用户清空只会更糟
+                    if ui.selectable_label(cur == p.name, p.name).clicked() {
+                        self.draft.backend.openai_base_url = p.base_url.to_string();
+                        self.draft.backend.openai_model = p.model.to_string();
+                    }
+                }
+            });
+        });
         Self::row(ui, "接口地址", "DeepSeek 填 https://api.deepseek.com；通义千问填 dashscope 的兼容地址", |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_base_url).desired_width(FIELD_W));
         });

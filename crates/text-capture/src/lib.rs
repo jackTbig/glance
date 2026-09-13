@@ -46,6 +46,27 @@ impl Captured {
     }
 }
 
+/// 截屏区域的完整结果：原图 + 每行文字及其在图内的位置。
+///
+/// 截屏翻译要把译文**盖回原文的位置**（有道那种），所以不能只给合并后的整段文本：
+/// 位置信息一旦在这一层丢掉，界面就再也拼不回去了。
+#[derive(Debug, Clone)]
+pub struct RegionShot {
+    /// 原始截图（物理像素）
+    pub image: image::RgbaImage,
+    /// 识别出的每一行：文字 + 相对图片左上角的矩形
+    pub lines: Vec<ocr::OcrLine>,
+    /// 各行合并后的整段文本（退回普通卡片时用）
+    pub text: String,
+    pub took_ms: u128,
+}
+
+impl RegionShot {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+    }
+}
+
 /// 取词器：持有 UIA 与 OCR 两个可选能力，任一初始化失败只降级不阻断
 pub struct Capturer {
     uia: Option<UiaCapture>,
@@ -152,6 +173,15 @@ impl Capturer {
         let img = screen::capture_rect(x, y, w, h)?;
         let r = engine.recognize(&img)?;
         Ok(Captured { text: r.text, source: Source::Ocr, took_ms: t0.elapsed().as_millis() })
+    }
+
+    /// 截屏区域：识别文字并**连原图与每行坐标一起**返回（覆盖式译文用）
+    pub fn region_shot(&self, x: i32, y: i32, w: u32, h: u32) -> anyhow::Result<RegionShot> {
+        let t0 = std::time::Instant::now();
+        let engine = self.ocr.as_ref().ok_or_else(|| anyhow::anyhow!("本机没有可用的文字识别引擎"))?;
+        let image = screen::capture_rect(x, y, w, h)?;
+        let r = engine.recognize(&image)?;
+        Ok(RegionShot { image, lines: r.lines, text: r.text, took_ms: t0.elapsed().as_millis() })
     }
 
     /// 该点所属进程的可执行文件名（进程例外用）
