@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
             (Ok(k), _) => (
                 std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com".into()),
                 k,
-                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-chat".into()),
+                std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-flash".into()),
             ),
             (_, Some(t)) => t,
             _ => anyhow::bail!("没有 OPENAI_API_KEY，也读不到 live-caption 的 config.toml"),

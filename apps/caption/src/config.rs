@@ -173,7 +173,7 @@ impl Default for TranslateCfg {
             codex_model: String::new(),
             openai_base_url: "https://api.deepseek.com".into(),
             openai_api_key: String::new(),
-            openai_model: "deepseek-chat".into(),
+            openai_model: "deepseek-flash".into(),
             timeout_secs: 15,
             rotate_every: 60,
             max_backlog: 10,

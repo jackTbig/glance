@@ -84,7 +84,7 @@ test("真实后端：菜单显示当前模型", async () => {
   await expect(popup.locator("#conn")).toHaveText(/桌面端已连接/);
   const model = await popup.locator("#serviceName").textContent();
   console.log("菜单显示的模型：", model);
-  expect(model).toBe("deepseek-chat");
+  expect(model).toBe("deepseek-flash");
   await popup.close();
 });
 

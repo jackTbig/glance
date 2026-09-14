@@ -849,7 +849,7 @@ impl CaptionApp {
                     ui.horizontal(|ui| {
                         if ui.button("DeepSeek").clicked() {
                             d.translate.openai_base_url = "https://api.deepseek.com".into();
-                            d.translate.openai_model = "deepseek-chat".into();
+                            d.translate.openai_model = "deepseek-flash".into();
                         }
                         if ui.button("通义千问").clicked() {
                             d.translate.openai_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();

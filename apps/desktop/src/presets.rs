@@ -15,7 +15,7 @@ pub struct Preset {
 
 /// 认得的服务商。顺序即下拉里的顺序，把常用的放前面。
 pub const PRESETS: &[Preset] = &[
-    Preset { name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+    Preset { name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-flash" },
     Preset {
         name: "通义千问",
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",

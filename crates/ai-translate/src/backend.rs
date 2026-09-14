@@ -56,7 +56,7 @@ impl Default for BackendConfig {
             codex_model: String::new(),
             openai_base_url: "https://api.deepseek.com".into(),
             openai_api_key: String::new(),
-            openai_model: "deepseek-chat".into(),
+            openai_model: "deepseek-flash".into(),
             timeout: Duration::from_secs(15),
             command_override: Vec::new(),
         }
