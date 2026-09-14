@@ -558,8 +558,10 @@ impl App {
                 }
                 continue;
             }
-            // 覆盖模式下没有卡片，Done 只用来撤掉「翻译中」的提示条
-            if matches!(self.mode, Mode::Overlay) {
+            // 覆盖已经铺出来了：Done 只用来撤掉「翻译中」的提示条，不弹卡片。
+            // **没铺出来的失败不能吞**（识别不到文字就是这种）：覆盖模式先不弹卡片，
+            // 再把失败也吞掉的话，用户框完一片什么反馈都没有（2026-09-14 实测撞到）。
+            if self.overlay.is_some() {
                 if let Event::Done { .. } | Event::Failed { .. } | Event::Nothing { .. } = &e {
                     if let Some(o) = self.overlay.as_mut() {
                         o.working = false;
