@@ -83,6 +83,9 @@ const MAX_PLACE_RETRIES: u8 = 3;
 /// 截屏卡片跟着框宽走时的下限（逻辑像素）。框选得再窄，卡片也要放得下一行字
 const MIN_REGION_PANEL_W: f32 = 240.0;
 
+/// 覆盖窗口下方那条提示栏的高度（逻辑像素）。**它在截图区之外**，不压原文
+const OVERLAY_BAR_H: f32 = 26.0;
+
 /// 空闲时把主窗口丢到哪儿（**逻辑**坐标）。
 ///
 /// **别再写 -32000**：egui 收的是逻辑坐标，200% 缩放下会乘成物理 -64000，
@@ -1004,20 +1007,30 @@ impl App {
     fn draw_overlay(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
         let dpi = Dpi::from_ctx(&ctx);
-        let Some(o) = self.overlay.as_ref() else {
+        let Some(region) = self.overlay.as_ref().map(|o| o.rect) else {
             self.mode = Mode::Idle;
             return;
         };
-        let (rx, ry, rw, rh) = o.rect;
-        self.place_window(&ctx, dpi.to_logical_pos((rx, ry)), dpi.to_logical_size((rw, rh)));
+        // 提示栏放在截图区**之外**：放里面会压住原文（2026-09-14 Jack 截图指出）
+        let bar_phys = dpi.to_physical_len(OVERLAY_BAR_H).max(1);
+        let screen = text_capture::screen::virtual_screen();
+        let (win, img_y, bar_y) = crate::overlay::layout(region, bar_phys, screen);
+        self.place_window(&ctx, dpi.to_logical_pos((win.0, win.1)), dpi.to_logical_size((win.2, win.3)));
+        let img_top = dpi.to_logical_len(img_y as f32);
+        let bar_top = dpi.to_logical_len(bar_y as f32);
+        let img_h = dpi.to_logical_len(region.3 as f32);
 
         let mut close = false;
         let mut toggle = false;
         let o = self.overlay.as_ref().expect("上面刚判过");
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root_ui, |ui| {
-            let full = ui.max_rect();
+            let win_rect = ui.max_rect();
+            // 截图铺在它自己那一块；窗口比它高出一条，那条留给提示栏
+            let full = egui::Rect::from_min_size(
+                win_rect.min + egui::vec2(0.0, img_top),
+                egui::vec2(win_rect.width(), img_h),
+            );
             let painter = ui.painter();
-            // 原图：一比一铺满窗口（窗口本来就是按框选区的物理尺寸摆的）
             painter.image(o.tex.id(), full, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
 
             if o.show_dst {
@@ -1045,10 +1058,12 @@ impl App {
                     );
                 }
             }
-            // 右上角一条窄提示：当前看的是什么 + 怎么切 + 关闭
-            let bar_h = 24.0;
-            let bar = egui::Rect::from_min_size(egui::pos2(full.right() - 200.0, full.top()), egui::vec2(200.0, bar_h));
-            painter.rect_filled(bar, CornerRadius::same(4), Color32::from_rgba_unmultiplied(20, 20, 24, 220));
+            // 提示栏：独占窗口下（或上）的一条，绝不压住截图内容
+            let bar = egui::Rect::from_min_size(
+                win_rect.min + egui::vec2(0.0, bar_top),
+                egui::vec2(win_rect.width(), OVERLAY_BAR_H),
+            );
+            painter.rect_filled(bar, CornerRadius::same(4), Color32::from_rgb(24, 24, 28));
             let hint = if o.working {
                 "翻译中…"
             } else if o.show_dst {
@@ -1071,7 +1086,7 @@ impl App {
                 Color32::from_gray(200),
             );
 
-            let resp = ui.allocate_response(full.size(), egui::Sense::click());
+            let resp = ui.allocate_response(win_rect.size(), egui::Sense::click());
             if resp.clicked() {
                 // 点在右上角那条上就是关闭，点别处切换原文/译文
                 let at = ui.input(|i| i.pointer.latest_pos());

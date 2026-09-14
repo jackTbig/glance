@@ -136,9 +136,56 @@ pub fn plan(
     ops
 }
 
+/// 覆盖窗口的摆放：窗口 = 截图区 + 一条提示栏，**提示栏放在截图区之外**。
+///
+/// 放在里面会压住原文（2026-09-14 Jack 截图指出：提示条盖掉了一行英文的尾巴）。
+/// 优先放下方；下方贴到屏幕边就放上方；上下都放不下（截图区几乎占满整屏）就只好压回里面。
+///
+/// 返回（窗口物理矩形, 截图画在窗口内的偏移 y, 提示栏在窗口内的 y）。单位都是物理像素。
+pub fn layout(region: (i32, i32, u32, u32), bar_h: i32, screen: (i32, i32, u32, u32)) -> ((i32, i32, u32, u32), i32, i32) {
+    let (rx, ry, rw, rh) = region;
+    let (sx, sy, _sw, sh) = screen;
+    let bottom = sy + sh as i32;
+    let _ = sx;
+    if ry + rh as i32 + bar_h <= bottom {
+        // 提示栏在下方：截图在上，栏贴着它下沿
+        ((rx, ry, rw, rh + bar_h as u32), 0, rh as i32)
+    } else if ry - bar_h >= sy {
+        // 提示栏在上方：窗口整体上移一条，截图往下让出位置
+        ((rx, ry - bar_h, rw, rh + bar_h as u32), bar_h, 0)
+    } else {
+        // 上下都没地方：退回压在截图区里（只在截图几乎占满整屏时发生）
+        ((rx, ry, rw, rh), 0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 提示栏不能压住原文：正常情况放在截图区下方，窗口相应加高
+    #[test]
+    fn hint_bar_sits_below_the_shot() {
+        let (win, img_y, bar_y) = layout((100, 200, 800, 300), 24, (0, 0, 3072, 1920));
+        assert_eq!(win, (100, 200, 800, 324));
+        assert_eq!((img_y, bar_y), (0, 300), "截图贴顶，栏在它下面");
+    }
+
+    /// 截图区贴着屏幕底边：栏改放上方，窗口整体上移，截图往下让
+    #[test]
+    fn hint_bar_flips_above_at_the_screen_bottom() {
+        let (win, img_y, bar_y) = layout((100, 1700, 800, 220), 24, (0, 0, 3072, 1920));
+        assert_eq!(win, (100, 1676, 800, 244));
+        assert_eq!((img_y, bar_y), (24, 0));
+    }
+
+    /// 截图几乎占满整屏：上下都放不下，只能压回里面（不能把窗口撑出屏幕）
+    #[test]
+    fn hint_bar_falls_back_inside_when_there_is_no_room() {
+        let (win, img_y, bar_y) = layout((0, 0, 3072, 1920), 24, (0, 0, 3072, 1920));
+        assert_eq!(win, (0, 0, 3072, 1920));
+        assert_eq!((img_y, bar_y), (0, 0));
+    }
 
     fn l(rect: (i32, i32, i32, i32), src: &str, dst: Option<&str>) -> Line {
         Line { rect, src: src.into(), dst: dst.map(str::to_string) }
