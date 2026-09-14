@@ -100,6 +100,8 @@ enum Mode {
     /// `target`：弹图标那一刻的前台窗口，也就是有选区的程序。点图标会把前台抢成简译自己，
     /// 取词前必须切回它，否则模拟的 Ctrl+C 发给了简译，报「没有选中文字」（2026-09-11 Jack 报）
     Icon { pos: (i32, i32), since: Instant, target: Option<isize> },
+    /// 截屏覆盖：原图铺在框选的位置上，译文盖回每行原文（有道那种，Jack 2026-09-14 要求）
+    Overlay,
     /// 译文面板
     Panel,
     /// 截屏框选中
@@ -145,6 +147,10 @@ pub struct App {
     cur_seq: u64,
     /// 已经发了任务、但还没弹卡片（悬停用，见 `start_deferred`）：(场景标题, 来源, 锚点)
     pending_panel: Option<(&'static str, Source, (i32, i32))>,
+    /// 截屏覆盖的当前状态（原图纹理 + 每行译文）
+    overlay: Option<OverlayState>,
+    /// 这次截屏框的位置（虚拟屏物理坐标）。原图要**铺回它自己的位置**才能与屏幕对齐
+    overlay_rect: Option<(i32, i32, u32, u32)>,
     mouse_left_panel_at: Option<Instant>,
     /// 状态提示卡片什么时候自己收掉
     notice_until: Option<Instant>,
@@ -299,6 +305,8 @@ impl App {
             logged_content_w: None,
             cur_seq: 0,
             pending_panel: None,
+            overlay: None,
+            overlay_rect: None,
             mouse_left_panel_at: None,
             notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
@@ -346,8 +354,11 @@ impl App {
             if let Ok(r) = std::env::var("TT_DEMO_REGION") {
                 let n: Vec<i32> = r.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                 if let [x, y, w, h] = n[..] {
+                    // 跟着配置走：默认覆盖式，这样调试钩子验的就是用户真正看到的那条路
+                    let overlay = app.cfg.ui.region_overlay;
+                    app.overlay_rect = overlay.then_some((x, y, w as u32, h as u32));
                     app.start(
-                        Job::Region { x, y, w: w as u32, h: h as u32 },
+                        Job::Region { x, y, w: w as u32, h: h as u32, overlay },
                         "截屏翻译",
                         (x, y + h),
                         Source::Ocr,
@@ -516,13 +527,15 @@ impl App {
         }
     }
 
-    fn drain_events(&mut self) {
+    fn drain_events(&mut self, ctx: &egui::Context) {
         // 这一轮有没有出结果。出结果的那一刻要把「鼠标离开面板」的计时清零，
         // 否则宽限期在翻译过程中就耗光了——见下面 `done` 的用法。
         let mut done = false;
         while let Ok(e) = self.events.try_recv() {
             let seq = match &e {
-                Event::Captured { seq, .. }
+                Event::Shot { seq, .. }
+                | Event::Line { seq, .. }
+                | Event::Captured { seq, .. }
                 | Event::Delta { seq, .. }
                 | Event::Done { seq, .. }
                 | Event::Failed { seq, .. }
@@ -531,6 +544,31 @@ impl App {
             };
             if seq != self.cur_seq {
                 continue; // 过期
+            }
+            // 覆盖式截屏：原图先到，立刻铺上去；译文一行一行补进来
+            if let Event::Shot { shot, .. } = &e {
+                self.begin_overlay(shot.clone(), ctx);
+                continue;
+            }
+            if let Event::Line { idx, text, .. } = &e {
+                if let Some(o) = self.overlay.as_mut() {
+                    if let Some(l) = o.lines.get_mut(*idx) {
+                        l.dst = Some(text.clone());
+                    }
+                }
+                continue;
+            }
+            // 覆盖模式下没有卡片，Done 只用来撤掉「翻译中」的提示条
+            if matches!(self.mode, Mode::Overlay) {
+                if let Event::Done { .. } | Event::Failed { .. } | Event::Nothing { .. } = &e {
+                    if let Some(o) = self.overlay.as_mut() {
+                        o.working = false;
+                    }
+                    if let Event::Failed { error, .. } = &e {
+                        tracing::warn!("截屏覆盖失败：{error}");
+                    }
+                    continue;
+                }
             }
             // 不用翻：静默收掉，连卡片都不弹（开关在设置里，默认开）
             if let Event::Skipped { .. } = e {
@@ -577,8 +615,8 @@ impl App {
                     p.phase = Phase::Failed(reason);
                     done = true;
                 }
-                // 上面已经处理并 continue 了，这里只是让编译器满意
-                Event::Skipped { .. } => {}
+                // 上面已经处理并 continue 了，这三条只是让编译器满意
+                Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } => {}
             }
         }
 
@@ -789,7 +827,7 @@ impl eframe::App for App {
         }
         self.drain_hotkeys();
         self.drain_triggers();
-        self.drain_events();
+        self.drain_events(ctx);
         self.drain_tray(ctx, frame);
         self.caption.reap();
         self.count_frame(false);
@@ -806,7 +844,7 @@ impl eframe::App for App {
         }
         self.drain_hotkeys();
         self.drain_triggers();
-        self.drain_events();
+        self.drain_events(&ctx);
         self.drain_tray(&ctx, _frame);
         // 回收退出的字幕子进程，并按退出码决定要不要重新拉起（改识别参数会请求重启）。
         // 用 try_wait 不用 wait：后者会把 UI 线程堵死。
@@ -817,10 +855,17 @@ impl eframe::App for App {
             if at.elapsed() >= MASK_CLEAR_DELAY {
                 self.pending_region = None;
                 let (x, y, w, h) = rect;
-                self.start(Job::Region { x, y, w, h }, "截屏翻译", (x, y + h as i32), Source::Ocr);
-                // 卡片与框选区同宽、左边缘对齐（Jack 2026-09-13 要求），摆放时按它算
-                if let Some(p) = self.panel.as_mut() {
-                    p.source_rect = Some((x, y, w, h));
+                let overlay = self.cfg.ui.region_overlay;
+                self.overlay_rect = overlay.then_some((x, y, w, h));
+                if overlay {
+                    // 覆盖模式没有卡片：原图会铺回框选的位置，译文盖在每行原文上
+                    self.start_deferred(Job::Region { x, y, w, h, overlay }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+                } else {
+                    self.start(Job::Region { x, y, w, h, overlay }, "截屏翻译", (x, y + h as i32), Source::Ocr);
+                    // 卡片与框选区同宽、左边缘对齐（Jack 2026-09-13 要求），摆放时按它算
+                    if let Some(p) = self.panel.as_mut() {
+                        p.source_rect = Some((x, y, w, h));
+                    }
                 }
             }
         }
@@ -848,6 +893,7 @@ impl eframe::App for App {
                 Mode::Idle => self.draw_hidden(ui),
                 Mode::Icon { pos, target, .. } => self.draw_icon(ui, pos, target),
                 Mode::Panel => self.draw_panel(ui),
+                Mode::Overlay => self.draw_overlay(ui),
                 Mode::Selecting { start } => self.draw_region_selector(ui, start),
             }
         }
@@ -856,6 +902,21 @@ impl eframe::App for App {
         // 再慢会让热键与托盘点击有明显延迟
         ctx.request_repaint_after(Duration::from_millis(if self.settings_open || self.mode != Mode::Idle { 33 } else { 100 }));
     }
+}
+
+/// 截屏覆盖的运行时状态
+struct OverlayState {
+    /// 框选区（虚拟屏物理坐标）
+    rect: (i32, i32, u32, u32),
+    /// 原图纹理。**必须留着句柄**：句柄一 drop，纹理就被回收，画出来是空白
+    tex: egui::TextureHandle,
+    lines: Vec<crate::overlay::Line>,
+    /// 每行盖字用的底色（从原图上采的）
+    bg: Vec<Color32>,
+    /// 正在显示译文还是原文。点一下切换（有道那种）
+    show_dst: bool,
+    /// 还在翻的时候给个提示条
+    working: bool,
 }
 
 impl App {
@@ -900,6 +961,139 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         self.last_place = Some((pos, size));
+    }
+
+    /// 收到原图：建纹理、采每行底色，切到覆盖模式。
+    ///
+    /// 底色在这里一次采好、存进 `OverlayState`：每帧重采要读几百个像素，
+    /// 30 fps 下白烧 CPU（「空闲占满一个核」那一课）。
+    fn begin_overlay(&mut self, shot: std::sync::Arc<text_capture::RegionShot>, ctx: &egui::Context) {
+        let (w, h) = (shot.image.width() as usize, shot.image.height() as usize);
+        let img = egui::ColorImage::from_rgba_unmultiplied([w, h], shot.image.as_raw());
+        let tex = ctx.load_texture("region-shot", img, egui::TextureOptions::LINEAR);
+        let px = |x: i32, y: i32| -> Option<[u8; 4]> {
+            if x < 0 || y < 0 || x >= shot.image.width() as i32 || y >= shot.image.height() as i32 {
+                return None;
+            }
+            Some(shot.image.get_pixel(x as u32, y as u32).0)
+        };
+        let lines: Vec<crate::overlay::Line> = shot
+            .lines
+            .iter()
+            .map(|l| crate::overlay::Line { rect: l.rect, src: l.text.clone(), dst: None })
+            .collect();
+        let bg = lines
+            .iter()
+            .map(|l| {
+                let c = crate::overlay::background_of(&px, l.rect, 3);
+                Color32::from_rgb(c[0], c[1], c[2])
+            })
+            .collect();
+        let rect = self.overlay_rect.unwrap_or((0, 0, w as u32, h as u32));
+        self.overlay = Some(OverlayState { rect, tex, lines, bg, show_dst: true, working: true });
+        self.panel = None;
+        self.pending_panel = None;
+        self.mode = Mode::Overlay;
+    }
+
+    /// 覆盖式截屏：把原图铺回框选的位置，再把译文盖到每行原文上。
+    ///
+    /// 点一下在译文 / 原文之间切换（有道那种）；Esc 或右上角 ✕ 关掉。
+    fn draw_overlay(&mut self, root_ui: &mut egui::Ui) {
+        let ctx = root_ui.ctx().clone();
+        let dpi = Dpi::from_ctx(&ctx);
+        let Some(o) = self.overlay.as_ref() else {
+            self.mode = Mode::Idle;
+            return;
+        };
+        let (rx, ry, rw, rh) = o.rect;
+        self.place_window(&ctx, dpi.to_logical_pos((rx, ry)), dpi.to_logical_size((rw, rh)));
+
+        let mut close = false;
+        let mut toggle = false;
+        let o = self.overlay.as_ref().expect("上面刚判过");
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(root_ui, |ui| {
+            let full = ui.max_rect();
+            let painter = ui.painter();
+            // 原图：一比一铺满窗口（窗口本来就是按框选区的物理尺寸摆的）
+            painter.image(o.tex.id(), full, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+
+            if o.show_dst {
+                // 排版算在 overlay::plan 里（纯函数、有测试盯着），这里只负责照着画
+                let bg: Vec<[u8; 4]> = o.bg.iter().map(|c| [c.r(), c.g(), c.b(), 255]).collect();
+                let img = (o.tex.size()[0] as i32, o.tex.size()[1] as i32);
+                let ops = crate::overlay::plan(&o.lines, &bg, img, (full.width(), full.height()), |t, size| {
+                    ctx.fonts_mut(|f| {
+                        f.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x
+                    })
+                });
+                for op in ops {
+                    let r = egui::Rect::from_min_size(
+                        full.min + egui::vec2(op.rect.0, op.rect.1),
+                        egui::vec2(op.rect.2, op.rect.3),
+                    );
+                    painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(op.bg[0], op.bg[1], op.bg[2]));
+                    let fg = if op.dark_text { Color32::from_gray(20) } else { Color32::from_gray(245) };
+                    painter.text(
+                        egui::pos2(r.left() + 1.0, r.center().y),
+                        Align2::LEFT_CENTER,
+                        &op.text,
+                        egui::FontId::proportional(op.font_size),
+                        fg,
+                    );
+                }
+            }
+            // 右上角一条窄提示：当前看的是什么 + 怎么切 + 关闭
+            let bar_h = 24.0;
+            let bar = egui::Rect::from_min_size(egui::pos2(full.right() - 200.0, full.top()), egui::vec2(200.0, bar_h));
+            painter.rect_filled(bar, CornerRadius::same(4), Color32::from_rgba_unmultiplied(20, 20, 24, 220));
+            let hint = if o.working {
+                "翻译中…"
+            } else if o.show_dst {
+                "译文 · 点击看原文"
+            } else {
+                "原文 · 点击看译文"
+            };
+            painter.text(
+                egui::pos2(bar.left() + 8.0, bar.center().y),
+                Align2::LEFT_CENTER,
+                hint,
+                egui::FontId::proportional(12.0),
+                Color32::from_gray(230),
+            );
+            painter.text(
+                egui::pos2(bar.right() - 10.0, bar.center().y),
+                Align2::RIGHT_CENTER,
+                "✕ Esc",
+                egui::FontId::proportional(12.0),
+                Color32::from_gray(200),
+            );
+
+            let resp = ui.allocate_response(full.size(), egui::Sense::click());
+            if resp.clicked() {
+                // 点在右上角那条上就是关闭，点别处切换原文/译文
+                let at = ui.input(|i| i.pointer.latest_pos());
+                if at.is_some_and(|p| bar.contains(p)) {
+                    close = true;
+                } else {
+                    toggle = true;
+                }
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close = true;
+            }
+        });
+
+        if toggle {
+            if let Some(o) = self.overlay.as_mut() {
+                o.show_dst = !o.show_dst;
+            }
+        }
+        if close {
+            self.overlay = None;
+            self.overlay_rect = None;
+            self.mode = Mode::Idle;
+        }
     }
 
     /// 空闲时把主窗口缩到看不见的一格（egui 的根视口不能真的隐藏）

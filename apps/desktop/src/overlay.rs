@@ -38,14 +38,16 @@ pub fn background_of(
     pad: i32,
 ) -> [u8; 4] {
     let (x, y, w, h) = rect;
-    let mut votes: Vec<([u8; 4], u32)> = Vec::new();
+    // (量化后的桶, 桶里第一个真实颜色, 票数)。
+    // **归票用量化、返回用真实颜色**：只用量化色的话纯白 255 会被截成 224，
+    // 盖上去整条发灰，在白底文档上一眼就看得出来（2026-09-14 实拍发现）。
+    let mut votes: Vec<([u8; 4], [u8; 4], u32)> = Vec::new();
     let mut sample = |p: Option<[u8; 4]>| {
         let Some(c) = p else { return };
-        // 量化到 8 级，免得同一片背景因为一两级色差被拆成许多票
         let q = [c[0] & 0xE0, c[1] & 0xE0, c[2] & 0xE0, 255];
-        match votes.iter_mut().find(|(v, _)| *v == q) {
-            Some((_, n)) => *n += 1,
-            None => votes.push((q, 1)),
+        match votes.iter_mut().find(|(v, _, _)| *v == q) {
+            Some((_, _, n)) => *n += 1,
+            None => votes.push((q, [c[0], c[1], c[2], 255], 1)),
         }
     };
     let step = (w / 12).max(1);
@@ -60,7 +62,7 @@ pub fn background_of(
         sample(px(x - pad, sy));
         sample(px(x + w + pad, sy));
     }
-    votes.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c).unwrap_or([255, 255, 255, 255])
+    votes.into_iter().max_by_key(|(_, _, n)| *n).map(|(_, real, _)| real).unwrap_or([255, 255, 255, 255])
 }
 
 /// 译文字号：先按行高给一个，再按「测出来的宽度」收缩，直到塞得进这一行。
@@ -92,9 +94,101 @@ pub fn cover_rect(rect: (i32, i32, i32, i32), grow: i32, bounds: (i32, i32)) -> 
     (x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
+/// 一条画在屏幕上的覆盖指令。界面只管照着画，**排版算在这里**，好让测试盯住。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrawOp {
+    /// 盖住原文的矩形（窗口内逻辑坐标：左, 上, 宽, 高）
+    pub rect: (f32, f32, f32, f32),
+    pub bg: [u8; 4],
+    pub text: String,
+    pub font_size: f32,
+    /// 底色浅就写深色字，反之写浅色字——固定颜色在深色界面上会看不见
+    pub dark_text: bool,
+}
+
+/// 排出这一屏要盖哪些字。
+///
+/// `img` 是截图的像素尺寸，`full` 是窗口在屏幕上的逻辑尺寸：两者比例即缩放系数
+/// （200% 缩放下窗口逻辑尺寸正好是截图的一半，行坐标必须跟着缩，否则译文会整体偏移）。
+/// `measure` 给定文字与字号返回宽度。
+pub fn plan(
+    lines: &[Line],
+    bg: &[[u8; 4]],
+    img: (i32, i32),
+    full: (f32, f32),
+    measure: impl Fn(&str, f32) -> f32,
+) -> Vec<DrawOp> {
+    let sx = full.0 / (img.0.max(1) as f32);
+    let sy = full.1 / (img.1.max(1) as f32);
+    let mut ops = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if !l.worth_covering() {
+            continue;
+        }
+        let (cx, cy, cw, ch) = cover_rect(l.rect, 2, (img.0, img.1));
+        let rect = (cx as f32 * sx, cy as f32 * sy, cw as f32 * sx, ch as f32 * sy);
+        let text = l.dst.clone().unwrap_or_default();
+        let font_size = fit_font_size(rect.3, rect.2, |size| measure(&text, size));
+        let c = bg.get(i).copied().unwrap_or([255, 255, 255, 255]);
+        let lum = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+        ops.push(DrawOp { rect, bg: c, text, font_size, dark_text: lum > 140.0 });
+    }
+    ops
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn l(rect: (i32, i32, i32, i32), src: &str, dst: Option<&str>) -> Line {
+        Line { rect, src: src.into(), dst: dst.map(str::to_string) }
+    }
+
+    /// 200% 缩放：窗口逻辑尺寸是截图像素的一半，覆盖框必须跟着缩一半
+    #[test]
+    fn plan_scales_line_rects_to_the_window() {
+        let lines = vec![l((100, 40, 200, 30), "hello", Some("你好"))];
+        let ops = plan(&lines, &[[255, 255, 255, 255]], (1000, 200), (500.0, 100.0), |_, s| s * 2.0);
+        assert_eq!(ops.len(), 1);
+        // cover_rect 先外扩 2 像素：(98,38,204,34) → 逻辑减半
+        assert_eq!(ops[0].rect, (49.0, 19.0, 102.0, 17.0));
+    }
+
+    #[test]
+    fn plan_skips_lines_without_a_real_translation() {
+        let lines = vec![
+            l((0, 0, 50, 20), "a", None),
+            l((0, 30, 50, 20), "b", Some("b")),
+            l((0, 60, 50, 20), "c", Some("丙")),
+        ];
+        let bg = vec![[255, 255, 255, 255]; 3];
+        let ops = plan(&lines, &bg, (100, 100), (100.0, 100.0), |_, s| s);
+        assert_eq!(ops.len(), 1, "只盖真正翻出来的那一行");
+        assert_eq!(ops[0].text, "丙");
+    }
+
+    #[test]
+    fn plan_picks_text_color_by_background_luminance() {
+        let lines = vec![l((0, 0, 100, 20), "x", Some("甲")), l((0, 30, 100, 20), "y", Some("乙"))];
+        let bg = vec![[250, 250, 250, 255], [20, 20, 24, 255]];
+        let ops = plan(&lines, &bg, (200, 100), (200.0, 100.0), |_, s| s);
+        assert!(ops[0].dark_text, "白底写深色字");
+        assert!(!ops[1].dark_text, "深底写浅色字");
+    }
+
+    #[test]
+    fn plan_shrinks_font_to_fit_the_line() {
+        let lines = vec![l((0, 0, 100, 40), "x", Some("一段很长的译文"))];
+        // 每 1 号字占 20 px：40*0.78=31.2 号会宽到 624，必须收缩
+        let ops = plan(&lines, &[[255, 255, 255, 255]], (200, 100), (200.0, 100.0), |_, s| s * 20.0);
+        // 收缩到塞得下，或者已经到了「再小就看不清」的下限
+        assert!(
+            ops[0].font_size * 20.0 <= ops[0].rect.2 + 0.01 || (ops[0].font_size - 9.0).abs() < 0.01,
+            "既没收缩到塞得下、也不是触到下限：{}",
+            ops[0].font_size
+        );
+        assert!(ops[0].font_size < 31.0, "起始字号 32.76 必须被收缩过");
+    }
 
     fn line(dst: Option<&str>) -> Line {
         Line { rect: (0, 0, 100, 20), src: "hello".into(), dst: dst.map(str::to_string) }
@@ -120,7 +214,7 @@ mod tests {
             Some(if inside { [0, 0, 0, 255] } else { [255, 255, 255, 255] })
         };
         let bg = background_of(px, (10, 10, 100, 20), 3);
-        assert!(bg[0] > 200 && bg[1] > 200 && bg[2] > 200, "应当取到白底，实际 {bg:?}");
+        assert_eq!(bg, [255, 255, 255, 255], "白底要原样返回纯白，量化只用于归票");
     }
 
     #[test]

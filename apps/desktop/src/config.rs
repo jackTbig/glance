@@ -209,6 +209,10 @@ pub struct UiCfg {
     /// **默认为空**：预置名单会让用户在自己常用的窗口里悬停毫无反应，
     /// 而且失败是静默的，很难想到是被名单挡了（Jack 2026-09-09 实测踩过）。
     pub excluded_processes: Vec<String>,
+    /// 截屏翻译用覆盖式（原图上按行盖译文，点击切换原文/译文，有道那种）。
+    /// 关掉就退回老样子：一张卡片给整段译文。
+    #[serde(default = "default_true")]
+    pub region_overlay: bool,
     /// 悬停取到的文字**已经是目标语言**时，干脆不弹卡片（Jack 2026-09-14 要求）。
     /// 悬停是被动触发的：鼠标扫过中文就弹一张「这已经是中文」的卡片非常烦人。
     /// 划词与截屏是用户主动点的，不受这个开关影响——不弹反而像是没反应。
@@ -231,6 +235,7 @@ impl Default for UiCfg {
             panel_width: 420.0,
             panel_max_height: 460.0,
             excluded_processes: Vec::new(),
+            region_overlay: true,
             hover_skip_target_lang: true,
         }
     }

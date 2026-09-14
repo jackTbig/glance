@@ -11,8 +11,8 @@ pub enum Job {
     Selection { target: Option<isize> },
     /// 悬停：取该点的文字。`skip_target_lang` = 取到的已经是目标语言时不出卡片
     Hover { x: i32, y: i32, skip_target_lang: bool },
-    /// 截屏区域
-    Region { x: i32, y: i32, w: u32, h: u32 },
+    /// 截屏区域。`overlay` = 要覆盖式译文（原图上按行盖回去），否则只给一张普通卡片
+    Region { x: i32, y: i32, w: u32, h: u32, overlay: bool },
     /// 已有文本，直接翻（重试按钮用）
     Text { scene: Scene, text: String },
 }
@@ -30,6 +30,10 @@ pub enum Event {
     Nothing { seq: u64, reason: String },
     /// 取到了，但不用翻（已经是目标语言），**界面要静默收掉卡片**，不是报错
     Skipped { seq: u64 },
+    /// 覆盖式截屏：原图与每行的位置先到（译文还没来），界面可以立刻把图铺上去
+    Shot { seq: u64, shot: Arc<text_capture::RegionShot> },
+    /// 覆盖式截屏：第 `idx` 行的译文到了
+    Line { seq: u64, idx: usize, text: String },
 }
 
 pub struct Engine {
@@ -105,7 +109,45 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
                 return;
             }
         },
-        Job::Region { x, y, w, h } => match capturer.region(x, y, w, h) {
+        // 覆盖式截屏走自己的一条路：要的是「每行原文 + 每行位置 + 每行译文」，
+        // 与普通卡片那条「一整段文本」完全不同，混在一起写会互相牵制
+        Job::Region { x, y, w, h, overlay: true } => {
+            match capturer.region_shot(x, y, w, h) {
+                Ok(s) if !s.is_empty() => {
+                    let shot = Arc::new(s);
+                    tracing::debug!("截屏覆盖：识别到 {} 行", shot.lines.len());
+                    let _ = ev.send(Event::Shot { seq, shot: shot.clone() });
+                    // 逐行翻：批量接口内部会并发分块，比一行一个请求省得多
+                    let items: Vec<ai_translate::Item> = shot
+                        .lines
+                        .iter()
+                        .enumerate()
+                        .map(|(i, l)| ai_translate::Item { id: i.to_string(), text: l.text.clone(), is_html: false })
+                        .collect();
+                    let tr = translator.lock().unwrap().clone();
+                    let t1 = std::time::Instant::now();
+                    for r in tr.translate_batch(Scene::Screenshot, items) {
+                        let Ok(idx) = r.id.parse::<usize>() else { continue };
+                        match r.result {
+                            Ok(text) => {
+                                let _ = ev.send(Event::Line { seq, idx, text });
+                            }
+                            // 单行失败不算整次失败：剩下的行照样盖，用户还能看到大部分译文
+                            Err(e) => tracing::warn!("截屏第 {idx} 行翻译失败：{e}"),
+                        }
+                    }
+                    let _ = ev.send(Event::Done { seq, text: String::new(), took_ms: t1.elapsed().as_millis() });
+                }
+                Ok(_) => {
+                    let _ = ev.send(Event::Nothing { seq, reason: "选区里没识别出文字".into() });
+                }
+                Err(e) => {
+                    let _ = ev.send(Event::Failed { seq, error: format!("截屏识别失败：{e}") });
+                }
+            }
+            return;
+        }
+        Job::Region { x, y, w, h, overlay: false } => match capturer.region(x, y, w, h) {
             Ok(c) if !c.is_empty() => {
                 tracing::debug!("截屏识别命中 物理({x},{y}) {w}x{h} {}字", c.text.chars().count());
                 (Scene::Screenshot, c.text, c.source)
