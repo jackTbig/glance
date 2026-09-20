@@ -75,6 +75,11 @@ impl CaptionHost {
         self.exe.is_some()
     }
 
+    /// 字幕 exe 在哪（关于页展示用）
+    pub fn exe_path(&self) -> Option<std::path::PathBuf> {
+        self.exe.clone()
+    }
+
     pub fn running(&mut self) -> bool {
         self.reap();
         self.child.is_some()

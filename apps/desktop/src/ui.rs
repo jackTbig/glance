@@ -27,11 +27,19 @@ pub enum SettingsTab {
     Server,
     /// 运行环境自检：这台机器缺什么、缺了影响哪个功能、点一下能不能补上
     Env,
+    /// 关于：版本、构建信息、各组件在哪、排障要问的那几条
+    About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 5] =
-        [SettingsTab::Service, SettingsTab::Trigger, SettingsTab::Glossary, SettingsTab::Server, SettingsTab::Env];
+    pub const ALL: [SettingsTab; 6] = [
+        SettingsTab::Service,
+        SettingsTab::Trigger,
+        SettingsTab::Glossary,
+        SettingsTab::Server,
+        SettingsTab::Env,
+        SettingsTab::About,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -40,6 +48,7 @@ impl SettingsTab {
             SettingsTab::Glossary => "术语表",
             SettingsTab::Server => "浏览器插件",
             SettingsTab::Env => "运行环境",
+            SettingsTab::About => "关于",
         }
     }
 
@@ -50,6 +59,7 @@ impl SettingsTab {
             SettingsTab::Glossary => "让专有名词按你定的译法翻",
             SettingsTab::Server => "安装或更新 Chrome 插件，以及它依赖的本地服务",
             SettingsTab::Env => "缺什么、影响哪个功能、能不能一键补上",
+            SettingsTab::About => "版本、各组件装在哪、出问题时要提供的信息",
         }
     }
 }
@@ -135,6 +145,8 @@ pub struct App {
     logged_icon_at: Option<(i32, i32)>,
     /// 上次记进日志的卡片宽度，同样是为了不每帧刷屏
     logged_card_w: Option<f32>,
+    /// 关于页里的词库信息（路径 + 条数）。开词库要读几 MB 索引，算一次就存着
+    about_dict: Option<Option<(std::path::PathBuf, usize)>>,
     /// 上次记进日志的内容排版宽度。**窗口宽了而它没跟着宽 = 内容没铺满**
     logged_content_w: Option<f32>,
     /// 上一次发出去的「窗口摆到哪、多大」（逻辑坐标）。**没变就不要再发**——
@@ -307,6 +319,7 @@ impl App {
             place_tries: 0,
             logged_icon_at: None,
             logged_card_w: None,
+            about_dict: None,
             logged_content_w: None,
             cur_seq: 0,
             pending_panel: None,
@@ -1647,6 +1660,7 @@ impl App {
                 SettingsTab::Glossary => self.settings_glossary(ui),
                 SettingsTab::Server => self.settings_server(ui),
                 SettingsTab::Env => self.settings_env(ui),
+                SettingsTab::About => self.settings_about(ui),
             });
         });
 
@@ -1905,6 +1919,93 @@ impl App {
         let app_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let langs = self.capturer.ocr_languages();
         self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs));
+    }
+
+    /// 「关于」页：版本、各组件装在哪、出问题时该提供哪些信息。
+    ///
+    /// 每一行都可以「打开」到对应的目录/文件，右上角一个「复制全部」——
+    /// 排障时最费口舌的就是让人去找日志和配置在哪。
+    fn settings_about(&mut self, ui: &mut egui::Ui) {
+        // 词条数要开一次词库才知道，开一次要读几 MB 索引，所以算完就存着
+        if self.about_dict.is_none() {
+            self.about_dict = Some(match crate::offline::dict_path() {
+                Some(p) => offline_dict::Dict::open(&p).ok().map(|d| (p, d.len())),
+                None => None,
+            });
+        }
+        let facts = crate::about::facts(
+            crate::config::Config::dir(),
+            self.about_dict.clone().flatten(),
+            self.caption.exe_path(),
+            crate::extension::dist_dir(),
+            self.server.as_ref().map(|s| s.port),
+            self.server.as_ref().is_some_and(|s| s.seen.lock().unwrap().at.is_some()),
+        );
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(APP_NAME_ZH).size(18.0).strong());
+            ui.label(RichText::new(crate::about::version_line()).size(12.0).color(Color32::from_gray(150)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("复制全部").on_hover_text("排障时把这些信息一起发过去").clicked() {
+                    let text = crate::about::to_plain(&facts);
+                    if let Err(e) = text_capture::clipboard::set_text(&text) {
+                        self.settings_msg = format!("复制失败：{e}");
+                    } else {
+                        self.settings_msg = "关于信息已复制".into();
+                    }
+                }
+            });
+        });
+        ui.add_space(10.0);
+
+        for f in &facts {
+            ui.horizontal(|ui| {
+                ui.add_sized([LABEL_W, 20.0], egui::Label::new(RichText::new(f.name).size(12.0)));
+                ui.label(RichText::new(&f.value).size(12.0).color(Color32::from_gray(190)));
+                if let Some(path) = &f.path {
+                    let path = path.clone();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("打开").clicked() {
+                            // 文件就打开它所在的目录：直接 explorer 一个 .bin 只会弹「用什么打开」
+                            let target = if path.is_file() { path.parent().map(|d| d.to_path_buf()) } else { Some(path.clone()) };
+                            if let Some(t) = target {
+                                if let Err(e) = crate::extension::reveal_dir(&t) {
+                                    self.settings_msg = format!("打不开：{e}");
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(RichText::new("第三方组件").size(13.0).strong());
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("离线词典数据来自 ECDICT（MIT）；实时字幕的识别模型来自 whisper.cpp（MIT）。")
+                .size(11.0)
+                .color(Color32::from_gray(150)),
+        );
+        ui.add_space(4.0);
+        if ui.small_button("查看授权说明").clicked() {
+            // 授权说明随安装包投在 exe 旁边；开发时退回仓库里的那份
+            let mut doc = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("第三方组件授权.md")));
+            if !doc.as_ref().is_some_and(|d| d.is_file()) {
+                doc = Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/第三方组件授权.md"));
+            }
+            match doc.filter(|d| d.is_file()) {
+                Some(d) => {
+                    if let Err(e) = crate::extension::reveal_dir(&d) {
+                        self.settings_msg = format!("打不开授权说明：{e}");
+                    }
+                }
+                None => self.settings_msg = "找不到授权说明文件".into(),
+            }
+        }
     }
 
     fn settings_env(&mut self, ui: &mut egui::Ui) {
@@ -2171,6 +2272,23 @@ fn scene_of(label: &str) -> Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 加设置页最容易漏的两处：`ALL` 里没挂上（界面里根本看不到），
+    /// 或者 label / hint 忘了补（导航栏上是空白一条）
+    #[test]
+    fn every_settings_tab_is_listed_and_labelled() {
+        let mut labels: Vec<&str> = Vec::new();
+        for t in SettingsTab::ALL {
+            assert!(!t.label().is_empty(), "{t:?} 没有标题");
+            assert!(!t.hint().is_empty(), "{t:?} 没有说明");
+            labels.push(t.label());
+        }
+        labels.sort_unstable();
+        let before = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), before, "两个页签重名，用户分不清");
+        assert!(SettingsTab::ALL.contains(&SettingsTab::About), "关于页要挂在导航栏里");
+    }
 
     #[test]
     fn scene_label_round_trip() {
