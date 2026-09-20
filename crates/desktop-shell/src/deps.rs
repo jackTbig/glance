@@ -75,7 +75,16 @@ impl Fix {
 
 /// 检查这台机器的运行环境。`app_dir` 是程序所在目录（找内嵌的 vc_redist 用）。
 pub fn check_all(app_dir: Option<&std::path::Path>, ocr_languages: &[String]) -> Vec<Item> {
-    vec![vc_redist(app_dir), vulkan(), ocr_chinese(ocr_languages), ocr_english(ocr_languages), chrome(), cli("claude"), cli("codex")]
+    vec![
+        vc_redist(app_dir),
+        vulkan(),
+        ocr_chinese(ocr_languages),
+        ocr_english(ocr_languages),
+        offline_dict(app_dir),
+        chrome(),
+        cli("claude"),
+        cli("codex"),
+    ]
 }
 
 /// 有没有哪一项是硬缺失
@@ -174,6 +183,44 @@ fn ocr_english(langs: &[String]) -> Item {
             powershell: "Add-WindowsCapability -Online -Name 'Language.OCR~~~en-US~0.0.1.0'".into(),
         }),
     }
+}
+
+/// 离线词典。**不是硬缺失**：没有它只是模型慢的时候没有兜底，翻译本身照常。
+fn offline_dict(app_dir: Option<&std::path::Path>) -> Item {
+    let found = dict_path(app_dir);
+    let size = found.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
+    Item {
+        name: "离线词典",
+        status: if found.is_some() { Status::Ok } else { Status::Optional },
+        detail: match &found {
+            Some(p) => format!("{}（{:.0} MB）", p.display(), size as f64 / 1_048_576.0),
+            None => "未安装".into(),
+        },
+        impact: "取词/划词到单个词时没有本地释义兜底：模型慢或断网时要一直等着",
+        how: "重新运行安装包、勾上「离线词典」组件".into(),
+        fix: None,
+    }
+}
+
+/// 词库文件的位置。与 `translate_tool::offline::dict_path` 是同一套判据，
+/// 那边给运行时用、这边给自检与安装向导用；**改一处要改两处**。
+pub fn dict_path(app_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("TT_DICT").map(PathBuf::from) {
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(d) = app_dir {
+        candidates.push(d.join("dict").join("ecdict.bin"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            candidates.push(d.join("dict").join("ecdict.bin"));
+        }
+    }
+    candidates.push(PathBuf::from(r"D:\DevCache\tt-dict\ecdict.bin"));
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 fn chrome() -> Item {

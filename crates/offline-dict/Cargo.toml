@@ -1,0 +1,15 @@
+[package]
+name = "offline-dict"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# 纯 Rust 的 deflate（MIT）。词库正文分块压缩，51 MB → 20 MB 出头；
+# 选它是因为不带 C 依赖，不会把 CMake/构建工具链的麻烦引进来
+miniz_oxide = "0.8"
+tracing.workspace = true
+
+[[bin]]
+name = "build-dict"
+path = "src/bin/build_dict.rs"

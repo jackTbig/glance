@@ -39,6 +39,9 @@ pub struct PanelState {
     pub scene_label: &'static str,
     /// 用户亲手拖过这张卡片。拖过之后就不再跟着截屏框对齐，用户放哪儿就在哪儿
     pub user_moved: bool,
+    /// 当前显示的是离线词典的释义（模型还没回来）。卡片上要标出来，
+    /// 否则用户分不清「这就是结果」还是「还在等」
+    pub offline: bool,
     /// 这张卡片的内容来自屏幕上的哪一块（虚拟屏物理矩形）。**只有截屏翻译有**。
     /// 有值时卡片与框选区同宽、左边缘对齐（Jack 2026-09-13 要求）。
     pub source_rect: Option<(i32, i32, u32, u32)>,
@@ -59,6 +62,7 @@ impl PanelState {
             opened_at: Instant::now(),
             scene_label,
             user_moved: false,
+            offline: false,
             source_rect: None,
         }
     }

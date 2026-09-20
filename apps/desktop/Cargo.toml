@@ -23,6 +23,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ai-translate = { path = "../../crates/ai-translate" }
+offline-dict = { path = "../../crates/offline-dict" }
 text-capture = { path = "../../crates/text-capture" }
 desktop-shell = { path = "../../crates/desktop-shell" }
 anyhow.workspace = true

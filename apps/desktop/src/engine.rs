@@ -34,18 +34,30 @@ pub enum Event {
     Shot { seq: u64, shot: Arc<text_capture::RegionShot> },
     /// 覆盖式截屏：第 `idx` 行的译文到了
     Line { seq: u64, idx: usize, text: String },
+    /// 离线词典先查到的释义（行标记格式）。模型的词条回来后会把它替换掉
+    Offline { seq: u64, text: String },
 }
 
 pub struct Engine {
     tx: Sender<(u64, Job)>,
     seq: std::sync::atomic::AtomicU64,
+    /// 要不要先给离线释义（设置里可关）。用原子量是为了改完立刻生效，不必重建引擎
+    offline_on: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// 离线词典。**打开一次留着**：打开要读 3 MB 索引，每次查词都重开就没意义了。
+/// 没有词库文件时是 None——离线查词不工作，翻译照常走模型。
+type OfflineDict = Option<Mutex<offline_dict::Dict>>;
 
 impl Engine {
     /// 起工作线程。返回引擎与事件接收端。
     pub fn spawn(translator: Arc<Mutex<Translator>>, capturer: Arc<Capturer>) -> (Engine, Receiver<Event>) {
         let (tx, rx) = crossbeam_channel::unbounded::<(u64, Job)>();
         let (ev_tx, ev_rx) = crossbeam_channel::unbounded::<Event>();
+        // 词库在工作线程里打开：读 3 MB 索引要几毫秒，别卡住启动那一帧
+        let dict: Arc<std::sync::OnceLock<OfflineDict>> = Arc::new(std::sync::OnceLock::new());
+        let offline_on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let offline_for_thread = offline_on.clone();
         std::thread::Builder::new()
             .name("capture-translate".into())
             .spawn(move || {
@@ -55,14 +67,36 @@ impl Engine {
                     while let Ok(next) = rx.try_recv() {
                         latest = next;
                     }
-                    run_job(latest.0, latest.1, &translator, &capturer, &ev_tx);
+                    let dict = dict.get_or_init(|| match crate::offline::dict_path() {
+                        Some(p) => match offline_dict::Dict::open(&p) {
+                            Ok(d) => {
+                                tracing::info!("离线词典已加载：{} 条（{}）", d.len(), p.display());
+                                Some(Mutex::new(d))
+                            }
+                            Err(e) => {
+                                tracing::warn!("离线词典打不开，只走模型：{e}");
+                                None
+                            }
+                        },
+                        None => {
+                            tracing::info!("没找到离线词典文件，查词只走模型");
+                            None
+                        }
+                    });
+                    let dict = offline_for_thread.load(std::sync::atomic::Ordering::Relaxed).then_some(dict).unwrap_or(&None);
+                    run_job(latest.0, latest.1, &translator, &capturer, dict, &ev_tx);
                 }
             })
             .expect("spawn capture-translate");
-        (Engine { tx, seq: std::sync::atomic::AtomicU64::new(0) }, ev_rx)
+        (Engine { tx, seq: std::sync::atomic::AtomicU64::new(0), offline_on }, ev_rx)
     }
 
     /// 派活，返回这次的序号（界面用它丢弃过期事件）
+    /// 开关「先给离线释义」。设置窗保存时调一次即可，不用重建引擎
+    pub fn set_offline(&self, on: bool) {
+        self.offline_on.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn submit(&self, job: Job) -> u64 {
         let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let _ = self.tx.send((seq, job));
@@ -70,7 +104,14 @@ impl Engine {
     }
 }
 
-fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &Arc<Capturer>, ev: &Sender<Event>) {
+fn run_job(
+    seq: u64,
+    job: Job,
+    translator: &Arc<Mutex<Translator>>,
+    capturer: &Arc<Capturer>,
+    dict: &OfflineDict,
+    ev: &Sender<Event>,
+) {
     let t0 = std::time::Instant::now();
     // 方向现取：设置里改完立刻生效，不用重启
     let dir = translator.lock().unwrap().config().direction;
@@ -170,6 +211,22 @@ fn run_job(seq: u64, job: Job, translator: &Arc<Mutex<Translator>>, capturer: &A
         other => other,
     };
     let _ = ev.send(Event::Captured { seq, text: text.clone(), source, scene, took_ms: t0.elapsed().as_millis() });
+
+    // 查词场景先给一份离线释义：模型有时要好几秒，干等着像卡死
+    // （Jack 2026-09-20 报）。模型的词条回来会把它替换掉。
+    if scene == Scene::Word {
+        if let Some(d) = dict {
+            let t = std::time::Instant::now();
+            let found = d.lock().unwrap().lookup(&text);
+            match found {
+                Some((e, restored)) => {
+                    tracing::info!("离线词典命中 {:?}（{} µs）", e.word, t.elapsed().as_micros());
+                    let _ = ev.send(Event::Offline { seq, text: crate::offline::to_markers(&e, restored, &text) });
+                }
+                None => tracing::debug!("离线词典里没有 {text:?}"),
+            }
+        }
+    }
 
     // 第二步：翻译
     let tr = translator.lock().unwrap().clone();

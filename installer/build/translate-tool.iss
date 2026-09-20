@@ -16,7 +16,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.0.5"
+#define AppVer "1.0.6"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -83,6 +83,7 @@ Name: "custom"; Description: "自定义"; Flags: iscustom
 ; 顺序别动：[Code] 的 CurPageChanged 按下标 0..3 给组件页标注「无需升级」
 [Components]
 Name: "glance"; Description: "简译（翻译工具，必装）"; Types: compact full custom; Flags: fixed
+Name: "dict"; Description: "离线词典（29 MB，模型慢或断网时先给本地释义）"; Types: compact full custom
 Name: "caption"; Description: "实时字幕（本机识别英文语音并翻译，需要支持 Vulkan 的显卡）"; Types: full custom
 Name: "caption\turbo"; Description: "large-v3-turbo 模型（最终句定稿，最准，574 MB）"; Types: full custom
 Name: "caption\small"; Description: "base.en 模型（说话过程中逐字上屏，最快，148 MB）"; Types: full custom
@@ -99,6 +100,9 @@ Source: "{#TargetDir}\tt-doctor.exe"; DestDir: "{app}"; Flags: ignoreversion; Co
 Source: "{#RepoDir}\apps\caption\installer\deps\vc_redist.x64.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: caption
 Source: "{#RepoDir}\extension\dist\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: glance
 Source: "{#RepoDir}\docs\安装与使用.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme; Components: glance
+Source: "{#RepoDir}\docs\第三方组件授权.md"; DestDir: "{app}"; Flags: ignoreversion; Components: glance
+; 离线词库：内容取自 ECDICT（MIT），同名同大小就跳过——它不会原地改，改了必然换版本
+Source: "{#DictBin}"; DestDir: "{app}\dict"; DestName: "ecdict.bin"; Flags: ignoreversion; Components: dict; Check: DictNeedsCopy({#DictSize})
 ; 字幕的 exe 就放在简译旁边——`caption::find_exe` 头一个就找这里。与已装的源码指纹一致就跳过
 Source: "{#CaptionDir}\{#CaptionExe}"; DestDir: "{app}"; Flags: ignoreversion; Components: caption; Check: CaptionNeedsCopy
 Source: "{#RepoDir}\apps\caption\config.example.toml"; DestDir: "{app}"; Flags: ignoreversion; Components: caption
@@ -123,6 +127,7 @@ Filename: "{app}\extension"; Description: "打开插件目录（Chrome 扩展页
 ; 卸载只清安装目录里的东西。**不许加 %APPDATA% 下的任何路径**：
 ; 那里是用户的配置、Key、术语表与会议记录，卸了重装还要接着用。
 [UninstallDelete]
+Type: filesandordirs; Name: "{app}\dict"
 Type: filesandordirs; Name: "{app}\models"
 Type: files; Name: "{app}\live-caption.stamp"
 
@@ -140,7 +145,7 @@ var
   // 另一种安装方式下的旧版：本次不会覆盖它，而是另装一份
   OtherFound: Boolean;
   OtherVersion, OtherDir: String;
-  CaptionPresent, CaptionUpToDate, TurboPresent, SmallPresent: Boolean;
+  CaptionPresent, CaptionUpToDate, TurboPresent, SmallPresent, DictPresent: Boolean;
   ComponentsTagged: Boolean;
   // Inno 会对同一个文件多次调用 Check，「跳过」只记一次日志，免得一条刷四遍
   LoggedCaptionSkip, LoggedTurboSkip, LoggedSmallSkip: Boolean;
@@ -213,6 +218,46 @@ begin
   end;
 end;
 
+var LoggedDictSkip: Boolean;
+
+/// 词库已经在且大小一样就不重装：它不会原地改，改了必然换版本，29 MB 解压能省则省
+/// 旧安装目录里已经有同样大小的词库吗。与 `DictNeedsCopy` 同一套判据，
+/// 区别只是查的目录不同：这个给升级提示页用，那个给拷贝时用
+function DictPresentIn(Dir: String; Size: Integer): Boolean;
+var
+  Found: TFindRec;
+begin
+  Result := False;
+  if FindFirst(AddBackslash(Dir) + 'dict\ecdict.bin', Found) then
+  begin
+    try
+      Result := (Found.SizeLow = Size) and (Size > 0);
+    finally
+      FindClose(Found);
+    end;
+  end;
+end;
+
+function DictNeedsCopy(Size: Integer): Boolean;
+var
+  Found: TFindRec;
+begin
+  Result := True;
+  if FindFirst(ExpandConstant('{app}\dict\ecdict.bin'), Found) then
+  begin
+    try
+      if Found.SizeLow = Size then
+        Result := False;
+    finally
+      FindClose(Found);
+    end;
+  end;
+  if Result or LoggedDictSkip then
+    exit;
+  LoggedDictSkip := True;
+  Log('离线词库已存在且大小一致，跳过（无需升级）');
+end;
+
 function ModelNeedsCopy(Name: String; Size: Integer): Boolean;
 begin
   Result := not ModelPresentIn(ExpandConstant('{app}'), Name, Size);
@@ -236,7 +281,7 @@ end;
 
 function UpgradeText(): String;
 var
-  NL, AppLine, CapLine, TurboLine, SmallLine, AppData: String;
+  NL, AppLine, CapLine, DictLine, TurboLine, SmallLine, AppData: String;
 begin
   NL := #13#10;
   AppData := ExpandConstant('{userappdata}');
@@ -251,6 +296,11 @@ begin
     CapLine := '已是最新，无需升级（跳过）'
   else
     CapLine := '有更新，会随本次安装一并覆盖';
+
+  if DictPresent then
+    DictLine := '已安装，无需升级（跳过 ' + SizeText({#DictSize}) + '）'
+  else
+    DictLine := '未安装（需要的话可在「选择组件」页勾选）';
 
   if TurboPresent then
     TurboLine := '已安装，无需升级（跳过 ' + SizeText({#TurboSize}) + '）'
@@ -272,6 +322,7 @@ begin
     '  · 上次选择的开机自启、桌面快捷方式' + NL + NL +
     '■ 各组件' + NL +
     '  · 简译（主程序）：' + AppLine + NL +
+    '  · 离线词典：' + DictLine + NL +
     '  · 实时字幕：' + CapLine + NL +
     '  · 识别模型 large-v3-turbo：' + TurboLine + NL +
     '  · 识别模型 base.en：' + SmallLine + NL + NL +
@@ -332,6 +383,7 @@ begin
     CaptionUpToDate := CaptionSameAs(PrevDir);
     TurboPresent := ModelPresentIn(PrevDir, TurboName, {#TurboSize});
     SmallPresent := ModelPresentIn(PrevDir, SmallName, {#SmallSize});
+    DictPresent := DictPresentIn(PrevDir, {#DictSize});
     Caption := '覆盖升级';
     Desc := '检测到本机已安装 {#AppNameZh}，本次会覆盖旧版本，你的配置全部保留';
     Txt := UpgradeText();
@@ -368,13 +420,17 @@ begin
     // 来回翻页会多次进这里，只标一次，免得后缀越叠越长
     ComponentsTagged := True;
     L := WizardForm.ComponentsList;
+    // 下标对应 [Components] 的行序：0 简译 / 1 离线词典 / 2 字幕 / 3 turbo 模型 / 4 base.en 模型。
+    // **加组件要同步改这里**，不然标注会挂到隔壁那一行上
     L.ItemCaption[0] := L.ItemCaption[0] + '　（覆盖升级）';
+    if DictPresent then
+      L.ItemCaption[1] := L.ItemCaption[1] + '　（已安装，无需升级）';
     if CaptionUpToDate then
-      L.ItemCaption[1] := L.ItemCaption[1] + '　（已是最新，无需升级）';
+      L.ItemCaption[2] := L.ItemCaption[2] + '　（已是最新，无需升级）';
     if TurboPresent then
-      L.ItemCaption[2] := L.ItemCaption[2] + '　（已安装，无需升级）';
-    if SmallPresent then
       L.ItemCaption[3] := L.ItemCaption[3] + '　（已安装，无需升级）';
+    if SmallPresent then
+      L.ItemCaption[4] := L.ItemCaption[4] + '　（已安装，无需升级）';
   end;
 end;
 

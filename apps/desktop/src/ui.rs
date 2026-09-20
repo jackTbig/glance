@@ -210,6 +210,8 @@ impl App {
         let translator = Arc::new(Mutex::new(ai_translate::Translator::new(cfg.translator_config())?));
         let capturer = Arc::new(Capturer::new());
         let (engine, events) = Engine::spawn(translator.clone(), capturer.clone());
+        // 把开关同步给引擎：不同步的话用户关掉了，重启又会自己回来
+        engine.set_offline(cfg.ui.offline_dict);
         let (trig_tx, triggers) = crossbeam_channel::unbounded();
         let watcher = crate::watcher::spawn(watch_cfg(&cfg), trig_tx);
 
@@ -538,6 +540,7 @@ impl App {
             let seq = match &e {
                 Event::Shot { seq, .. }
                 | Event::Line { seq, .. }
+                | Event::Offline { seq, .. }
                 | Event::Captured { seq, .. }
                 | Event::Delta { seq, .. }
                 | Event::Done { seq, .. }
@@ -599,11 +602,21 @@ impl App {
                     let doing = if scene == Scene::Word { "查词中…" } else { "翻译中…" };
                     p.phase = Phase::Working(format!("{} {took_ms}ms · {doing}", source.label_zh()));
                 }
+                // 离线释义：先上屏顶着，等模型的词条到了再被下面的 Delta / Done 覆盖
+                Event::Offline { text, .. } => {
+                    if p.translated.trim().is_empty() {
+                        p.translated = text;
+                        p.offline = true;
+                        p.phase = Phase::Working("离线释义 · 正在等模型…".into());
+                    }
+                }
                 Event::Delta { text, .. } => {
                     p.translated = text;
+                    p.offline = false;
                 }
                 Event::Done { text, took_ms, .. } => {
                     p.translated = text;
+                    p.offline = false;
                     p.phase = Phase::Done;
                     tracing::info!("{} 完成 {took_ms}ms", p.scene_label);
                     done = true;
@@ -612,7 +625,13 @@ impl App {
                 // 1.0.3 用户报「没有选中文字 / 取词无效」时日志里一个字都没有，无从查起
                 Event::Failed { error, .. } => {
                     tracing::warn!("{} 失败：{error}", p.scene_label);
-                    p.phase = Phase::Failed(error);
+                    // 离线释义已经在卡片上了就留着，只把状态改成提示——
+                    // 模型没回来不等于没东西可看，红字盖掉反而更糟
+                    if p.offline {
+                        p.phase = Phase::Notice(format!("模型没回来，显示的是离线词典的释义（{error}）"));
+                    } else {
+                        p.phase = Phase::Failed(error);
+                    }
                     done = true;
                 }
                 Event::Nothing { reason, .. } => {
@@ -774,6 +793,7 @@ impl App {
                 *self.translator.lock().unwrap() = t;
                 self.cfg = self.draft.clone();
                 self.watcher.set_config(watch_cfg(&self.cfg));
+                self.engine.set_offline(self.cfg.ui.offline_dict);
                 match self.cfg.save() {
                     Ok(()) => self.settings_msg = "已保存并生效（热键与服务端口改动需重启应用）".into(),
                     Err(e) => self.settings_msg = format!("保存失败：{e}"),
@@ -1230,6 +1250,10 @@ impl App {
                 let head = ui.horizontal(|ui| {
                     ui.label(RichText::new(p.scene_label).color(Color32::from_rgb(150, 180, 255)).size(13.0));
                     ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::GRAY).size(12.0));
+                    if p.offline {
+                        ui.label(RichText::new("· 离线").color(Color32::from_rgb(190, 160, 90)).size(12.0))
+                            .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("✕").on_hover_text("关闭").clicked() {
                             close = true;
@@ -1811,6 +1835,10 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.draft.ui.icon_timeout_ms).range(500..=10000).suffix(" ms"));
         });
         let skip_label = if self.draft.ui.hover_skip_target_lang { "不弹卡片" } else { "照样弹" };
+        let dict_label = if self.draft.ui.offline_dict { "先给离线释义" } else { "只等模型" };
+        Self::row(ui, "离线词典", "取到单个词时先用本地词库秒出一份释义，模型的完整词条回来再替换", |ui| {
+            ui.checkbox(&mut self.draft.ui.offline_dict, dict_label);
+        });
         Self::row(ui, "遇目标语言", "悬停取到的已经是目标语言时（英译中时扫到中文）要不要出卡片", |ui| {
             ui.checkbox(&mut self.draft.ui.hover_skip_target_lang, skip_label);
         });

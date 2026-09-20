@@ -6,6 +6,7 @@ pub mod config;
 pub mod dict;
 pub mod engine;
 pub mod extension;
+pub mod offline;
 pub mod overlay;
 pub mod panel;
 pub mod presets;

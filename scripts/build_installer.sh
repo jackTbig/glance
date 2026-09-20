@@ -78,6 +78,26 @@ TURBO_SIZE="$(stat -c %s "$MODEL_TURBO")"
 SMALL_SIZE="$(stat -c %s "$MODEL_SMALL")"
 
 echo "[6/6] 生成安装包"
+# 离线词库：由 offline-dict 的 build-dict 从 ECDICT 的 CSV 生成（65 MB 的 CSV 不进仓库）。
+# 缺词库不致命——少一个可选组件而已，但要**明确说出来**：
+# 装完发现没有离线查词，很难想到是打包时少了这个文件。
+DICT_BIN="${TT_DICT_BIN:-D:/DevCache/tt-dict/ecdict.bin}"
+DICT_CSV="${TT_DICT_CSV:-D:/DevCache/tt-dict/ecdict.csv}"
+if [ ! -f "$DICT_BIN" ] && [ -f "$DICT_CSV" ]; then
+  echo "  词库还没编译，从 $DICT_CSV 生成…"
+  cargo run --release -q -p offline-dict --bin build-dict -- "$DICT_CSV" "$DICT_BIN"
+fi
+if [ -f "$DICT_BIN" ]; then
+  DICT_SIZE=$(stat -c %s "$DICT_BIN")
+  echo "  离线词库 $DICT_BIN（$((DICT_SIZE / 1048576)) MB）"
+else
+  echo "  ⚠ 没有离线词库（$DICT_BIN），这次打出来的包里「离线词典」组件是空的" >&2
+  echo "    补法：curl -L -o $DICT_CSV https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv" >&2
+  # 给 ISCC 一个存在的占位文件：Source 指向不存在的路径会直接编译失败
+  DICT_BIN="$ROOT/docs/第三方组件授权.md"
+  DICT_SIZE=0
+fi
+
 ISCC="D:/Tools/InnoSetup/ISCC.exe"
 # Inno 7 的 ISCC 用 -q（不是 /Q）；脚本路径必须给 Windows 形式，否则 /d/... 会被当成 /d 选项
 TARGET_DIR="${TT_TARGET_DIR:-D:/DevCache/tt-target}/release"
@@ -90,6 +110,8 @@ MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" "$ISCC" -q \
   "/DCaptionStamp=$CAPTION_STAMP" \
   "/DTurboSize=$TURBO_SIZE" \
   "/DSmallSize=$SMALL_SIZE" \
+  "/DDictBin=$(cygpath -w "$DICT_BIN")" \
+  "/DDictSize=$DICT_SIZE" \
   "$(cygpath -w "$ROOT/installer/build/translate-tool.iss")"
 echo "  字幕指纹：${CAPTION_STAMP:0:16}…"
 ls -la dist/

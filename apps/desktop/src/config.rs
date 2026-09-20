@@ -209,6 +209,10 @@ pub struct UiCfg {
     /// **默认为空**：预置名单会让用户在自己常用的窗口里悬停毫无反应，
     /// 而且失败是静默的，很难想到是被名单挡了（Jack 2026-09-09 实测踩过）。
     pub excluded_processes: Vec<String>,
+    /// 取到单个词时先给一份离线词典的释义，模型的词条回来再替换（Jack 2026-09-20 要求）。
+    /// 关掉就只等模型。
+    #[serde(default = "default_true")]
+    pub offline_dict: bool,
     /// 截屏翻译用覆盖式（原图上按行盖译文，点击切换原文/译文，有道那种）。
     /// 关掉就退回老样子：一张卡片给整段译文。
     #[serde(default = "default_true")]
@@ -235,6 +239,7 @@ impl Default for UiCfg {
             panel_width: 420.0,
             panel_max_height: 460.0,
             excluded_processes: Vec::new(),
+            offline_dict: true,
             region_overlay: true,
             hover_skip_target_lang: true,
         }
