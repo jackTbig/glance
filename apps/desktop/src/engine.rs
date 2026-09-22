@@ -46,6 +46,28 @@ pub struct Engine {
     seq: std::sync::atomic::AtomicU64,
     /// 要不要先给离线释义（设置里可关）。用原子量是为了改完立刻生效，不必重建引擎
     offline_on: Arc<std::sync::atomic::AtomicBool>,
+    /// 与工作线程共用的离线词典：主窗口边输入边查要在界面线程直接查（一次 0.2 ms 以内）
+    dict: Arc<std::sync::OnceLock<OfflineDict>>,
+}
+
+/// 打开离线词典，只在第一次用时调一次（工作线程与界面线程谁先用谁打开）
+fn open_dict() -> OfflineDict {
+    match crate::offline::dict_path() {
+        Some(p) => match offline_dict::Dict::open(&p) {
+            Ok(d) => {
+                tracing::info!("离线词典已加载：{} 条（{}）", d.len(), p.display());
+                Some(Mutex::new(d))
+            }
+            Err(e) => {
+                tracing::warn!("离线词典打不开，只走模型：{e}");
+                None
+            }
+        },
+        None => {
+            tracing::info!("没找到离线词典文件，查词只走模型");
+            None
+        }
+    }
 }
 
 /// 离线词典。**打开一次留着**：打开要读 3 MB 索引，每次查词都重开就没意义了。
@@ -61,6 +83,7 @@ impl Engine {
         let dict: Arc<std::sync::OnceLock<OfflineDict>> = Arc::new(std::sync::OnceLock::new());
         let offline_on = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let offline_for_thread = offline_on.clone();
+        let dict_for_ui = dict.clone();
         std::thread::Builder::new()
             .name("capture-translate".into())
             .spawn(move || {
@@ -70,28 +93,28 @@ impl Engine {
                     while let Ok(next) = rx.try_recv() {
                         latest = next;
                     }
-                    let dict = dict.get_or_init(|| match crate::offline::dict_path() {
-                        Some(p) => match offline_dict::Dict::open(&p) {
-                            Ok(d) => {
-                                tracing::info!("离线词典已加载：{} 条（{}）", d.len(), p.display());
-                                Some(Mutex::new(d))
-                            }
-                            Err(e) => {
-                                tracing::warn!("离线词典打不开，只走模型：{e}");
-                                None
-                            }
-                        },
-                        None => {
-                            tracing::info!("没找到离线词典文件，查词只走模型");
-                            None
-                        }
-                    });
+                    let dict = dict.get_or_init(open_dict);
                     let dict = offline_for_thread.load(std::sync::atomic::Ordering::Relaxed).then_some(dict).unwrap_or(&None);
                     run_job(latest.0, latest.1, &translator, &capturer, dict, &ev_tx);
                 }
             })
             .expect("spawn capture-translate");
-        (Engine { tx, seq: std::sync::atomic::AtomicU64::new(0), offline_on }, ev_rx)
+        (Engine { tx, seq: std::sync::atomic::AtomicU64::new(0), offline_on, dict: dict_for_ui }, ev_rx)
+    }
+
+    /// 在界面线程直接查离线词典，返回卡片用的行标记；没有词库或查不到返回 None。
+    ///
+    /// 主窗口边输入边查用它：不走工作线程的队列——那边「只做最新一件活」，
+    /// 打字时的查询会把正在等模型的那次请求挤掉。
+    pub fn lookup_offline(&self, text: &str) -> Option<String> {
+        let d = self.dict.get_or_init(open_dict).as_ref()?;
+        let (e, restored) = d.lock().unwrap().lookup(text)?;
+        Some(crate::offline::to_markers(&e, restored, text))
+    }
+
+    /// 本机有没有离线词典（界面据此决定提示语）
+    pub fn has_offline_dict(&self) -> bool {
+        self.dict.get_or_init(open_dict).is_some()
     }
 
     /// 派活，返回这次的序号（界面用它丢弃过期事件）

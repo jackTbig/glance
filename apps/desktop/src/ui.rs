@@ -154,6 +154,8 @@ pub struct App {
     manual: crate::manual::ManualState,
     /// 窗口已经开着时又被要求打开（换页）：下一帧把它提到前面、改标题，但不重新摆位
     settings_raise: bool,
+    /// 窗口当前按哪类页定的尺寸（true = 翻译页）；None = 窗口没开
+    settings_sized_as: Option<bool>,
     /// 关于页里的词库信息（路径 + 条数）。开词库要读几 MB 索引，算一次就存着
     about_dict: Option<Option<(std::path::PathBuf, usize)>>,
     /// 上次记进日志的内容排版宽度。**窗口宽了而它没跟着宽 = 内容没铺满**
@@ -308,6 +310,8 @@ impl App {
 
         // 调试钩子：TT_MAIN_INPUT=<文字> 启动即开主窗口、填好输入并翻一次（截图与自测用）
         let main_input = std::env::var("TT_MAIN_INPUT").ok().filter(|t| !t.trim().is_empty());
+        // TT_MAIN_LIVE=1 配合上面：只填进去走「边输入边查」，不提交
+        let main_live_only = std::env::var("TT_MAIN_LIVE").is_ok_and(|v| v == "1");
         let open_settings_at_start = main_input.is_some() || std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0");
         Ok(App {
             draft: cfg.clone(),
@@ -331,8 +335,10 @@ impl App {
             logged_icon_at: None,
             logged_card_w: None,
             about_dict: None,
+            settings_sized_as: None,
             manual: crate::manual::ManualState {
-                autosubmit: main_input.is_some(),
+                autosubmit: main_input.is_some() && !main_live_only,
+                edited_at: (main_input.is_some() && main_live_only).then(Instant::now),
                 input: main_input.clone().unwrap_or_default(),
                 ..Default::default()
             },
@@ -1665,10 +1671,7 @@ impl App {
     /// 代价是开着设置时不响应划词与悬停——改设置时本来也不会同时划词。
     fn draw_settings(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
-        // Jack 2026-09-09 用鼠标调出来的顺手尺寸（客户区物理像素）。
-        // `ViewportCommand::InnerSize` 在这里按**物理**像素落地，实测给 386 得到的就是 386 物理宽。
-        const W: f32 = 771.0;
-        const H: f32 = 691.0;
+        let (win_w, win_h) = window_size(self.settings_tab);
 
         if self.settings_place_frames > 0 {
             self.settings_place_frames -= 1;
@@ -1678,13 +1681,14 @@ impl App {
             const MARGIN_LEFT: i32 = 160;
             const MARGIN_TOP: i32 = 120;
             let at = (
-                (sx + MARGIN_LEFT).min(sx + sw as i32 - W as i32),
-                (sy + MARGIN_TOP).min(sy + sh as i32 - H as i32),
+                (sx + MARGIN_LEFT).min(sx + sw as i32 - win_w as i32),
+                (sy + MARGIN_TOP).min(sy + sh as i32 - win_h as i32),
             );
             ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
             ctx.send_viewport_cmd(ViewportCommand::Title(window_title(self.settings_tab)));
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
+            self.settings_sized_as = Some(self.settings_tab == SettingsTab::Translate);
             self.last_place = None; // 设置窗自己管摆位，别让缓存挡住后续的摆放
             tracing::debug!(
                 "设置窗摆位：剩 {} 帧 ppp={} 目标物理{:?} → 逻辑{:?}",
@@ -1714,6 +1718,13 @@ impl App {
             }
         }
 
+        // 翻译页与设置页尺寸不同：换到另一类页时只改大小，不挪位置（用户可能拖过窗口）
+        let kind = self.settings_tab == SettingsTab::Translate;
+        if self.settings_place_frames == 0 && self.settings_sized_as.is_some_and(|k| k != kind) {
+            self.settings_sized_as = Some(kind);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
+        }
+
         if self.settings_raise {
             self.settings_raise = false;
             ctx.send_viewport_cmd(ViewportCommand::Title(window_title(self.settings_tab)));
@@ -1729,81 +1740,87 @@ impl App {
 
         let mut do_apply = false;
         let mut do_test = false;
-        egui::Panel::left("settings-nav").exact_size(104.0).show(root_ui, |ui| {
-            ui.add_space(8.0);
-            for tab in SettingsTab::ALL {
-                let selected = self.settings_tab == tab;
-                if ui
-                    .add_sized([92.0, 26.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(12.0)))
-                    .clicked()
-                {
-                    self.settings_tab = tab;
-                    self.settings_scroll_top = true; // 换页要回到顶部，否则顶着上一页的滚动位置
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Title(window_title(tab)));
-                    if tab == SettingsTab::Translate {
-                        self.manual.want_focus = true;
+        // 翻译页是独立的主窗口：不要左侧设置导航，整个窗口给输入框和结果
+        if self.settings_tab == SettingsTab::Translate {
+            close |= self.draw_translate_window(root_ui);
+        } else {
+            egui::Panel::left("settings-nav").exact_size(104.0).show(root_ui, |ui| {
+                ui.add_space(8.0);
+                for tab in SettingsTab::ALL {
+                    let selected = self.settings_tab == tab;
+                    if ui
+                        .add_sized([92.0, 26.0], egui::Button::selectable(selected, RichText::new(tab.label()).size(12.0)))
+                        .clicked()
+                    {
+                        self.settings_tab = tab;
+                        self.settings_scroll_top = true; // 换页要回到顶部，否则顶着上一页的滚动位置
+                        ui.ctx().send_viewport_cmd(ViewportCommand::Title(window_title(tab)));
+                        if tab == SettingsTab::Translate {
+                            self.manual.want_focus = true;
+                        }
                     }
+                    ui.add_space(2.0);
                 }
+
+                // 操作按钮放这儿而不是窗口底部：Panel::bottom 与 bottom_up 布局在这个
+                // 窗口里都排不出来（矩形落在可见区外 / 被 ScrollArea 挤掉），导航栏则稳定可见
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+                // 有没保存的改动时按钮填成主色，一眼看出「改了还没存」；存完（draft 与 cfg 相等）自动变回来
+                let dirty = self.settings_dirty();
+                do_apply = ui
+                    .add_sized([92.0, 26.0], save_button(dirty))
+                    .on_hover_text(if dirty { "有改动还没保存" } else { "没有改动" })
+                    .clicked();
+                ui.add_space(3.0);
+                do_test = ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("测试翻译").size(12.0))).clicked();
+                ui.add_space(3.0);
+                if ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("关闭").size(12.0))).clicked() {
+                    close = true;
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(RichText::new("运行状态").size(10.0).color(Color32::from_gray(110)));
                 ui.add_space(2.0);
-            }
-
-            // 操作按钮放这儿而不是窗口底部：Panel::bottom 与 bottom_up 布局在这个
-            // 窗口里都排不出来（矩形落在可见区外 / 被 ScrollArea 挤掉），导航栏则稳定可见
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(8.0);
-            // 有没保存的改动时按钮填成主色，一眼看出「改了还没存」；存完（draft 与 cfg 相等）自动变回来
-            let dirty = self.settings_dirty();
-            do_apply = ui
-                .add_sized([92.0, 26.0], save_button(dirty))
-                .on_hover_text(if dirty { "有改动还没保存" } else { "没有改动" })
-                .clicked();
-            ui.add_space(3.0);
-            do_test = ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("测试翻译").size(12.0))).clicked();
-            ui.add_space(3.0);
-            if ui.add_sized([92.0, 24.0], egui::Button::new(RichText::new("关闭").size(12.0))).clicked() {
-                close = true;
-            }
-
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.label(RichText::new("运行状态").size(10.0).color(Color32::from_gray(110)));
-            ui.add_space(2.0);
-            for line in self.status.split(" · ") {
-                ui.label(RichText::new(line).size(10.0).color(Color32::from_gray(140)));
-            }
-        });
-
-        egui::CentralPanel::default().show(root_ui, |ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new(self.settings_tab.label()).size(16.0).strong());
-            ui.label(RichText::new(self.settings_tab.hint()).size(10.0).color(Color32::from_gray(140)));
-            if !self.settings_msg.is_empty() {
-                let msg = self.settings_msg.clone();
-                let bad = msg.contains("失败") || msg.contains("有误");
-                let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
-                let short: String = msg.chars().take(30).collect();
-                let shown = if short.chars().count() < msg.chars().count() { format!("{short}…") } else { short };
-                ui.add_space(4.0);
-                ui.label(RichText::new(shown).size(11.0).color(color)).on_hover_text(&msg);
-            }
-            ui.add_space(8.0);
-            let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
-            if self.settings_scroll_top {
-                self.settings_scroll_top = false;
-                area = area.vertical_scroll_offset(0.0);
-            }
-            area.show(ui, |ui| match self.settings_tab {
-                SettingsTab::Translate => self.settings_translate(ui),
-                SettingsTab::Service => self.settings_service(ui),
-                SettingsTab::Trigger => self.settings_trigger(ui),
-                SettingsTab::Glossary => self.settings_glossary(ui),
-                SettingsTab::Server => self.settings_server(ui),
-                SettingsTab::Env => self.settings_env(ui),
-                SettingsTab::About => self.settings_about(ui),
+                for line in self.status.split(" · ") {
+                    ui.label(RichText::new(line).size(10.0).color(Color32::from_gray(140)));
+                }
             });
-        });
+
+            egui::CentralPanel::default().show(root_ui, |ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new(self.settings_tab.label()).size(16.0).strong());
+                ui.label(RichText::new(self.settings_tab.hint()).size(10.0).color(Color32::from_gray(140)));
+                if !self.settings_msg.is_empty() {
+                    let msg = self.settings_msg.clone();
+                    let bad = msg.contains("失败") || msg.contains("有误");
+                    let color = if bad { Color32::from_rgb(200, 90, 90) } else { Color32::from_rgb(80, 155, 95) };
+                    let short: String = msg.chars().take(30).collect();
+                    let shown = if short.chars().count() < msg.chars().count() { format!("{short}…") } else { short };
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(shown).size(11.0).color(color)).on_hover_text(&msg);
+                }
+                ui.add_space(8.0);
+                let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                if self.settings_scroll_top {
+                    self.settings_scroll_top = false;
+                    area = area.vertical_scroll_offset(0.0);
+                }
+                area.show(ui, |ui| match self.settings_tab {
+                    // 翻译页走 draw_translate_window，不会到这里
+                    SettingsTab::Translate => {}
+                    SettingsTab::Service => self.settings_service(ui),
+                    SettingsTab::Trigger => self.settings_trigger(ui),
+                    SettingsTab::Glossary => self.settings_glossary(ui),
+                    SettingsTab::Server => self.settings_server(ui),
+                    SettingsTab::Env => self.settings_env(ui),
+                    SettingsTab::About => self.settings_about(ui),
+                });
+            });
+        }
 
         if do_apply {
             self.apply_settings();
@@ -1829,6 +1846,7 @@ impl App {
         }
         if close {
             self.settings_open = false;
+            self.settings_sized_as = None;
             self.settings_place_frames = 0;
             self.settings_want_pos = None;
             // 变回那个躲在屏幕外的浮窗宿主。**四条命令必须在这一帧全发完**，
@@ -2062,9 +2080,37 @@ impl App {
         self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs));
     }
 
-    /// 主窗口「翻译」页：输入框 + 结果区。方向按输入内容自动定，单词给词典条目。
-    fn settings_translate(&mut self, ui: &mut egui::Ui) {
-        use crate::manual::Phase as MPhase;
+    /// 主窗口（翻译页）的外框：顶栏（名字 + 设置入口）+ 翻译区。返回是否要关窗。
+    fn draw_translate_window(&mut self, root_ui: &mut egui::Ui) -> bool {
+        let mut close = false;
+        let mut to_settings = false;
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(root_ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(18, 14)))
+            .show(root_ui, |ui| {
+                // 标题栏已经写着「简译」，这里不再重复一个大标题；设置入口放在操作行里
+                to_settings = self.settings_translate(ui);
+            });
+        if to_settings {
+            self.settings_tab = SettingsTab::Service;
+            self.settings_scroll_top = true;
+            root_ui.ctx().send_viewport_cmd(ViewportCommand::Title(window_title(SettingsTab::Service)));
+        }
+        // Esc 收起窗口（与浮动卡片一致）。输入框里的 Esc 也算：这里没有需要 Esc 撤销的编辑操作
+        if root_ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
+        }
+        close
+    }
+
+    /// 翻译区：输入框 + 操作行 + 结果卡片 + 最近查过。
+    ///
+    /// 英文单词**边输入边查本地词库**（停手 0.25 秒），不等回车、不花模型的钱；
+    /// 回车才问模型要完整词条或整句译文（Jack 2026-09-22 定）。
+    /// 返回用户是否点了「设置」
+    fn settings_translate(&mut self, ui: &mut egui::Ui) -> bool {
+        use crate::manual::{Live, Phase as MPhase, View};
+        let mut to_settings = false;
+        let now = Instant::now();
         let cfg_dir = ai_translate::Direction::parse(&self.cfg.direction);
         let base = self.cfg.ui.font_size;
         let id = egui::Id::new("manual-input");
@@ -2077,29 +2123,48 @@ impl App {
         let resp = ui.add(
             egui::TextEdit::multiline(&mut self.manual.input)
                 .id(id)
-                .desired_rows(4)
+                .desired_rows(3)
                 .desired_width(f32::INFINITY)
-                .hint_text("输入单词或句子")
-                .font(egui::FontId::proportional(base)),
+                .margin(egui::vec2(10.0, 8.0))
+                .hint_text("输入英文单词查词典，或输入一句话翻译")
+                .font(egui::FontId::proportional(base + 3.0)),
         );
+        if resp.changed() {
+            self.manual.edited(now);
+        }
         if self.manual.want_focus {
             self.manual.want_focus = false;
             resp.request_focus();
         }
 
+        // 边输入边查：停手够久就查一次本地词库（界面线程直查，0.2 ms 以内）
+        if let Some(q) = self.manual.due_live_query(now) {
+            let markers = self.engine.lookup_offline(&q);
+            tracing::debug!("主窗口边查 {q:?}：{}", if markers.is_some() { "命中" } else { "没有" });
+            self.manual.live = Some(Live { query: q, markers });
+        }
+        if self.manual.edited_at.is_some() {
+            ui.ctx().request_repaint_after(crate::manual::LIVE_DELAY);
+        }
+
         let mut submit = enter || std::mem::take(&mut self.manual.autosubmit);
         let mut clear = false;
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            submit |= ui.add_enabled(self.manual.can_submit(), egui::Button::new("翻译")).clicked();
-            clear = ui.button("清空").clicked();
             let t = self.manual.input.trim();
-            let hint = if t.is_empty() {
-                "回车翻译，Shift+回车换行".to_string()
-            } else {
-                format!("将按{}翻", cfg_dir.for_input(t).label_zh())
-            };
-            ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(140)));
+            let dir_text = if t.is_empty() { "自动识别方向".to_string() } else { format!("{} · 自动", cfg_dir.for_input(t).label_zh()) };
+            ui.label(RichText::new(dir_text).size(12.0).color(Color32::from_gray(130)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let go = egui::Button::new(RichText::new("翻译").size(13.0).color(Color32::WHITE))
+                    .fill(Color32::from_rgb(64, 120, 220))
+                    .min_size(egui::vec2(64.0, 26.0));
+                submit |= ui.add_enabled(self.manual.can_submit(), go).on_hover_text("回车").clicked();
+                clear = ui.add(egui::Button::new(RichText::new("清空").size(13.0)).min_size(egui::vec2(52.0, 26.0))).clicked();
+                to_settings = ui
+                    .add(egui::Button::new(RichText::new("⚙").size(15.0)).frame(false))
+                    .on_hover_text("设置：翻译服务、快捷键、术语表……")
+                    .clicked();
+            });
         });
         if clear {
             self.manual.clear();
@@ -2110,71 +2175,133 @@ impl App {
             self.manual.begin(seq, cfg_dir);
             tracing::info!("主窗口翻译：{} 字，{}", self.manual.original.chars().count(), self.manual.dir.label_zh());
         }
-
-        if self.manual.phase == MPhase::Idle {
-            return;
-        }
         ui.add_space(10.0);
 
-        let entry = self.manual.entry();
-        let mut copy = false;
-        // 结果画在与浮动卡片同款的深色卡片里：`draw_entry` 与卡片正文的配色都是按深底定的
-        // （白字），直接画在设置窗的浅色底上几乎看不见（2026-09-22 首次实拍发现）。
-        // 用同一套卡片也让两处的版式天然一致，不用维护第二份配色。
-        egui::Frame::NONE
-            .fill(Color32::from_rgba_unmultiplied(28, 28, 32, 246))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(12.0)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let what = if self.manual.scene == Scene::Word { "查词" } else { "翻译" };
-                    ui.label(RichText::new(format!("{} · {what}", self.manual.dir.label_zh())).size(12.0).color(Color32::from_rgb(150, 180, 255)));
-                    if self.manual.offline {
-                        ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)))
-                            .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
-                    }
-                    if !self.manual.result.trim().is_empty() {
+        let mut copy: Option<String> = None;
+        let copied = self.manual.copied_at.is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
+        let hint = |ui: &mut egui::Ui, text: &str| {
+            ui.label(RichText::new(text).size(12.0).color(Color32::from_gray(140)));
+        };
+        let view = self.manual.view();
+        // 结果卡片占住剩下的高度（留一行给「最近查过」），内容长了在卡片里滚
+        let card_max_h = (ui.available_height() - 34.0).max(80.0);
+        match view {
+            View::Empty => {}
+            View::Hint => {
+                let t = self.manual.input.trim();
+                let is_word = ai_translate::scene::looks_like_word_in(t, ai_translate::Direction::ToChinese);
+                if is_word && !self.engine.has_offline_dict() {
+                    hint(ui, "本机没装离线词典，回车问模型");
+                } else if !is_word {
+                    hint(ui, "回车翻译，Shift+回车换行");
+                }
+            }
+            View::LiveMiss => hint(ui, &format!("本地词库里没有「{}」，回车问模型", self.manual.input.trim())),
+            View::Live(markers) => {
+                let entry = crate::dict::parse(&markers);
+                result_card(ui, card_max_h, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("本地词典").size(12.0).color(Color32::from_rgb(150, 180, 255)));
+                        ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            copy = ui.small_button("复制").clicked();
+                            if ui.small_button(if copied { "已复制" } else { "复制" }).clicked() {
+                                copy = Some(entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| markers.clone()));
+                            }
                         });
+                    });
+                    ui.add_space(4.0);
+                    match &entry {
+                        Some(e) => draw_entry(ui, e, self.manual.input.trim(), base + 1.0),
+                        None => {
+                            ui.label(RichText::new(&markers).size(base).color(Color32::WHITE));
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("回车查模型的完整词条（例句、词形）").size(11.0).color(Color32::from_gray(140)));
+                });
+            }
+            View::Result => {
+                let entry = self.manual.entry();
+                result_card(ui, card_max_h, |ui| {
+                    ui.horizontal(|ui| {
+                        let what = if self.manual.scene == Scene::Word { "查词" } else { "翻译" };
+                        ui.label(RichText::new(format!("{} · {what}", self.manual.dir.label_zh())).size(12.0).color(Color32::from_rgb(150, 180, 255)));
+                        if self.manual.offline {
+                            ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)))
+                                .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
+                        }
+                        if !self.manual.result.trim().is_empty() {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button(if copied { "已复制" } else { "复制" }).clicked() {
+                                    // 词典条目复制整理过的文字，不是带 #标记 的原始回包（与浮动卡片一致）
+                                    copy = Some(entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| self.manual.result.clone()));
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                    if let Some(e) = &entry {
+                        draw_entry(ui, e, &self.manual.original, base + 1.0);
+                    } else if !self.manual.result.trim().is_empty() {
+                        ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base + 1.0).color(Color32::WHITE)).selectable(true));
+                    }
+                    ui.add_space(6.0);
+                    match &self.manual.phase {
+                        MPhase::Working => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                let doing = if self.manual.scene == Scene::Word { "查词中…" } else { "翻译中…" };
+                                ui.label(RichText::new(doing).size(12.0).color(Color32::GRAY));
+                            });
+                        }
+                        MPhase::Done { took_ms } => {
+                            ui.label(RichText::new(format!("用时 {took_ms} ms")).size(10.0).color(Color32::from_gray(120)));
+                        }
+                        MPhase::Notice(msg) => {
+                            ui.label(RichText::new(msg).size(11.0).color(Color32::from_gray(150)));
+                        }
+                        MPhase::Failed(msg) => {
+                            ui.label(RichText::new(msg).size(12.0).color(Color32::from_rgb(220, 110, 110)));
+                        }
+                        MPhase::Idle => {}
                     }
                 });
-                ui.add_space(4.0);
-                if let Some(e) = &entry {
-                    draw_entry(ui, e, &self.manual.original, base);
-                } else if !self.manual.result.trim().is_empty() {
-                    ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base).color(Color32::WHITE)).selectable(true));
-                }
-                ui.add_space(6.0);
-                match &self.manual.phase {
-                    MPhase::Working => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            let doing = if self.manual.scene == Scene::Word { "查词中…" } else { "翻译中…" };
-                            ui.label(RichText::new(doing).size(12.0).color(Color32::GRAY));
-                        });
-                    }
-                    MPhase::Done { took_ms } => {
-                        ui.label(RichText::new(format!("用时 {took_ms} ms")).size(10.0).color(Color32::from_gray(120)));
-                    }
-                    MPhase::Notice(msg) => {
-                        ui.label(RichText::new(msg).size(11.0).color(Color32::from_gray(150)));
-                    }
-                    MPhase::Failed(msg) => {
-                        ui.label(RichText::new(msg).size(12.0).color(Color32::from_rgb(220, 110, 110)));
-                    }
-                    MPhase::Idle => {}
-                }
-            });
-        if copy {
-            // 词典条目复制整理过的文字，不是带 #标记 的原始回包（与浮动卡片一致）
-            let text = entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| self.manual.result.clone());
-            match text_capture::clipboard::set_text(&text) {
-                Ok(()) => self.settings_msg = "已复制".into(),
-                Err(e) => self.settings_msg = format!("复制失败：{e}"),
             }
         }
+        if let Some(text) = copy {
+            match text_capture::clipboard::set_text(&text) {
+                Ok(()) => self.manual.copied_at = Some(now),
+                Err(e) => tracing::warn!("主窗口复制失败：{e}"),
+            }
+        }
+
+        // 最近查过：点一下重查（单词走本地词库，句子直接翻）
+        if !self.manual.recent.is_empty() {
+            ui.add_space(8.0);
+            let mut pick: Option<String> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("最近：").size(11.0).color(Color32::from_gray(130)));
+                for r in &self.manual.recent {
+                    let shown: String = r.chars().take(16).collect();
+                    let shown = if shown.chars().count() < r.chars().count() { format!("{shown}…") } else { shown };
+                    if ui.add(egui::Button::new(RichText::new(shown).size(11.0)).frame(false)).on_hover_text(r).clicked() {
+                        pick = Some(r.clone());
+                    }
+                }
+            });
+            if let Some(r) = pick {
+                self.manual.input = r;
+                self.manual.want_focus = true;
+                if ai_translate::scene::looks_like_word_in(self.manual.input.trim(), ai_translate::Direction::ToChinese) {
+                    // 单词：立刻查本地，不用等停手
+                    self.manual.edited(now - crate::manual::LIVE_DELAY);
+                } else {
+                    self.manual.edited(now);
+                    self.manual.autosubmit = true;
+                }
+            }
+        }
+        to_settings
     }
 
     /// 「关于」页：版本、各组件装在哪、出问题时该提供哪些信息。
@@ -2466,6 +2593,30 @@ impl App {
         self.quit = true;
     }
 
+}
+
+/// 窗口客户区尺寸（交给 `ViewportCommand::InnerSize`）。设置页 771x691 是 Jack 2026-09-09
+/// 用鼠标调出来的顺手值。**单位是逻辑像素**：2026-09-22 实拍，给翻译页 860 宽落地成 1720 物理宽
+/// （200% 缩放）——与早先「按物理像素落地」的记录相反，以这次截图为准。
+/// 翻译页是查词窗口，窄而竖长，结果卡片在里面滚
+fn window_size(tab: SettingsTab) -> (f32, f32) {
+    if tab == SettingsTab::Translate {
+        (520.0, 600.0)
+    } else {
+        (771.0, 691.0)
+    }
+}
+
+/// 结果卡片：与浮动卡片同款深底（`draw_entry` 与正文都是按深底配的白字），内容长了在卡片里滚
+fn result_card(ui: &mut egui::Ui, max_h: f32, add: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgba_unmultiplied(28, 28, 32, 246))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(14.0)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(max_h - 28.0).show(ui, add);
+        });
 }
 
 /// 窗口标题：翻译页是主窗口，其余是设置

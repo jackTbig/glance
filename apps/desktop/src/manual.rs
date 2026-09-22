@@ -6,6 +6,36 @@
 
 use crate::engine::Event;
 use ai_translate::{Direction, Scene};
+use std::time::{Duration, Instant};
+
+/// 停止输入多久之后查本地词库。太短会每敲一个字母查一次、结果闪来闪去
+pub const LIVE_DELAY: Duration = Duration::from_millis(250);
+/// 「最近查过」最多留几条（只在内存里，不落盘——项目不做翻译历史）
+pub const RECENT_MAX: usize = 8;
+
+/// 边输入边查的结果
+#[derive(Debug, Clone, PartialEq)]
+pub struct Live {
+    /// 查的是哪个词（输入框再变就作废）
+    pub query: String,
+    /// 行标记格式的词条；None = 本地词库里没有
+    pub markers: Option<String>,
+}
+
+/// 结果区此刻该画什么
+#[derive(Debug, Clone, PartialEq)]
+pub enum View {
+    /// 输入框空：只给「最近查过」
+    Empty,
+    /// 本地词库查到了，还没问模型
+    Live(String),
+    /// 是个词，但本地词库里没有：提示回车问模型
+    LiveMiss,
+    /// 句子（或本机没有词库）：提示回车翻译
+    Hint,
+    /// 上一次提交的结果（进行中或已完成），且输入框没改过
+    Result,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
@@ -36,6 +66,13 @@ pub struct ManualState {
     pub want_focus: bool,
     /// 下一帧自动提交一次（只给调试钩子 TT_MAIN_INPUT 用）
     pub autosubmit: bool,
+    /// 输入框上次变化的时刻；过了 `LIVE_DELAY` 就查一次本地词库
+    pub edited_at: Option<Instant>,
+    pub live: Option<Live>,
+    /// 最近提交过的原文，新的在前
+    pub recent: Vec<String>,
+    /// 「复制」按钮刚点过（按钮文字变成「已复制」一会儿）
+    pub copied_at: Option<Instant>,
 }
 
 impl Default for ManualState {
@@ -51,6 +88,10 @@ impl Default for ManualState {
             phase: Phase::Idle,
             want_focus: true,
             autosubmit: false,
+            edited_at: None,
+            live: None,
+            recent: Vec::new(),
+            copied_at: None,
         }
     }
 }
@@ -66,6 +107,10 @@ impl ManualState {
     pub fn begin(&mut self, seq: u64, cfg_dir: Direction) {
         self.seq = seq;
         self.original = self.input.trim().to_string();
+        self.recent.retain(|r| r != &self.original);
+        self.recent.insert(0, self.original.clone());
+        self.recent.truncate(RECENT_MAX);
+        self.edited_at = None;
         self.dir = cfg_dir.for_input(&self.original);
         self.scene = Scene::Selection;
         self.result.clear();
@@ -73,8 +118,47 @@ impl ManualState {
         self.phase = Phase::Working;
     }
 
+    /// 清空输入与结果。「最近查过」留着——清空是为了查下一个，不是抹掉记录
     pub fn clear(&mut self) {
-        *self = ManualState { want_focus: true, ..ManualState::default() };
+        let recent = std::mem::take(&mut self.recent);
+        *self = ManualState { want_focus: true, recent, ..ManualState::default() };
+    }
+
+    /// 输入框变了：记下时刻，等停手再查；之前的边查结果作废
+    pub fn edited(&mut self, now: Instant) {
+        self.edited_at = Some(now);
+        self.live = None;
+    }
+
+    /// 现在该不该查本地词库了；该查就返回要查的词（只认英文单词/短语——词库是英汉的）
+    pub fn due_live_query(&mut self, now: Instant) -> Option<String> {
+        let at = self.edited_at?;
+        if now.duration_since(at) < LIVE_DELAY {
+            return None;
+        }
+        self.edited_at = None;
+        let q = self.input.trim();
+        ai_translate::scene::looks_like_word_in(q, Direction::ToChinese).then(|| q.to_string())
+    }
+
+    /// 结果区该画什么
+    pub fn view(&self) -> View {
+        let q = self.input.trim();
+        if q.is_empty() {
+            return View::Empty;
+        }
+        // 输入框还是提交时那段：显示提交的结果（模型的完整词条优先于边查的本地释义）
+        if self.phase != Phase::Idle && q == self.original {
+            return View::Result;
+        }
+        match &self.live {
+            Some(l) if l.query == q => match &l.markers {
+                Some(m) => View::Live(m.clone()),
+                None => View::LiveMiss,
+            },
+            // 句子，或者还在等停手：先别闪「没查到」，上一次提交的结果也别留着误导
+            _ => View::Hint,
+        }
     }
 
     /// 这个事件是不是给主窗口的
@@ -168,6 +252,54 @@ mod tests {
         m.on_event(Event::Done { seq: 7, text: "#词 run\n#释 v. 跑；运行".into(), took_ms: 900 });
         assert!(!m.offline);
         assert_eq!(m.phase, Phase::Done { took_ms: 900 });
+    }
+
+    #[test]
+    fn live_lookup_waits_for_the_typing_to_pause_and_only_takes_english_words() {
+        let t0 = Instant::now();
+        let mut m = ManualState { input: "resilient".into(), ..Default::default() };
+        m.edited(t0);
+        assert_eq!(m.due_live_query(t0 + Duration::from_millis(100)), None, "还在打字，别查");
+        assert_eq!(m.due_live_query(t0 + LIVE_DELAY).as_deref(), Some("resilient"));
+        assert_eq!(m.due_live_query(t0 + LIVE_DELAY * 2), None, "查过一次就不再查，等下次输入");
+        let mut zh = ManualState { input: "今天天气很好".into(), ..Default::default() };
+        zh.edited(t0);
+        assert_eq!(zh.due_live_query(t0 + LIVE_DELAY), None, "词库是英汉的，中文与句子不查");
+    }
+
+    #[test]
+    fn view_prefers_live_entry_until_submitted_then_the_result() {
+        let mut m = ManualState::default();
+        assert_eq!(m.view(), View::Empty);
+        m.input = "run".into();
+        m.live = Some(Live { query: "run".into(), markers: Some("#词 run".into()) });
+        assert_eq!(m.view(), View::Live("#词 run".into()));
+        m.begin(3, Direction::ToChinese);
+        assert_eq!(m.view(), View::Result, "提交后显示模型那一路（离线释义也会从那一路先到）");
+        m.input = "runner".into();
+        m.edited(Instant::now());
+        assert_eq!(m.view(), View::Hint, "改了输入，旧结果不能留着冒充新词的释义");
+        m.live = Some(Live { query: "runner".into(), markers: None });
+        assert_eq!(m.view(), View::LiveMiss);
+        m.input = "It is fine.".into();
+        assert_eq!(m.view(), View::Hint);
+    }
+
+    #[test]
+    fn recent_keeps_newest_first_without_duplicates_and_survives_clear() {
+        let mut m = ManualState::default();
+        for w in ["a", "b", "a"] {
+            m.input = w.into();
+            m.begin(1, Direction::ToChinese);
+        }
+        assert_eq!(m.recent, vec!["a".to_string(), "b".to_string()]);
+        m.clear();
+        assert_eq!(m.recent.len(), 2, "清空只清输入与结果");
+        for i in 0..20 {
+            m.input = format!("w{i}");
+            m.begin(1, Direction::ToChinese);
+        }
+        assert_eq!(m.recent.len(), RECENT_MAX);
     }
 
     #[test]
