@@ -2114,51 +2114,59 @@ impl App {
         if self.manual.phase == MPhase::Idle {
             return;
         }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
+        ui.add_space(10.0);
 
         let entry = self.manual.entry();
         let mut copy = false;
-        ui.horizontal(|ui| {
-            let what = if self.manual.scene == Scene::Word { "查词" } else { "翻译" };
-            ui.label(RichText::new(format!("{} · {what}", self.manual.dir.label_zh())).size(12.0).color(Color32::from_rgb(150, 180, 255)));
-            if self.manual.offline {
-                ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)))
-                    .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
-            }
-            if !self.manual.result.trim().is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    copy = ui.small_button("复制").clicked();
-                });
-            }
-        });
-        ui.add_space(4.0);
-        if let Some(e) = &entry {
-            draw_entry(ui, e, &self.manual.original, base);
-        } else if !self.manual.result.trim().is_empty() {
-            ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base).color(Color32::WHITE)).selectable(true));
-        }
-        ui.add_space(6.0);
-        match &self.manual.phase {
-            MPhase::Working => {
+        // 结果画在与浮动卡片同款的深色卡片里：`draw_entry` 与卡片正文的配色都是按深底定的
+        // （白字），直接画在设置窗的浅色底上几乎看不见（2026-09-22 首次实拍发现）。
+        // 用同一套卡片也让两处的版式天然一致，不用维护第二份配色。
+        egui::Frame::NONE
+            .fill(Color32::from_rgba_unmultiplied(28, 28, 32, 246))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.spinner();
-                    let doing = if self.manual.scene == Scene::Word { "查词中…" } else { "翻译中…" };
-                    ui.label(RichText::new(doing).size(12.0).color(Color32::GRAY));
+                    let what = if self.manual.scene == Scene::Word { "查词" } else { "翻译" };
+                    ui.label(RichText::new(format!("{} · {what}", self.manual.dir.label_zh())).size(12.0).color(Color32::from_rgb(150, 180, 255)));
+                    if self.manual.offline {
+                        ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)))
+                            .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
+                    }
+                    if !self.manual.result.trim().is_empty() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            copy = ui.small_button("复制").clicked();
+                        });
+                    }
                 });
-            }
-            MPhase::Done { took_ms } => {
-                ui.label(RichText::new(format!("用时 {took_ms} ms")).size(10.0).color(Color32::from_gray(120)));
-            }
-            MPhase::Notice(msg) => {
-                ui.label(RichText::new(msg).size(11.0).color(Color32::from_gray(150)));
-            }
-            MPhase::Failed(msg) => {
-                ui.label(RichText::new(msg).size(12.0).color(Color32::from_rgb(220, 110, 110)));
-            }
-            MPhase::Idle => {}
-        }
+                ui.add_space(4.0);
+                if let Some(e) = &entry {
+                    draw_entry(ui, e, &self.manual.original, base);
+                } else if !self.manual.result.trim().is_empty() {
+                    ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base).color(Color32::WHITE)).selectable(true));
+                }
+                ui.add_space(6.0);
+                match &self.manual.phase {
+                    MPhase::Working => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            let doing = if self.manual.scene == Scene::Word { "查词中…" } else { "翻译中…" };
+                            ui.label(RichText::new(doing).size(12.0).color(Color32::GRAY));
+                        });
+                    }
+                    MPhase::Done { took_ms } => {
+                        ui.label(RichText::new(format!("用时 {took_ms} ms")).size(10.0).color(Color32::from_gray(120)));
+                    }
+                    MPhase::Notice(msg) => {
+                        ui.label(RichText::new(msg).size(11.0).color(Color32::from_gray(150)));
+                    }
+                    MPhase::Failed(msg) => {
+                        ui.label(RichText::new(msg).size(12.0).color(Color32::from_rgb(220, 110, 110)));
+                    }
+                    MPhase::Idle => {}
+                }
+            });
         if copy {
             // 词典条目复制整理过的文字，不是带 #标记 的原始回包（与浮动卡片一致）
             let text = entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| self.manual.result.clone());
