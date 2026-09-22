@@ -1,20 +1,21 @@
-//! 终端划词回归：自己开一个 Windows Terminal 窗口，在里面拖选一段字，再走 `Capturer::selection`。
+//! 终端划词回归：自己开一个 Windows Terminal 窗口，选中里面的一行字，再走 `Capturer::selection`。
 //!
-//! 验的是「终端不发 Ctrl+C、改读无障碍接口选区」那条路。**会接管鼠标约 3 秒**，
-//! 开跑前自己等键鼠静止 60 秒（有人在用机器就退出），只动自己开的那个窗口，跑完关掉它。
+//! 选区用无障碍接口的 `TextRange::Select` 造，**不动鼠标键盘**（估坐标拖选容易落在字外面，
+//! 被测的是「读选区」而不是「怎么选」）。但新开的窗口会抢前台，所以开跑前仍等键鼠静止 60 秒，
+//! 有人在用机器就退出；跑完关掉自己开的窗口。
 
 #[cfg(windows)]
 fn main() -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
-    use windows_sys::Win32::Foundation::{HWND, RECT};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetLastInputInfo, LASTINPUTINFO,
-    };
+    use uiautomation::patterns::UITextPattern;
+    use uiautomation::types::{TreeScope, UIProperty};
+    use uiautomation::variants::Variant;
+    use uiautomation::UIAutomation;
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     unsafe {
-        // 与 translate-tool.exe 一样按物理像素算坐标
-        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(-4isize as _);
         let mut li = LASTINPUTINFO { cbSize: 8, dwTime: 0 };
         GetLastInputInfo(&mut li);
         let idle = windows_sys::Win32::System::SystemInformation::GetTickCount().wrapping_sub(li.dwTime);
@@ -24,8 +25,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     const TITLE: &str = "GlanceTermProbe";
-    std::process::Command::new("wt.exe")
-        .args(["-w", "new", "--title", TITLE, "--suppressApplicationTitle", "cmd", "/k", "echo glance terminal probe"])
+    const LINE: &str = "glance terminal probe";
+    // wt.exe 是应用执行别名，不一定在 PATH 里（从 Git Bash 起就找不到），按固定位置找
+    let wt = std::path::PathBuf::from(std::env::var("LOCALAPPDATA")?).join(r"Microsoft\WindowsApps\wt.exe");
+    std::process::Command::new(&wt)
+        .args(["-w", "new", "--title", TITLE, "--suppressApplicationTitle", "cmd", "/k", &format!("echo {LINE}")])
         .spawn()?;
     let wide: Vec<u16> = TITLE.encode_utf16().chain(Some(0)).collect();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -38,49 +42,47 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(200));
     };
     std::thread::sleep(Duration::from_millis(1500));
-    let result = (|| -> anyhow::Result<String> {
-        unsafe {
-            SetForegroundWindow(hwnd);
-            std::thread::sleep(Duration::from_millis(300));
-            let mut r: RECT = std::mem::zeroed();
-            GetWindowRect(hwnd, &mut r);
-            // 第一行文字大约在标题栏下方；从左往右拖过一整行
-            let dpi = windows_sys::Win32::UI::HiDpi::GetDpiForWindow(hwnd) as i32;
-            let y = r.top + 60 * dpi / 96;
-            let (x0, x1) = (r.left + 12 * dpi / 96, r.left + 400 * dpi / 96);
-            windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos(x0, y);
-            mouse(0x0002); // 左键按下
-            for i in 1..=20 {
-                SetCursorPos(x0 + (x1 - x0) * i / 20, y);
-                std::thread::sleep(Duration::from_millis(15));
-            }
-            mouse(0x0004); // 左键松开
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        let before = text_capture::clipboard::get_text().unwrap_or_default();
+
+    let result = (|| -> anyhow::Result<()> {
+        let auto = UIAutomation::new()?;
+        let win = auto.element_from_handle((hwnd as isize).into())?;
+        let cond = auto.create_property_condition(UIProperty::ClassName, Variant::from("TermControl"), None)?;
+        let term = win.find_first(TreeScope::Descendants, &cond)?;
+        let tp = term.get_pattern::<UITextPattern>()?;
+        let range = tp.get_document_range()?.find_text(LINE, true, false)?;
+        range.select()?;
+        std::thread::sleep(Duration::from_millis(200));
+
         let cap = text_capture::Capturer::new();
+
+        // 1. 有原生选区：读得到，且不碰剪贴板
+        let before = text_capture::clipboard::sequence_number();
         let got = cap.selection(Some(hwnd as isize))?;
-        let after = text_capture::clipboard::get_text().unwrap_or_default();
-        anyhow::ensure!(before == after, "剪贴板被动过了——终端这条路不该碰剪贴板");
-        Ok(got.text)
+        println!("有选区时取到：{:?}（来源 {:?}）", got.text, got.source);
+        anyhow::ensure!(got.text.contains(LINE), "取到的不是探针那行字");
+        anyhow::ensure!(text_capture::clipboard::sequence_number() == before, "剪贴板被动过了——终端这条路不该碰剪贴板");
+
+        // 2. 清掉选区（选一个空范围）：没有剪贴板变化时要明确报错，而不是空文本
+        let empty = tp.get_document_range()?.find_text(LINE, true, false)?;
+        empty.move_endpoint_by_range(
+            uiautomation::types::TextPatternRangeEndpoint::End,
+            &empty,
+            uiautomation::types::TextPatternRangeEndpoint::Start,
+        )?;
+        empty.select()?;
+        std::thread::sleep(Duration::from_millis(200));
+        match cap.selection_since(Some(hwnd as isize), Some(text_capture::clipboard::sequence_number())) {
+            Err(e) => println!("无选区时报错：{e}"),
+            Ok(c) => anyhow::bail!("无选区时不该取到东西：{:?}", c.text),
+        }
+        Ok(())
     })();
     unsafe {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
     }
-    match result {
-        Ok(t) => {
-            println!("取到：{t:?}");
-            anyhow::ensure!(t.contains("glance terminal probe"), "取到的不是探针那行字");
-            println!("通过");
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(windows)]
-unsafe fn mouse(flags: u32) {
-    windows_sys::Win32::UI::Input::KeyboardAndMouse::mouse_event(flags, 0, 0, 0, 0);
+    result?;
+    println!("通过");
+    Ok(())
 }
 
 #[cfg(not(windows))]
