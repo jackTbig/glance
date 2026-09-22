@@ -8,7 +8,8 @@ use text_capture::{Capturer, Source};
 #[derive(Debug, Clone)]
 pub enum Job {
     /// 划词：自己去取选中文本。`target` 是有选区的窗口，见 `Capturer::selection`
-    Selection { target: Option<isize> },
+    /// `clip_seq`：拖选开始时的剪贴板序号，终端里读不到选区时用来认「程序自己复制的」
+    Selection { target: Option<isize>, clip_seq: Option<u32> },
     /// 悬停：取该点的文字。`skip_target_lang` = 取到的已经是目标语言时不出卡片
     Hover { x: i32, y: i32, skip_target_lang: bool },
     /// 截屏区域。`overlay` = 要覆盖式译文（原图上按行盖回去），否则只给一张普通卡片
@@ -118,7 +119,7 @@ fn run_job(
     // 第一步：拿到原文与场景
     let (scene, text, source) = match job {
         Job::Text { scene, text } => (scene, text, Source::Clipboard),
-        Job::Selection { target } => match capturer.selection(target) {
+        Job::Selection { target, clip_seq } => match capturer.selection_since(target, clip_seq) {
             Ok(c) if !c.is_empty() => (Scene::Selection, c.text, c.source),
             Ok(_) => {
                 let _ = ev.send(Event::Nothing { seq, reason: "没有选中文字".into() });

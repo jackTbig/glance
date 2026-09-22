@@ -21,6 +21,7 @@ mod win {
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
     };
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
     };
@@ -136,6 +137,23 @@ mod win {
         unsafe {
             SendInput(seq.len() as u32, seq.as_ptr(), std::mem::size_of::<INPUT>() as i32);
         }
+    }
+
+    /// 剪贴板序号：每次有程序写剪贴板就加一，用来判断「这段时间里有没有人复制过」
+    pub fn sequence_number() -> u32 {
+        unsafe { GetClipboardSequenceNumber() }
+    }
+
+    /// 当前前台窗口（不管属于哪个进程）
+    pub fn foreground_window() -> isize {
+        unsafe { GetForegroundWindow() as isize }
+    }
+
+    /// 窗口类名（取不到返回空串）
+    pub fn class_name(hwnd: isize) -> String {
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetClassNameW(hwnd as HWND, buf.as_mut_ptr(), buf.len() as i32) };
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
     }
 
     /// 取当前选中的文本。整个过程保存并还原原剪贴板内容。
@@ -255,7 +273,39 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{foreign_foreground_window, get_text, selected_text, selected_text_from, set_text};
+pub use win::{class_name, foreground_window, sequence_number, foreign_foreground_window, get_text, selected_text, selected_text_from, set_text};
+
+#[cfg(not(windows))]
+pub fn class_name(_hwnd: isize) -> String {
+    String::new()
+}
+
+#[cfg(not(windows))]
+pub fn foreground_window() -> isize {
+    0
+}
+
+#[cfg(not(windows))]
+pub fn sequence_number() -> u32 {
+    0
+}
+
+/// 这个窗口类是不是终端。
+///
+/// **对终端绝不能模拟 Ctrl+C**：终端里没有原生选区时，Ctrl+C 就是「中断」信号，
+/// 会打断里面正在跑的程序（2026-09-22 在 Windows Terminal 里跑 Claude Code 时实测复现
+/// 「没有选中文字」，同时那一下 Ctrl+C 是发给 Claude Code 的）。终端的选区改走无障碍接口读。
+pub fn is_terminal_class(class: &str) -> bool {
+    const TERMINALS: [&str; 6] = [
+        "CASCADIA_HOSTING_WINDOW_CLASS", // Windows Terminal
+        "ConsoleWindowClass",            // 老式控制台 conhost
+        "mintty",                        // Git Bash / Cygwin / MSYS2
+        "PuTTY",
+        "VirtualConsoleClass", // ConEmu / Cmder
+        "org.wezfurlong.wezterm",
+    ];
+    TERMINALS.contains(&class)
+}
 
 #[cfg(not(windows))]
 pub fn get_text() -> anyhow::Result<String> {
@@ -276,6 +326,22 @@ pub fn selected_text_from(_target: Option<isize>) -> anyhow::Result<String> {
 #[cfg(not(windows))]
 pub fn foreign_foreground_window() -> Option<isize> {
     None
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    /// 终端清单漏一个，那个终端里点「译」就会被发一记 Ctrl+C（= 中断里面跑着的程序）
+    #[test]
+    fn known_terminals_are_recognised() {
+        for c in ["CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass", "mintty", "PuTTY", "VirtualConsoleClass"] {
+            assert!(is_terminal_class(c), "{c}");
+        }
+        for c in ["Notepad", "Chrome_WidgetWin_1", "", "cascadia_hosting_window_class"] {
+            assert!(!is_terminal_class(c), "{c}");
+        }
+    }
 }
 
 #[cfg(all(test, windows))]

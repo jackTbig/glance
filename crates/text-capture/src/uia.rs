@@ -35,6 +35,14 @@ mod win {
             run_with_timeout(UIA_TIMEOUT, move || text_at_blocking(x, y))
         }
 
+        /// 读窗口里当前的文字选区（无障碍接口的 TextPattern，**不发任何按键**）。
+        ///
+        /// 给终端用：终端的原生选区在它的 TextPattern 里（Windows Terminal 的 TermControl、
+        /// conhost 都支持），而对终端模拟 Ctrl+C 会变成中断信号。没有选区返回 Ok(None)。
+        pub fn selection_in(&self, hwnd: isize) -> anyhow::Result<Option<String>> {
+            run_with_timeout(UIA_TIMEOUT, move || selection_blocking(hwnd))
+        }
+
         /// 该点所属进程的可执行文件名（小写，如 "notepad.exe"）
         pub fn process_at(&self, x: i32, y: i32) -> anyhow::Result<Option<String>> {
             run_with_timeout(UIA_TIMEOUT, move || process_at_blocking(x, y))
@@ -112,6 +120,29 @@ mod win {
         None
     }
 
+    fn selection_blocking(hwnd: isize) -> Option<String> {
+        use uiautomation::types::{TreeScope, UIProperty};
+        use uiautomation::variants::Variant;
+        let auto = UIAutomation::new().ok()?;
+        let win = auto.element_from_handle(hwnd.into()).ok()?;
+        let cond = auto
+            .create_property_condition(UIProperty::IsTextPatternAvailable, Variant::from(true), None)
+            .ok()?;
+        // 窗口本身带 TextPattern（conhost）也算，所以连自己一起找
+        let items = win.find_all(TreeScope::Subtree, &cond).ok()?;
+        for el in items {
+            let Ok(tp) = el.get_pattern::<UITextPattern>() else { continue };
+            let Ok(ranges) = tp.get_selection() else { continue };
+            let text: Vec<String> = ranges.iter().filter_map(|r| r.get_text(8000).ok()).collect();
+            let text = text.join("\n");
+            let t = text.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        None
+    }
+
     fn process_at_blocking(x: i32, y: i32) -> Option<String> {
         let auto = UIAutomation::new().ok()?;
         let el = auto.element_from_point(Point::new(x, y)).ok()?;
@@ -156,6 +187,9 @@ impl UiaCapture {
         Ok(None)
     }
     pub fn process_at(&self, _x: i32, _y: i32) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    pub fn selection_in(&self, _hwnd: isize) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
 }

@@ -109,9 +109,16 @@ pub struct Watcher {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cfg_tx: Sender<WatchConfig>,
     pause_tx: Sender<bool>,
+    /// 最近一次左键按下那一刻的剪贴板序号（见 `text_capture::Capturer::selection_since`）
+    press_seq: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Watcher {
+    /// 最近一次左键按下时的剪贴板序号。划词结束弹图标时读它，就是「这次拖选开始时」的序号
+    pub fn clip_seq_at_press(&self) -> u32 {
+        self.press_seq.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn set_config(&self, cfg: WatchConfig) {
         let _ = self.cfg_tx.send(cfg);
     }
@@ -134,6 +141,8 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
     let stop2 = stop.clone();
     let (cfg_tx, cfg_rx) = crossbeam_channel::unbounded::<WatchConfig>();
     let (pause_tx, pause_rx) = crossbeam_channel::unbounded::<bool>();
+    let press_seq = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(text_capture::clipboard::sequence_number()));
+    let press_seq2 = press_seq.clone();
     std::thread::Builder::new()
         .name("mouse-watcher".into())
         .spawn(move || {
@@ -145,6 +154,7 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
             let mut st = WatchState::new(cfg.clone());
             let mut poll = cfg.poll;
             let mut last_mod = false;
+            let mut last_left = false;
             while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
                 while let Ok(c) = cfg_rx.try_recv() {
                     poll = c.poll;
@@ -156,6 +166,10 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
                 }
                 let (x, y) = text_capture::screen::cursor_pos();
                 let left_down = unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 };
+                if left_down && !last_left {
+                    press_seq2.store(text_capture::clipboard::sequence_number(), std::sync::atomic::Ordering::SeqCst);
+                }
+                last_left = left_down;
                 let mod_down = st.cfg.hover_modifier.is_down();
                 // 修饰键按下 / 松开各记一行：排「按住 Alt 没反应」时，
                 // 先要能分清是没读到按键，还是读到了但后面没走通
@@ -173,14 +187,19 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
             }
         })
         .expect("spawn mouse watcher");
-    Watcher { stop, cfg_tx, pause_tx }
+    Watcher { stop, cfg_tx, pause_tx, press_seq }
 }
 
 #[cfg(not(windows))]
 pub fn spawn(_cfg: WatchConfig, _tx: Sender<Trigger>) -> Watcher {
     let (cfg_tx, _) = crossbeam_channel::unbounded();
     let (pause_tx, _) = crossbeam_channel::unbounded();
-    Watcher { stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)), cfg_tx, pause_tx }
+    Watcher {
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        cfg_tx,
+        pause_tx,
+        press_seq: Default::default(),
+    }
 }
 
 #[cfg(test)]

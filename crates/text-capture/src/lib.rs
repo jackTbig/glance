@@ -140,7 +140,55 @@ impl Capturer {
     /// `target`：有选区的窗口（弹划词图标时记下的）。点图标会把前台抢走，必须先切回它再复制。
     /// 热键触发时用户的程序本来就在前台，传 None。
     pub fn selection(&self, target: Option<isize>) -> anyhow::Result<Captured> {
+        self.selection_since(target, None)
+    }
+
+    /// 同 `selection`，多一个 `clip_seq_at_press`：用户按下鼠标开始拖选那一刻的剪贴板序号。
+    ///
+    /// 只给终端用：里面的程序开了鼠标模式时（Claude Code、vim 这类），拖选是程序自己画的，
+    /// 终端没有选区；但这类程序常在松开鼠标时自己把选中内容写进剪贴板。
+    /// 序号在拖选之后变过，就说明是它刚复制的，直接拿来用。
+    pub fn selection_since(&self, target: Option<isize>, clip_seq_at_press: Option<u32>) -> anyhow::Result<Captured> {
         let t0 = std::time::Instant::now();
+        // 终端单独走：读无障碍接口里的选区，不发 Ctrl+C（那在终端里是中断信号）
+        let hwnd = target.unwrap_or_else(clipboard::foreground_window);
+        let class = clipboard::class_name(hwnd);
+        if clipboard::is_terminal_class(&class) {
+            let text = match &self.uia {
+                Some(u) => u.selection_in(hwnd)?,
+                None => None,
+            };
+            tracing::info!(
+                "划词目标是终端（{class}），改读无障碍接口的选区：{}",
+                text.as_ref().map_or("没有".to_string(), |t| format!("{} 字", t.chars().count()))
+            );
+            if text.is_none() {
+                if let Some(seq) = clip_seq_at_press {
+                    let now = clipboard::sequence_number();
+                    if now != seq {
+                        let t = clipboard::get_text().unwrap_or_default();
+                        tracing::info!(
+                            "终端没有原生选区，但拖选之后剪贴板变过（序号 {seq} → {now}），当成程序自己复制的选区：{} 字",
+                            t.chars().count()
+                        );
+                        if !t.trim().is_empty() {
+                            return Ok(Captured {
+                                text: t.trim().to_string(),
+                                source: Source::Clipboard,
+                                took_ms: t0.elapsed().as_millis(),
+                            });
+                        }
+                    }
+                }
+            }
+            return match text {
+                Some(t) => Ok(Captured { text: t, source: Source::Uia, took_ms: t0.elapsed().as_millis() }),
+                // 选区是终端里的程序自己画的（vim、Claude Code 这类开了鼠标模式的界面），终端本身不知道
+                None => anyhow::bail!(
+                    "终端里没读到选区：里面的程序接管了鼠标，选区是它自己画的。按住 Shift 再拖选就是终端自己的选区，或用截屏翻译"
+                ),
+            };
+        }
         let text = clipboard::selected_text_from(target)?;
         Ok(Captured { text: text.trim().to_string(), source: Source::Clipboard, took_ms: t0.elapsed().as_millis() })
     }
