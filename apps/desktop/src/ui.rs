@@ -482,24 +482,7 @@ impl App {
             let Some((_, action)) = self.hotkey_ids.iter().find(|(id, _)| *id == ev.id).copied() else { continue };
             let (x, y) = text_capture::screen::cursor_pos();
             match action {
-                HotkeyAction::ToggleHover => {
-                    self.cfg.ui.hover_enabled = !self.cfg.ui.hover_enabled;
-                    self.draft.ui.hover_enabled = self.cfg.ui.hover_enabled;
-                    self.watcher.set_config(watch_cfg(&self.cfg));
-                    let on = self.cfg.ui.hover_enabled;
-                    let key = HoverModifier::parse(&self.cfg.hotkeys.hover_modifier).label_zh();
-                    tracing::info!("悬停取词{}", if on { "已开启" } else { "已关闭" });
-                    self.notice(
-                        "悬停取词",
-                        if on {
-                            format!("已开启：按住 {key} 把鼠标停在文字上就翻")
-                        } else {
-                            "已关闭：按住修饰键也不再响应".into()
-                        },
-                        (x, y),
-                    );
-                    let _ = self.cfg.save();
-                }
+                HotkeyAction::ToggleHover => self.toggle_feature(Feature::Hover, (x, y)),
                 HotkeyAction::CaptionClickable | HotkeyAction::CaptionPassthrough => {
                     let cmd = if action == HotkeyAction::CaptionClickable {
                         desktop_shell::caption_ipc::Command::Clickable
@@ -514,18 +497,7 @@ impl App {
                         }
                     }
                 }
-                HotkeyAction::ToggleSelection => {
-                    self.cfg.ui.selection_icon = !self.cfg.ui.selection_icon;
-                    self.draft.ui.selection_icon = self.cfg.ui.selection_icon;
-                    let on = self.cfg.ui.selection_icon;
-                    tracing::info!("划词小图标{}", if on { "已开启" } else { "已关闭" });
-                    self.notice(
-                        "划词翻译",
-                        if on { "已开启：选中文字后点旁边的「译」".into() } else { "已关闭：选中文字不再弹图标".to_string() },
-                        (x, y),
-                    );
-                    let _ = self.cfg.save();
-                }
+                HotkeyAction::ToggleSelection => self.toggle_feature(Feature::Selection, (x, y)),
                 HotkeyAction::Screenshot => {
                     tracing::info!("进入截屏框选");
                     self.mode = Mode::Selecting { start: None };
@@ -708,7 +680,11 @@ impl App {
                 format!("翻译方向：{}", ai_translate::Direction::parse(&self.cfg.direction).label_zh()),
                 false,
             ),
+            (0, String::new(), false),
         ];
+        for f in Feature::ALL {
+            items.push((f.menu_id(), f.menu_label(&self.cfg), f.get(&self.cfg)));
+        }
         // 实时字幕那一块。装了才显示——没装时列一堆点不动的项只会让人以为坏了。
         // 弹菜单前要**同步**读一次子进程的勾选态：暂停/迷你/穿透三个勾是它的状态，
         // 父进程自己猜不出来（所以控制端点必须双向，不能只做单向命令）。
@@ -729,6 +705,9 @@ impl App {
         match crate::tray::show_menu(hwnd, x, y, &items) {
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_DIRECTION) => self.flip_direction(),
+            Some(id) if Feature::from_menu_id(id).is_some() => {
+                self.toggle_feature(Feature::from_menu_id(id).unwrap(), (x, y));
+            }
             Some(MENU_PAUSE) => {
                 self.paused = !self.paused;
                 self.watcher.set_paused(self.paused);
@@ -755,6 +734,28 @@ impl App {
             }
             Some(MENU_QUIT) => self.request_quit(),
             _ => {}
+        }
+    }
+
+    /// 切换一个功能开关：热键与托盘菜单都走这里。
+    ///
+    /// 改的是 `cfg`，**同时要改 `draft`**——否则设置窗的「保存并应用」无端亮蓝、
+    /// 或者用户随后在设置窗点保存又把这次切换覆盖回去。
+    fn toggle_feature(&mut self, f: Feature, at: (i32, i32)) {
+        let on = !f.get(&self.cfg);
+        f.set(&mut self.cfg, on);
+        f.set(&mut self.draft, on);
+        match f {
+            Feature::Hover => self.watcher.set_config(watch_cfg(&self.cfg)),
+            Feature::OfflineDict => self.engine.set_offline(on),
+            // 其余几项每次触发时现读配置，改完即生效
+            Feature::Selection | Feature::RegionOverlay | Feature::HoverSkip => {}
+        }
+        tracing::info!("{}{}", f.name(), if on { "已开启" } else { "已关闭" });
+        let msg = f.notice(&self.cfg, on);
+        self.notice(f.name(), msg, at);
+        if let Err(e) = self.cfg.save() {
+            tracing::warn!("开关已切换但配置没存上：{e}");
         }
     }
 
@@ -831,6 +832,104 @@ fn register_with_fallback(hk: &GlobalHotKeyManager, want: &str, taken: &[String]
         }
     }
     None
+}
+
+/// 托盘菜单与热键都能切的功能开关。每项对应 `UiCfg` 里的一个 bool。
+///
+/// 加一项要改这里的 `ALL` / `menu_id` / 读写 / 文案，外加 `tray.rs` 的常量；
+/// 生效方式不是「每次现读配置」的，还要在 `App::toggle_feature` 里补一行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    Hover,
+    Selection,
+    RegionOverlay,
+    OfflineDict,
+    HoverSkip,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 5] =
+        [Feature::Hover, Feature::Selection, Feature::RegionOverlay, Feature::OfflineDict, Feature::HoverSkip];
+
+    pub fn menu_id(self) -> u32 {
+        use crate::tray::*;
+        match self {
+            Feature::Hover => MENU_HOVER,
+            Feature::Selection => MENU_SELECTION,
+            Feature::RegionOverlay => MENU_REGION_OVERLAY,
+            Feature::OfflineDict => MENU_OFFLINE_DICT,
+            Feature::HoverSkip => MENU_HOVER_SKIP,
+        }
+    }
+
+    pub fn from_menu_id(id: u32) -> Option<Feature> {
+        Feature::ALL.into_iter().find(|f| f.menu_id() == id)
+    }
+
+    pub fn get(self, cfg: &Config) -> bool {
+        match self {
+            Feature::Hover => cfg.ui.hover_enabled,
+            Feature::Selection => cfg.ui.selection_icon,
+            Feature::RegionOverlay => cfg.ui.region_overlay,
+            Feature::OfflineDict => cfg.ui.offline_dict,
+            Feature::HoverSkip => cfg.ui.hover_skip_target_lang,
+        }
+    }
+
+    pub fn set(self, cfg: &mut Config, on: bool) {
+        match self {
+            Feature::Hover => cfg.ui.hover_enabled = on,
+            Feature::Selection => cfg.ui.selection_icon = on,
+            Feature::RegionOverlay => cfg.ui.region_overlay = on,
+            Feature::OfflineDict => cfg.ui.offline_dict = on,
+            Feature::HoverSkip => cfg.ui.hover_skip_target_lang = on,
+        }
+    }
+
+    /// 通知卡片的标题
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::Hover => "悬停取词",
+            Feature::Selection => "划词翻译",
+            Feature::RegionOverlay => "截屏译文覆盖",
+            Feature::OfflineDict => "离线词典",
+            Feature::HoverSkip => "悬停跳过目标语言",
+        }
+    }
+
+    /// 菜单上的字：把「怎么用」带上，光一个名字用户不知道勾了会怎样
+    pub fn menu_label(self, cfg: &Config) -> String {
+        match self {
+            Feature::Hover => {
+                format!("悬停取词（按住 {}）", HoverModifier::parse(&cfg.hotkeys.hover_modifier).label_zh())
+            }
+            Feature::Selection => "划词后弹「译」图标".into(),
+            Feature::RegionOverlay => "截屏译文盖回原文位置".into(),
+            Feature::OfflineDict => "查词先给离线释义".into(),
+            Feature::HoverSkip => format!(
+                "悬停到{}时不弹卡片",
+                ai_translate::Direction::parse(&cfg.direction).target_zh()
+            ),
+        }
+    }
+
+    pub fn notice(self, cfg: &Config, on: bool) -> String {
+        match (self, on) {
+            (Feature::Hover, true) => format!(
+                "已开启：按住 {} 把鼠标停在文字上就翻",
+                HoverModifier::parse(&cfg.hotkeys.hover_modifier).label_zh()
+            ),
+            (Feature::Hover, false) => "已关闭：按住修饰键也不再响应".into(),
+            (Feature::Selection, true) => "已开启：选中文字后点旁边的「译」".into(),
+            (Feature::Selection, false) => "已关闭：选中文字不再弹图标（快捷键仍可用）".into(),
+            (Feature::RegionOverlay, true) => "已开启：截屏后译文盖在原图上，点一下切换原文".into(),
+            (Feature::RegionOverlay, false) => "已关闭：截屏后给一张整段译文卡片".into(),
+            (Feature::OfflineDict, true) => "已开启：查单词先秒出本地释义，模型回来再替换".into(),
+            (Feature::OfflineDict, false) => "已关闭：查单词只等模型".into(),
+            (Feature::HoverSkip, true) => "已开启：悬停到目标语言的文字不再弹卡片".into(),
+            (Feature::HoverSkip, false) => "已关闭：悬停到目标语言的文字也会弹卡片".into(),
+        }
+    }
 }
 
 fn watch_cfg(cfg: &Config) -> WatchConfig {
@@ -2324,6 +2423,29 @@ mod tests {
     fn save_button_is_highlighted_only_when_dirty() {
         assert!(fills_of(true).contains(&SAVE_DIRTY_FILL), "有改动时按钮要填主色");
         assert!(!fills_of(false).contains(&SAVE_DIRTY_FILL), "没改动时按钮不该是主色");
+    }
+
+    #[test]
+    fn every_feature_round_trips_and_has_a_menu_item() {
+        let mut ids = Vec::new();
+        for f in Feature::ALL {
+            let mut c = Config::default();
+            let was = f.get(&c);
+            f.set(&mut c, !was);
+            assert_eq!(f.get(&c), !was, "{f:?} 读写的不是同一个字段");
+            // 改一项不许牵动别的项
+            for g in Feature::ALL.into_iter().filter(|g| *g != f) {
+                assert_eq!(g.get(&c), g.get(&Config::default()), "改 {f:?} 牵动了 {g:?}");
+            }
+            assert_eq!(Feature::from_menu_id(f.menu_id()), Some(f));
+            assert!(!f.menu_label(&c).is_empty());
+            assert_ne!(f.notice(&c, true), f.notice(&c, false));
+            ids.push(f.menu_id());
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), Feature::ALL.len());
+        assert_eq!(Feature::from_menu_id(crate::tray::MENU_SETTINGS), None);
     }
 
     #[test]

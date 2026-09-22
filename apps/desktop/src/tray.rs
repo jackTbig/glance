@@ -10,6 +10,12 @@ pub const MENU_PAUSE: u32 = 2;
 pub const MENU_QUIT: u32 = 3;
 /// 一键换翻译方向（英译中 ⇄ 中译英）。设置窗里也有，但这个是随手就能点到的
 pub const MENU_DIRECTION: u32 = 4;
+// 功能开关：与设置窗、热键改的是同一份配置，勾选态随时反映当前值
+pub const MENU_HOVER: u32 = 5;
+pub const MENU_SELECTION: u32 = 6;
+pub const MENU_REGION_OVERLAY: u32 = 7;
+pub const MENU_OFFLINE_DICT: u32 = 8;
+pub const MENU_HOVER_SKIP: u32 = 9;
 // 实时字幕那一块。字幕是子进程，这些项转成控制命令发过去（见 `crate::caption`）。
 pub const MENU_CAPTION_TOGGLE: u32 = 10;
 pub const MENU_CAPTION_PAUSE: u32 = 11;
@@ -45,6 +51,12 @@ mod tests {
             MENU_SETTINGS,
             MENU_PAUSE,
             MENU_QUIT,
+            MENU_DIRECTION,
+            MENU_HOVER,
+            MENU_SELECTION,
+            MENU_REGION_OVERLAY,
+            MENU_OFFLINE_DICT,
+            MENU_HOVER_SKIP,
             MENU_CAPTION_TOGGLE,
             MENU_CAPTION_PAUSE,
             MENU_CAPTION_MINI,
