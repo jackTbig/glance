@@ -43,6 +43,15 @@ fn last_user_text(body: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn system_text(body: &serde_json::Value) -> String {
+    body["messages"]
+        .as_array()
+        .and_then(|m| m.iter().find(|x| x["role"] == "system"))
+        .and_then(|x| x["content"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn marker_num(text: &str, key: &str) -> Option<u64> {
     let start = text.find(&format!("[[{key}:"))? + key.len() + 3;
     let end = text[start..].find("]]")? + start;
@@ -114,7 +123,11 @@ async fn chat(State(st): State<Shared>, Json(body): Json<serde_json::Value>) -> 
             return (StatusCode::TOO_MANY_REQUESTS, h, "mock: rate limited").into_response();
         }
     }
-    let out = dict_entry(&text).unwrap_or_else(|| translate_lines(&text));
+    let mut out = dict_entry(&text).unwrap_or_else(|| translate_lines(&text));
+    // 中译英的系统提示词里写的是「翻译成英文」：前缀换成 en=，测试才分得清走的是哪个方向
+    if system_text(&body).contains("翻译成英文") {
+        out = out.replace("zh=", "en=");
+    }
     let stream = body["stream"].as_bool().unwrap_or(false);
     if !stream {
         return Json(serde_json::json!({

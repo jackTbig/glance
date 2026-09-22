@@ -112,6 +112,8 @@ struct Inner {
     openai: Option<OpenAi>,
     /// claude / codex：每场景一个串行引擎（系统提示按场景固定）
     serial: Mutex<HashMap<Scene, Engine>>,
+    /// 反方向的翻译器，主窗口手动输入反向文字时才建（见 [`Translator::for_direction`]）
+    flipped: std::sync::OnceLock<Translator>,
 }
 
 #[derive(Clone)]
@@ -128,7 +130,32 @@ impl Translator {
             None
         };
         let sem = Semaphore::new(cfg.concurrency);
-        Ok(Translator { inner: Arc::new(Inner { cfg, sem, openai, serial: Mutex::new(HashMap::new()) }) })
+        Ok(Translator {
+            inner: Arc::new(Inner {
+                cfg,
+                sem,
+                openai,
+                serial: Mutex::new(HashMap::new()),
+                flipped: std::sync::OnceLock::new(),
+            }),
+        })
+    }
+
+    /// 同一套配置、指定方向的翻译器。方向相同就是自己；反方向的第一次用时才建，之后复用。
+    ///
+    /// 挂在自己身上缓存，配置一改（重建翻译器）缓存就跟着作废，不会拿旧配置翻。
+    /// claude / codex 后端的常驻子进程也是按需起的，不用反方向就不多占那 300 MB。
+    pub fn for_direction(&self, dir: Direction) -> anyhow::Result<Translator> {
+        if dir == self.inner.cfg.direction {
+            return Ok(self.clone());
+        }
+        if let Some(t) = self.inner.flipped.get() {
+            return Ok(t.clone());
+        }
+        let mut cfg = self.inner.cfg.clone();
+        cfg.direction = dir;
+        let t = Translator::new(cfg)?;
+        Ok(self.inner.flipped.get_or_init(|| t).clone())
     }
 
     pub fn config(&self) -> &TranslatorConfig {

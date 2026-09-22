@@ -16,6 +16,8 @@ pub enum Job {
     Region { x: i32, y: i32, w: u32, h: u32, overlay: bool },
     /// 已有文本，直接翻（重试按钮用）
     Text { scene: Scene, text: String },
+    /// 主窗口里手动输入的文字。方向按内容自动定（`Direction::for_input`），单词给词典条目
+    Manual { text: String },
 }
 
 /// 工作线程发回界面的进度
@@ -115,10 +117,26 @@ fn run_job(
 ) {
     let t0 = std::time::Instant::now();
     // 方向现取：设置里改完立刻生效，不用重启
-    let dir = translator.lock().unwrap().config().direction;
+    let base = translator.lock().unwrap().clone();
+    let mut dir = base.config().direction;
+    // 手动输入按内容定方向，并换成那个方向的翻译器
+    let tr = match &job {
+        Job::Manual { text } => {
+            dir = dir.for_input(text);
+            match base.for_direction(dir) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = ev.send(Event::Failed { seq, error: format!("翻译器建不起来：{e}") });
+                    return;
+                }
+            }
+        }
+        _ => base,
+    };
     // 第一步：拿到原文与场景
     let (scene, text, source) = match job {
         Job::Text { scene, text } => (scene, text, Source::Clipboard),
+        Job::Manual { text } => (Scene::Selection, text.trim().to_string(), Source::Clipboard),
         Job::Selection { target, clip_seq } => match capturer.selection_since(target, clip_seq) {
             Ok(c) if !c.is_empty() => (Scene::Selection, c.text, c.source),
             Ok(_) => {
@@ -166,7 +184,6 @@ fn run_job(
                         .enumerate()
                         .map(|(i, l)| ai_translate::Item { id: i.to_string(), text: l.text.clone(), is_html: false })
                         .collect();
-                    let tr = translator.lock().unwrap().clone();
                     let t1 = std::time::Instant::now();
                     for r in tr.translate_batch(Scene::Screenshot, items) {
                         let Ok(idx) = r.id.parse::<usize>() else { continue };
@@ -230,7 +247,6 @@ fn run_job(
     }
 
     // 第二步：翻译
-    let tr = translator.lock().unwrap().clone();
     let t1 = std::time::Instant::now();
     let ev2 = ev.clone();
     let mut on_delta = |acc: &str| {
@@ -261,6 +277,22 @@ mod tests {
         let a = e.submit(Job::Text { scene: Scene::Selection, text: "hello world, how are you".into() });
         assert_eq!(a, 1);
         assert_eq!(wait_done(&rx).as_deref(), Some("zh=hello world, how are you"));
+    }
+
+    /// 主窗口手动输入：英译中模式下打中文要反过来翻成英文，而不是被当成「已经是中文」退回
+    #[test]
+    fn manual_input_picks_direction_by_content() {
+        let mock = mock_llm::spawn(0);
+        let mut cfg = ai_translate::TranslatorConfig::default();
+        cfg.base.openai_base_url = mock.base_url.clone();
+        let tr = Arc::new(Mutex::new(Translator::new(cfg).unwrap()));
+        let (e, rx) = Engine::spawn(tr, Arc::new(Capturer::new()));
+        e.submit(Job::Manual { text: "今天天气很好，我们出去走走吧".into() });
+        let done = wait_done(&rx).expect("应当翻出来");
+        assert!(done.starts_with("en="), "中文输入应走中译英：{done}");
+        e.submit(Job::Manual { text: "It is a fine day, let us go for a walk.".into() });
+        let done = wait_done(&rx).expect("应当翻出来");
+        assert!(done.starts_with("zh="), "英文输入应走英译中：{done}");
     }
 
     /// 划词取到单个词要改判成 `Scene::Word`、拿到词典条目，而不是一句译文。

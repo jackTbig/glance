@@ -21,6 +21,8 @@ pub const APP_NAME_ZH: &str = "简译";
 /// 折叠项要点开才知道里面有什么，且展开后内容全挤在左半边、右边一片空白。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
+    /// 主窗口的「翻译」页：手动输入单词或句子来翻（Jack 2026-09-22 要求）
+    Translate,
     Service,
     Trigger,
     Glossary,
@@ -32,7 +34,8 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 6] = [
+    pub const ALL: [SettingsTab; 7] = [
+        SettingsTab::Translate,
         SettingsTab::Service,
         SettingsTab::Trigger,
         SettingsTab::Glossary,
@@ -43,6 +46,7 @@ impl SettingsTab {
 
     pub fn label(self) -> &'static str {
         match self {
+            SettingsTab::Translate => "翻译",
             SettingsTab::Service => "翻译服务",
             SettingsTab::Trigger => "触发方式",
             SettingsTab::Glossary => "术语表",
@@ -54,6 +58,7 @@ impl SettingsTab {
 
     pub fn hint(self) -> &'static str {
         match self {
+            SettingsTab::Translate => "输入单词或句子，自动判断英译中还是中译英",
             SettingsTab::Service => "接口地址、API Key、各场景用哪个后端",
             SettingsTab::Trigger => "快捷键、悬停、划词图标，以及不想被打扰的程序",
             SettingsTab::Glossary => "让专有名词按你定的译法翻",
@@ -145,6 +150,10 @@ pub struct App {
     logged_icon_at: Option<(i32, i32)>,
     /// 上次记进日志的卡片宽度，同样是为了不每帧刷屏
     logged_card_w: Option<f32>,
+    /// 主窗口「翻译」页的状态
+    manual: crate::manual::ManualState,
+    /// 窗口已经开着时又被要求打开（换页）：下一帧把它提到前面、改标题，但不重新摆位
+    settings_raise: bool,
     /// 关于页里的词库信息（路径 + 条数）。开词库要读几 MB 索引，算一次就存着
     about_dict: Option<Option<(std::path::PathBuf, usize)>>,
     /// 上次记进日志的内容排版宽度。**窗口宽了而它没跟着宽 = 内容没铺满**
@@ -297,7 +306,9 @@ impl App {
         );
         tracing::info!("{status}");
 
-        let open_settings_at_start = std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0");
+        // 调试钩子：TT_MAIN_INPUT=<文字> 启动即开主窗口、填好输入并翻一次（截图与自测用）
+        let main_input = std::env::var("TT_MAIN_INPUT").ok().filter(|t| !t.trim().is_empty());
+        let open_settings_at_start = main_input.is_some() || std::env::var("TT_OPEN_SETTINGS").is_ok_and(|v| v != "0");
         Ok(App {
             draft: cfg.clone(),
             cfg,
@@ -320,6 +331,12 @@ impl App {
             logged_icon_at: None,
             logged_card_w: None,
             about_dict: None,
+            manual: crate::manual::ManualState {
+                autosubmit: main_input.is_some(),
+                input: main_input.clone().unwrap_or_default(),
+                ..Default::default()
+            },
+            settings_raise: false,
             logged_content_w: None,
             cur_seq: 0,
             pending_panel: None,
@@ -334,7 +351,7 @@ impl App {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .and_then(|i| SettingsTab::ALL.get(i).copied())
-                .unwrap_or(SettingsTab::Service),
+                .unwrap_or(if main_input.is_some() { SettingsTab::Translate } else { SettingsTab::Service }),
             settings_scroll_top: false,
             // 语义是「还要摆几帧」：0 表示不用摆。启动即开设置窗时必须一起给上，
             // 否则窗口留在屏幕外的 -32000，标题栏都变了却看不见（踩过）
@@ -435,6 +452,12 @@ impl App {
 
     fn drain_triggers(&mut self) {
         while let Ok(t) = self.triggers.try_recv() {
+            // 主窗口 / 设置窗占着根视口，浮动卡片画不出来；这时照样取词翻译只会白花请求，
+            // 在主窗口输入框里拖选、按住 Ctrl 打字还会误触发
+            if self.settings_open {
+                tracing::debug!("窗口开着，忽略浮窗触发 {t:?}");
+                continue;
+            }
             match t {
                 Trigger::SelectionEnded { x, y } => {
                     if !self.cfg.ui.selection_icon {
@@ -534,6 +557,11 @@ impl App {
                 | Event::Nothing { seq, .. }
                 | Event::Skipped { seq } => *seq,
             };
+            // 主窗口手动翻译的回包走自己那一份状态，不碰浮动卡片
+            if self.manual.owns(seq) {
+                self.manual.on_event(e);
+                continue;
+            }
             if seq != self.cur_seq {
                 continue; // 过期
             }
@@ -643,7 +671,7 @@ impl App {
     fn drain_tray(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         use crate::tray::{
             MENU_CAPTION_CLICKABLE, MENU_CAPTION_MINI, MENU_CAPTION_PAUSE, MENU_CAPTION_SETTINGS, MENU_CAPTION_TOGGLE,
-            MENU_DIRECTION, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
+            MENU_DIRECTION, MENU_MAIN, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
         };
         use desktop_shell::caption_ipc::Command;
         use desktop_shell::tray::{Action, Input};
@@ -665,8 +693,8 @@ impl App {
         let interval = desktop_shell::tray::double_click_interval();
         let (x, y) = match desktop_shell::tray::reduce(inputs, &mut self.pending_tray_click, Instant::now(), interval) {
             Action::Activate => {
-                tracing::info!("双击托盘，打开设置窗");
-                self.open_settings();
+                tracing::info!("双击托盘，打开主窗口");
+                self.open_main();
                 return;
             }
             Action::Menu(at) => at,
@@ -674,6 +702,7 @@ impl App {
         };
         let hwnd = window_handle_of(frame);
         let mut items = vec![
+            (MENU_MAIN, "翻译窗口…".to_string(), false),
             (MENU_SETTINGS, "设置…".to_string(), false),
             (MENU_PAUSE, "暂停取词".to_string(), self.paused),
             (
@@ -704,6 +733,7 @@ impl App {
         items.push((0, String::new(), false));
         items.push((MENU_QUIT, "退出".to_string(), false));
         match crate::tray::show_menu(hwnd, x, y, &items) {
+            Some(MENU_MAIN) => self.open_main(),
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_DIRECTION) => self.flip_direction(),
             Some(id) if Feature::from_menu_id(id).is_some() => {
@@ -1652,7 +1682,7 @@ impl App {
                 (sy + MARGIN_TOP).min(sy + sh as i32 - H as i32),
             );
             ctx.send_viewport_cmd(ViewportCommand::Decorations(true));
-            ctx.send_viewport_cmd(ViewportCommand::Title(format!("{APP_NAME_ZH} 设置")));
+            ctx.send_viewport_cmd(ViewportCommand::Title(window_title(self.settings_tab)));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(W, H)));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
             self.last_place = None; // 设置窗自己管摆位，别让缓存挡住后续的摆放
@@ -1684,6 +1714,12 @@ impl App {
             }
         }
 
+        if self.settings_raise {
+            self.settings_raise = false;
+            ctx.send_viewport_cmd(ViewportCommand::Title(window_title(self.settings_tab)));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+
         let mut close = false;
 
         // 存完又改了：「已保存并生效」这句话就过时了，留着会和亮起的保存按钮自相矛盾
@@ -1703,6 +1739,10 @@ impl App {
                 {
                     self.settings_tab = tab;
                     self.settings_scroll_top = true; // 换页要回到顶部，否则顶着上一页的滚动位置
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Title(window_title(tab)));
+                    if tab == SettingsTab::Translate {
+                        self.manual.want_focus = true;
+                    }
                 }
                 ui.add_space(2.0);
             }
@@ -1755,6 +1795,7 @@ impl App {
                 area = area.vertical_scroll_offset(0.0);
             }
             area.show(ui, |ui| match self.settings_tab {
+                SettingsTab::Translate => self.settings_translate(ui),
                 SettingsTab::Service => self.settings_service(ui),
                 SettingsTab::Trigger => self.settings_trigger(ui),
                 SettingsTab::Glossary => self.settings_glossary(ui),
@@ -2021,6 +2062,113 @@ impl App {
         self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs));
     }
 
+    /// 主窗口「翻译」页：输入框 + 结果区。方向按输入内容自动定，单词给词典条目。
+    fn settings_translate(&mut self, ui: &mut egui::Ui) {
+        use crate::manual::Phase as MPhase;
+        let cfg_dir = ai_translate::Direction::parse(&self.cfg.direction);
+        let base = self.cfg.ui.font_size;
+        let id = egui::Id::new("manual-input");
+
+        // 回车翻译、Shift+回车换行。回车要在输入框处理按键**之前**吃掉，否则先换了行再翻。
+        // `consume_key` 会忽略多按的 Shift，所以 Shift 要自己判
+        let focused = ui.memory(|m| m.has_focus(id));
+        let enter = focused
+            && ui.input_mut(|i| !i.modifiers.shift && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let resp = ui.add(
+            egui::TextEdit::multiline(&mut self.manual.input)
+                .id(id)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY)
+                .hint_text("输入单词或句子")
+                .font(egui::FontId::proportional(base)),
+        );
+        if self.manual.want_focus {
+            self.manual.want_focus = false;
+            resp.request_focus();
+        }
+
+        let mut submit = enter || std::mem::take(&mut self.manual.autosubmit);
+        let mut clear = false;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            submit |= ui.add_enabled(self.manual.can_submit(), egui::Button::new("翻译")).clicked();
+            clear = ui.button("清空").clicked();
+            let t = self.manual.input.trim();
+            let hint = if t.is_empty() {
+                "回车翻译，Shift+回车换行".to_string()
+            } else {
+                format!("将按{}翻", cfg_dir.for_input(t).label_zh())
+            };
+            ui.label(RichText::new(hint).size(11.0).color(Color32::from_gray(140)));
+        });
+        if clear {
+            self.manual.clear();
+        }
+        if submit && self.manual.can_submit() {
+            let text = self.manual.input.trim().to_string();
+            let seq = self.engine.submit(Job::Manual { text });
+            self.manual.begin(seq, cfg_dir);
+            tracing::info!("主窗口翻译：{} 字，{}", self.manual.original.chars().count(), self.manual.dir.label_zh());
+        }
+
+        if self.manual.phase == MPhase::Idle {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        let entry = self.manual.entry();
+        let mut copy = false;
+        ui.horizontal(|ui| {
+            let what = if self.manual.scene == Scene::Word { "查词" } else { "翻译" };
+            ui.label(RichText::new(format!("{} · {what}", self.manual.dir.label_zh())).size(12.0).color(Color32::from_rgb(150, 180, 255)));
+            if self.manual.offline {
+                ui.label(RichText::new("· 离线").size(12.0).color(Color32::from_rgb(190, 160, 90)))
+                    .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
+            }
+            if !self.manual.result.trim().is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    copy = ui.small_button("复制").clicked();
+                });
+            }
+        });
+        ui.add_space(4.0);
+        if let Some(e) = &entry {
+            draw_entry(ui, e, &self.manual.original, base);
+        } else if !self.manual.result.trim().is_empty() {
+            ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base).color(Color32::WHITE)).selectable(true));
+        }
+        ui.add_space(6.0);
+        match &self.manual.phase {
+            MPhase::Working => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let doing = if self.manual.scene == Scene::Word { "查词中…" } else { "翻译中…" };
+                    ui.label(RichText::new(doing).size(12.0).color(Color32::GRAY));
+                });
+            }
+            MPhase::Done { took_ms } => {
+                ui.label(RichText::new(format!("用时 {took_ms} ms")).size(10.0).color(Color32::from_gray(120)));
+            }
+            MPhase::Notice(msg) => {
+                ui.label(RichText::new(msg).size(11.0).color(Color32::from_gray(150)));
+            }
+            MPhase::Failed(msg) => {
+                ui.label(RichText::new(msg).size(12.0).color(Color32::from_rgb(220, 110, 110)));
+            }
+            MPhase::Idle => {}
+        }
+        if copy {
+            // 词典条目复制整理过的文字，不是带 #标记 的原始回包（与浮动卡片一致）
+            let text = entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| self.manual.result.clone());
+            match text_capture::clipboard::set_text(&text) {
+                Ok(()) => self.settings_msg = "已复制".into(),
+                Err(e) => self.settings_msg = format!("复制失败：{e}"),
+            }
+        }
+    }
+
     /// 「关于」页：版本、各组件装在哪、出问题时该提供哪些信息。
     ///
     /// 每一行都可以「打开」到对应的目录/文件，右上角一个「复制全部」——
@@ -2267,7 +2415,32 @@ impl App {
         });
     }
 
+    /// 打开主窗口（翻译页）。与设置共用同一个窗口，原因见 `draw_settings`
+    pub fn open_main(&mut self) {
+        self.open_window(SettingsTab::Translate);
+    }
+
+    /// 打开设置。从翻译页进来的话落到第一个设置页，否则回到上次看的那页
     pub fn open_settings(&mut self) {
+        let tab = if self.settings_tab == SettingsTab::Translate { SettingsTab::Service } else { self.settings_tab };
+        self.open_window(tab);
+    }
+
+    fn open_window(&mut self, tab: SettingsTab) {
+        if tab == SettingsTab::Translate {
+            self.manual.want_focus = true;
+        }
+        if self.settings_open {
+            // 已经开着：只换页、提到前面。**不能重置 draft**，否则设置页里没保存的改动被悄悄丢掉
+            if self.settings_tab != tab {
+                self.settings_tab = tab;
+                self.settings_scroll_top = true;
+            }
+            self.settings_raise = true;
+            return;
+        }
+        self.settings_tab = tab;
+        self.settings_scroll_top = true;
         self.draft = self.cfg.clone();
         self.settings_open = true;
         self.settings_place_retries = 0;
@@ -2285,6 +2458,15 @@ impl App {
         self.quit = true;
     }
 
+}
+
+/// 窗口标题：翻译页是主窗口，其余是设置
+fn window_title(tab: SettingsTab) -> String {
+    if tab == SettingsTab::Translate {
+        APP_NAME_ZH.to_string()
+    } else {
+        format!("{APP_NAME_ZH} 设置")
+    }
 }
 
 /// 取根窗口句柄（弹原生菜单要用）
@@ -2388,6 +2570,7 @@ mod tests {
         labels.dedup();
         assert_eq!(labels.len(), before, "两个页签重名，用户分不清");
         assert!(SettingsTab::ALL.contains(&SettingsTab::About), "关于页要挂在导航栏里");
+        assert_eq!(SettingsTab::ALL[0], SettingsTab::Translate, "翻译页是主窗口的门面，放第一个");
     }
 
     #[test]
