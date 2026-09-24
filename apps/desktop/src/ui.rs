@@ -387,10 +387,24 @@ impl App {
             // 调试钩子：TT_DEMO_WORD=glance 启动即查一次词并弹卡片（截图与验收用）
             if let Ok(w) = std::env::var("TT_DEMO_WORD") {
                 if !w.trim().is_empty() {
-                    app.start(Job::Text { scene: Scene::Word, text: w.trim().into() }, Scene::Word.label_zh(), (600, 400), Source::Clipboard);
-                    // 钉住，不然鼠标没停在卡片上，出结果后一会儿就自己收了，截不到
-                    if let Some(p) = app.panel.as_mut() {
-                        p.pinned = true;
+                    // TT_DEMO_AT=x,y 指定锚点（物理），不给了默认 (600,400)：验摆放方位用
+                    let at = std::env::var("TT_DEMO_AT")
+                        .ok()
+                        .and_then(|v| {
+                            let n: Vec<i32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+                            match n[..] {
+                                [x, y] => Some((x, y)),
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or((600, 400));
+                    app.start(Job::Text { scene: Scene::Word, text: w.trim().into() }, Scene::Word.label_zh(), at, Source::Clipboard);
+                    // 钉住卡片会跳过摆放逻辑（钉住后用 pos 不再 place），验摆放方位时不能钉：
+                    // 只有 TT_DEMO_PIN=1 才钉；不钉时靠截图赶在自动收起之前（宽限 3 秒）
+                    if std::env::var("TT_DEMO_PIN").is_ok_and(|v| v == "1") {
+                        if let Some(p) = app.panel.as_mut() {
+                            p.pinned = true;
+                        }
                     }
                 }
             }
@@ -1383,7 +1397,11 @@ impl App {
         // 所以摆放统一在物理坐标系里算，算完再换成逻辑交给窗口
         let mut w = self.cfg.ui.panel_width;
         let h = self.cfg.ui.panel_max_height;
-        let size_phys = dpi.to_physical_size((w, h));
+        // 摆放高度用**实际内容高**（上一帧量到的 view_h），不用最大高度：右上优先时
+        // 贴着指针上方的是卡片底边，按最大高度的预留框摆，短词条的底边会离指针老远、
+        // 像悬在半空。高度随内容逐帧变、底边始终钉在指针上方，不会跳。
+        let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
+        let size_phys = (dpi.to_physical_size((w, h)).0, dpi.to_physical_len(inner_h).max(1) as u32);
         let (mut x, mut y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
         // 截屏翻译：卡片与框选区同宽、左边缘对齐，看起来才是「这块区域的译文」。
         // 钉住或拖过之后就不再跟框走，用户挪到哪儿就在哪儿。
@@ -1403,11 +1421,8 @@ impl App {
         }
         let logical = dpi.to_logical_pos((x, y));
         if (x, y) != p.pos {
-            tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{h}) ppp={}", p.anchor, dpi.ppp());
+            tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{inner_h}) ppp={}", p.anchor, dpi.ppp());
         }
-        // 高度跟着上一帧量到的内容走，短词条不拖一大截空白；摆放仍按最大高度算，
-        // 免得卡片一变矮就往下跳一次（place 会在放不下时翻到锚点上方）
-        let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
         self.place_window(&ctx, logical, egui::vec2(w, inner_h));
         if self.logged_card_w != Some(w) {
             self.logged_card_w = Some(w);

@@ -118,11 +118,13 @@ pub fn place(
     let (sx, sy, sw, sh) = (screen.0, screen.1, screen.2 as i32, screen.3 as i32);
     let (right, bottom) = (sx + sw, sy + sh);
 
+    // 右上优先（Jack 2026-09-24 定）：卡片弹在鼠标指针的右上角，不挡他正在读的那行。
+    // 上方放不下退到同侧下方，右侧放不下退到同高度左侧。
     let candidates = [
-        (ax + gap, ay + gap),         // 右下
-        (ax - gap - w, ay + gap),     // 左下
         (ax + gap, ay - gap - h),     // 右上
+        (ax + gap, ay + gap),         // 右下
         (ax - gap - w, ay - gap - h), // 左上
+        (ax - gap - w, ay + gap),     // 左下
     ];
     for (x, y) in candidates {
         if x >= sx && y >= sy && x + w <= right && y + h <= bottom {
@@ -135,10 +137,28 @@ pub fn place(
     (x, y)
 }
 
-/// 小图标位置：选区结束点的右下角。
+/// 小图标位置：选区结束点的**右下角**——图标要贴在刚选完的文字尾端下面，
+/// 与卡片的「右上优先」相反，所以自己列候选顺序，不跟 `place` 走。
 /// `size` 与 `gap` 都是**物理**像素，调用方负责按当前缩放比换算（见 `dpi::Dpi`）。
 pub fn place_icon(anchor: (i32, i32), size: u32, screen: (i32, i32, u32, u32), gap: i32) -> (i32, i32) {
-    place(anchor, (size, size), screen, gap)
+    let (ax, ay) = anchor;
+    let (w, h) = (size as i32, size as i32);
+    let (sx, sy, sw, sh) = (screen.0, screen.1, screen.2 as i32, screen.3 as i32);
+    let (right, bottom) = (sx + sw, sy + sh);
+    let candidates = [
+        (ax + gap, ay + gap),         // 右下
+        (ax - gap - w, ay + gap),     // 左下
+        (ax + gap, ay - gap - h),     // 右上
+        (ax - gap - w, ay - gap - h), // 左上
+    ];
+    for (x, y) in candidates {
+        if x >= sx && y >= sy && x + w <= right && y + h <= bottom {
+            return (x, y);
+        }
+    }
+    let x = (ax + gap).min(right - w).max(sx);
+    let y = (ay + gap).min(bottom - h).max(sy);
+    (x, y)
 }
 
 #[cfg(test)]
@@ -152,6 +172,25 @@ mod tests {
         let ((x, y), w) = align_to_region((400, 300, 800, 200), (517, 514), 240, 2000, screen);
         assert_eq!((x, w), (400, 800), "左边缘与宽度都跟着框走");
         assert_eq!(y, 514, "纵向位置沿用 place 算好的");
+    }
+
+    /// 卡片默认弹在指针右上角（Jack 2026-09-24）；上方或右侧放不下才换方位
+    #[test]
+    fn card_goes_to_the_upper_right_of_the_cursor() {
+        let placed = place((1000, 600), (200, 100), SCREEN, 10);
+        assert_eq!(placed, (1010, 490), "右上：x 在指针右、y 在指针上");
+        // 贴着屏幕上边：上方放不下，退到右下
+        let placed = place((1000, 40), (200, 100), SCREEN, 10);
+        assert_eq!(placed, (1010, 50));
+        // 贴着屏幕右边：右侧放不下，退到左上
+        let placed = place((1900, 600), (200, 100), SCREEN, 10);
+        assert_eq!(placed, (1690, 490));
+    }
+
+    /// 小图标仍贴选区尾端的右下角，不跟卡片的右上优先走
+    #[test]
+    fn icon_stays_at_the_lower_right_of_the_selection() {
+        assert_eq!(place_icon((1000, 600), 32, SCREEN, 10), (1010, 610));
     }
 
     #[test]

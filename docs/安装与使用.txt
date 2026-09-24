@@ -11,7 +11,7 @@ API Key 只存在本机的桌面端配置里，插件本身不存任何密钥。
 
 二、安装
 --------
-1. 运行 简译Glance-setup-1.0.13.exe，按提示装完（默认装到 D:\Program Files\简译Glance）。
+1. 运行 简译Glance-setup-1.0.14.exe，按提示装完（默认装到 D:\Program Files\简译Glance）。
 2. 装完会自动启动，托盘出现一个蓝色「译」图标。
 3. 装 Chrome 插件：
    - 打开 Chrome，地址栏输入 chrome://extensions
