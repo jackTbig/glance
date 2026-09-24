@@ -180,9 +180,9 @@ pub struct App {
     overlay: Option<OverlayState>,
     /// 这次截屏框的位置（虚拟屏物理坐标）。原图要**铺回它自己的位置**才能与屏幕对齐
     overlay_rect: Option<(i32, i32, u32, u32)>,
-    mouse_left_panel_at: Option<Instant>,
+    /// 上一帧左键是否按下，配 `poll_outside_click` 认按下沿
+    lbtn_was_down: bool,
     /// 状态提示卡片什么时候自己收掉
-    notice_until: Option<Instant>,
     settings_open: bool,
     settings_tab: SettingsTab,
     /// 换页后把滚动条拉回顶部
@@ -352,8 +352,7 @@ impl App {
             pending_panel: None,
             overlay: None,
             overlay_rect: None,
-            mouse_left_panel_at: None,
-            notice_until: None,
+            lbtn_was_down: false,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
             settings_open: open_settings_at_start,
             // TT_SETTINGS_TAB=0..3 指定启动时停在哪一页（截图与自测用）
@@ -444,7 +443,6 @@ impl App {
         self.cur_seq = self.engine.submit(job);
         self.panel = Some(PanelState::new(scene_label, source, anchor));
         self.mode = Mode::Panel;
-        self.mouse_left_panel_at = None;
     }
 
     /// 与 [`Self::start`] 一样发任务，但**先不弹卡片**：等第一条有内容的回包再弹。
@@ -456,7 +454,6 @@ impl App {
         self.cur_seq = self.engine.submit(job);
         self.panel = None;
         self.pending_panel = Some((scene_label, source, anchor));
-        self.mouse_left_panel_at = None;
     }
 
     /// 该点所在进程是否在例外列表里。
@@ -566,9 +563,6 @@ impl App {
     }
 
     fn drain_events(&mut self, ctx: &egui::Context) {
-        // 这一轮有没有出结果。出结果的那一刻要把「鼠标离开面板」的计时清零，
-        // 否则宽限期在翻译过程中就耗光了——见下面 `done` 的用法。
-        let mut done = false;
         while let Ok(e) = self.events.try_recv() {
             let seq = match &e {
                 Event::Shot { seq, .. }
@@ -657,7 +651,6 @@ impl App {
                     p.offline = false;
                     p.phase = Phase::Done;
                     tracing::info!("{} 完成 {took_ms}ms", p.scene_label);
-                    done = true;
                 }
                 // 失败与落空必须留 INFO 级日志：安装版默认只写 INFO，
                 // 1.0.3 用户报「没有选中文字 / 取词无效」时日志里一个字都没有，无从查起
@@ -670,25 +663,16 @@ impl App {
                     } else {
                         p.phase = Phase::Failed(error);
                     }
-                    done = true;
                 }
                 Event::Nothing { reason, .. } => {
                     tracing::info!("{} 没取到：{reason}", p.scene_label);
                     p.phase = Phase::Failed(reason);
-                    done = true;
                 }
                 // 上面已经处理并 continue 了，这三条只是让编译器满意
                 Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } => {}
             }
         }
 
-        // **出结果之后才开始算「鼠标离开了多久」**。
-        // 计时原本从面板弹出的第一帧就起跑，而悬停/划词时鼠标停在原文上、本来就不在面板里，
-        // 翻译又要一两秒——等译文到手，宽限期早就耗光了，于是「结果一显示就秒关」。
-        // 用户报的就是这个。清零之后，从看到结果那一刻起才有完整的宽限时间。
-        if done {
-            self.mouse_left_panel_at = None;
-        }
     }
 
     /// 托盘点击 → 自己弹原生菜单（不挂 muda，见 tray.rs 顶部说明）
@@ -821,14 +805,12 @@ impl App {
         self.panel = Some(st);
         self.mode = Mode::Panel;
         self.cur_seq = 0;
-        self.notice_until = Some(Instant::now() + Duration::from_millis(1600));
     }
 
     fn close_panel(&mut self) {
         self.logged_icon_at = None;
         self.panel = None;
         self.mode = Mode::Idle;
-        self.mouse_left_panel_at = None;
     }
 
     /// 设置窗里有没有还没保存的改动。
@@ -1021,6 +1003,7 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events(ctx);
         self.drain_tray(ctx, frame);
+        self.poll_outside_click();
         if self.settings_open && self.settings_unminimize {
             self.settings_unminimize = false;
             ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -1043,6 +1026,7 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events(&ctx);
         self.drain_tray(&ctx, _frame);
+        self.poll_outside_click();
         // 回收退出的字幕子进程，并按退出码决定要不要重新拉起（改识别参数会请求重启）。
         // 用 try_wait 不用 wait：后者会把 UI 线程堵死。
         self.caption.reap();
@@ -1064,14 +1048,6 @@ impl eframe::App for App {
                         p.source_rect = Some((x, y, w, h));
                     }
                 }
-            }
-        }
-
-        // 状态提示卡片到点自己收
-        if let Some(t) = self.notice_until {
-            if Instant::now() >= t {
-                self.notice_until = None;
-                self.close_panel();
             }
         }
 
@@ -1332,6 +1308,46 @@ impl App {
         }
     }
 
+    /// 浮窗不计时自收，等用户点到浮窗外面才关（Jack 2026-09-24 定）。
+    ///
+    /// 用左键**最高位的按下沿**认点击：浮窗开着时界面 60 fps 轮询，人手点击（约 60 ms 以上）
+    /// 不会漏；开窗口的那一下按下沿在它之前就被消费了，不会误关刚弹的窗。
+    /// （不用最低位「自上次查询以来按下过」：它只对产生输入的线程可靠，实测本线程读不到。）
+    /// 「点没点在浮窗上」不用矩形算，问系统**点击处是哪个窗口**（`WindowFromPoint`）：
+    /// 是自己进程的浮窗就不关。矩形判据会和卡片高度的逐帧变化赛跑——卡片从离线短条
+    /// 长成完整词条的那几帧里，点在「看得到的卡片上」却落在旧矩形外，误关（Jack 2026-09-24 实测）。
+    fn poll_outside_click(&mut self) {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, WindowFromPoint};
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON as i32) } & 0x8000u16 as i16 != 0;
+        let edge = down && !self.lbtn_was_down;
+        self.lbtn_was_down = down;
+        if !edge {
+            return;
+        }
+        if !matches!(self.mode, Mode::Panel | Mode::Overlay) {
+            return;
+        }
+        let (cx, cy) = text_capture::screen::cursor_pos();
+        let mut pid = 0u32;
+        unsafe {
+            let hwnd = WindowFromPoint(POINT { x: cx, y: cy });
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if pid == std::process::id() {
+            return; // 点在自己的浮窗上
+        }
+        tracing::info!("点到浮窗外面 物理({cx},{cy})（窗口属进程 {pid}），收起浮窗");
+        if matches!(self.mode, Mode::Overlay) {
+            self.overlay = None;
+            self.overlay_rect = None;
+            self.mode = Mode::Idle;
+        } else {
+            self.close_panel();
+        }
+    }
+
     /// 空闲时把主窗口缩到看不见的一格（egui 的根视口不能真的隐藏）
     fn draw_hidden(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -1588,20 +1604,6 @@ impl App {
             return;
         }
 
-        // 鼠标离开面板一段时间后自动关（没钉住时）。鼠标是物理坐标，面板矩形也用物理的。
-        let (mx, my) = text_capture::screen::cursor_pos();
-        let inside = mx >= x && my >= y && mx <= x + size_phys.0 as i32 && my <= y + size_phys.1 as i32;
-        if inside {
-            self.mouse_left_panel_at = None;
-        } else if self.mouse_left_panel_at.is_none() {
-            self.mouse_left_panel_at = Some(Instant::now());
-        }
-        let outside_for = self.mouse_left_panel_at.map(|t| t.elapsed());
-        if let Some(p) = &self.panel {
-            if p.should_auto_close(outside_for, Duration::from_millis(self.cfg.ui.panel_close_grace_ms)) {
-                self.close_panel();
-            }
-        }
     }
 
     /// 截屏框选：整屏半透明遮罩，拖出一个亮框
@@ -2071,9 +2073,6 @@ impl App {
         });
         Self::row(ui, "遇目标语言", "悬停取到的已经是目标语言时（英译中时扫到中文）要不要出卡片", |ui| {
             ui.checkbox(&mut self.draft.ui.hover_skip_target_lang, skip_label);
-        });
-        Self::row(ui, "译文停留", "出结果后鼠标不在译文卡片上多久就收起；钉住或拖动过的不受此限", |ui| {
-            ui.add(egui::DragValue::new(&mut self.draft.ui.panel_close_grace_ms).range(1000..=30000).suffix(" ms"));
         });
 
         Self::section(ui, "一次性动作", "按下就直接执行，没有待命状态");

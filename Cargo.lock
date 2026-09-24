@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "ai-translate"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -970,7 +970,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "desktop-shell"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "egui",
@@ -2525,7 +2525,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "live-caption"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "ai-translate",
  "anyhow",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "mock-llm"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "axum",
  "futures",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "offline-dict"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "miniz_oxide 0.8.9",
@@ -4353,7 +4353,7 @@ dependencies = [
 
 [[package]]
 name = "text-capture"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "image",
@@ -4773,7 +4773,7 @@ dependencies = [
 
 [[package]]
 name = "translate-tool"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "ai-translate",
  "anyhow",

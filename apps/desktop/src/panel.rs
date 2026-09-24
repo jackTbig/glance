@@ -1,6 +1,6 @@
 //! 译文面板的状态与摆放计算（与 egui 无关的部分，可单测）
 use text_capture::Source;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
@@ -78,13 +78,11 @@ impl PanelState {
         Some((p0.0 + cursor.0 - c0.0, p0.1 + cursor.1 - c0.1))
     }
 
-    /// 该不该自动关闭：没钉住、没在拖、已出结果、鼠标离开够久
-    pub fn should_auto_close(&self, mouse_outside_for: Option<Duration>, grace: Duration) -> bool {
-        if self.pinned || self.drag_from.is_some() || self.is_working() {
-            return false;
-        }
-        matches!(mouse_outside_for, Some(d) if d >= grace)
-    }
+}
+
+/// 物理坐标点是否落在浮窗矩形里。浮窗「点外面才关」的判据（Jack 2026-09-24 定，不再计时自收）。
+pub fn contains_phys(rect: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
+    x >= rect.0 && y >= rect.1 && x <= rect.0 + rect.2 as i32 && y <= rect.1 + rect.3 as i32
 }
 
 /// 把面板摆在触发点旁边，且不出屏幕。优先放右下，放不下依次尝试左下、右上、左上。
@@ -253,39 +251,6 @@ mod tests {
         assert_eq!(p.drag_to((620, 500)), Some((600, 460)));
     }
 
-    /// 用户报过的 bug：悬停取词「显示完成后马上消失」。
-    ///
-    /// 成因是「鼠标离开面板」的计时从面板弹出就起跑，而悬停时鼠标本来就停在原文上、
-    /// 不在面板里；翻译要一两秒，等译文到手宽限期早已耗光，于是 `Done` 的那一帧就满足关闭条件。
-    /// 修法是出结果时把计时清零（`ui::drain_events` 里的 `done`），这里钉住那个语义。
-    #[test]
-    fn result_gets_a_full_grace_period_even_if_mouse_never_entered() {
-        let grace = Duration::from_millis(3000);
-        let mut p = PanelState::new("悬停翻译", Source::Uia, (0, 0));
-
-        // 翻译中：鼠标一直在外面待了很久也不能关
-        assert!(!p.should_auto_close(Some(Duration::from_secs(5)), grace), "翻译中不能关");
-
-        // 出结果的那一刻，调用方会把计时清零 —— 传 None 表示「刚清零，还没开始算」
-        p.phase = Phase::Done;
-        assert!(!p.should_auto_close(None, grace), "刚出结果就关正是用户报的 bug");
-
-        // 清零之后重新计时，没到宽限期仍不关
-        assert!(!p.should_auto_close(Some(grace / 2), grace));
-        // 够久了才关
-        assert!(p.should_auto_close(Some(grace), grace));
-    }
-
-    #[test]
-    fn dragging_holds_the_card_open() {
-        let mut p = PanelState::new("取词释义", Source::Uia, (0, 0));
-        p.phase = Phase::Done;
-        let grace = Duration::from_millis(500);
-        assert!(p.should_auto_close(Some(Duration::from_secs(2)), grace));
-        p.drag_from = Some(((0, 0), (0, 0)));
-        assert!(!p.should_auto_close(Some(Duration::from_secs(2)), grace), "拖动中不能自己收掉");
-    }
-
     #[test]
     fn places_bottom_right_when_there_is_room() {
         assert_eq!(place((100, 100), (400, 300), SCREEN, 12), (112, 112));
@@ -342,14 +307,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_close_respects_pin_and_working() {
-        let mut p = PanelState::new("划词翻译", Source::Clipboard, (0, 0));
-        assert!(!p.should_auto_close(Some(Duration::from_secs(5)), Duration::from_millis(500)), "翻译中不关");
-        p.phase = Phase::Done;
-        assert!(p.should_auto_close(Some(Duration::from_millis(600)), Duration::from_millis(500)));
-        assert!(!p.should_auto_close(Some(Duration::from_millis(100)), Duration::from_millis(500)));
-        assert!(!p.should_auto_close(None, Duration::from_millis(500)), "鼠标在面板里不关");
-        p.pinned = true;
-        assert!(!p.should_auto_close(Some(Duration::from_secs(60)), Duration::from_millis(500)));
+    fn outside_click_uses_the_window_rect() {
+        let r = (100, 200, 300, 400);
+        assert!(contains_phys(r, 100, 200), "左上角算里面");
+        assert!(contains_phys(r, 400, 600), "右下边缘算里面");
+        assert!(contains_phys(r, 250, 400));
+        assert!(!contains_phys(r, 99, 400));
+        assert!(!contains_phys(r, 401, 400));
+        assert!(!contains_phys(r, 250, 199));
+        assert!(!contains_phys(r, 250, 601));
     }
 }
