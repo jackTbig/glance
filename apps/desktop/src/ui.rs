@@ -182,6 +182,10 @@ pub struct App {
     overlay_rect: Option<(i32, i32, u32, u32)>,
     /// 上一帧左键是否按下，配 `poll_outside_click` 认按下沿
     lbtn_was_down: bool,
+    /// 状态提示卡（托盘/热键切开关时弹的那种）的到期时刻。
+    /// **只有状态卡计时自收**：它是瞬态提示，1.6 秒不收就会每次点托盘都积一张卡
+    /// （Jack 2026-09-24 报）。翻译结果卡不计时，点浮窗外面才关。
+    notice_until: Option<Instant>,
     /// 状态提示卡片什么时候自己收掉
     settings_open: bool,
     settings_tab: SettingsTab,
@@ -353,6 +357,7 @@ impl App {
             overlay: None,
             overlay_rect: None,
             lbtn_was_down: false,
+            notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
             settings_open: open_settings_at_start,
             // TT_SETTINGS_TAB=0..3 指定启动时停在哪一页（截图与自测用）
@@ -527,7 +532,7 @@ impl App {
             let Some((_, action)) = self.hotkey_ids.iter().find(|(id, _)| *id == ev.id).copied() else { continue };
             let (x, y) = text_capture::screen::cursor_pos();
             match action {
-                HotkeyAction::ToggleHover => self.toggle_feature(Feature::Hover, (x, y)),
+                HotkeyAction::ToggleHover => self.toggle_feature(Feature::Hover, (x, y), true),
                 HotkeyAction::CaptionClickable | HotkeyAction::CaptionPassthrough => {
                     let cmd = if action == HotkeyAction::CaptionClickable {
                         desktop_shell::caption_ipc::Command::Clickable
@@ -542,7 +547,7 @@ impl App {
                         }
                     }
                 }
-                HotkeyAction::ToggleSelection => self.toggle_feature(Feature::Selection, (x, y)),
+                HotkeyAction::ToggleSelection => self.toggle_feature(Feature::Selection, (x, y), true),
                 HotkeyAction::Screenshot => {
                     tracing::info!("进入截屏框选");
                     self.mode = Mode::Selecting { start: None };
@@ -745,7 +750,7 @@ impl App {
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_DIRECTION) => self.flip_direction(),
             Some(id) if Feature::from_menu_id(id).is_some() => {
-                self.toggle_feature(Feature::from_menu_id(id).unwrap(), (x, y));
+                self.toggle_feature(Feature::from_menu_id(id).unwrap(), (x, y), false);
             }
             Some(MENU_PAUSE) => {
                 self.paused = !self.paused;
@@ -780,7 +785,9 @@ impl App {
     ///
     /// 改的是 `cfg`，**同时要改 `draft`**——否则设置窗的「保存并应用」无端亮蓝、
     /// 或者用户随后在设置窗点保存又把这次切换覆盖回去。
-    fn toggle_feature(&mut self, f: Feature, at: (i32, i32)) {
+    /// `notify`：要不要弹状态卡片。托盘点开关不弹（菜单的勾选态就是反馈，Jack 2026-09-24
+    /// 「托盘点击后不要出悬浮窗」）；热键切开关弹，1.6 秒自收。
+    fn toggle_feature(&mut self, f: Feature, at: (i32, i32), notify: bool) {
         let on = !f.get(&self.cfg);
         f.set(&mut self.cfg, on);
         f.set(&mut self.draft, on);
@@ -791,8 +798,10 @@ impl App {
             Feature::Selection | Feature::RegionOverlay | Feature::HoverSkip => {}
         }
         tracing::info!("{}{}", f.name(), if on { "已开启" } else { "已关闭" });
-        let msg = f.notice(&self.cfg, on);
-        self.notice(f.name(), msg, at);
+        if notify {
+            let msg = f.notice(&self.cfg, on);
+            self.notice(f.name(), msg, at);
+        }
         if let Err(e) = self.cfg.save() {
             tracing::warn!("开关已切换但配置没存上：{e}");
         }
@@ -805,9 +814,11 @@ impl App {
         self.panel = Some(st);
         self.mode = Mode::Panel;
         self.cur_seq = 0;
+        self.notice_until = Some(Instant::now() + Duration::from_millis(1600));
     }
 
     fn close_panel(&mut self) {
+        self.notice_until = None;
         self.logged_icon_at = None;
         self.panel = None;
         self.mode = Mode::Idle;
@@ -832,9 +843,8 @@ impl App {
             Ok(t) => *self.translator.lock().unwrap() = t,
             Err(e) => tracing::warn!("换方向后重建翻译器失败：{e}"),
         }
+        // 托盘切方向不弹卡片：菜单项上的文字就是反馈（Jack 2026-09-24）
         tracing::info!("翻译方向切换为{}", next.label_zh());
-        let (x, y) = text_capture::screen::cursor_pos();
-        self.notice("翻译方向", format!("已切换为{}", next.label_zh()), (x, y));
         let _ = self.cfg.save();
     }
 
@@ -1048,6 +1058,16 @@ impl eframe::App for App {
                         p.source_rect = Some((x, y, w, h));
                     }
                 }
+            }
+        }
+
+        // 状态提示卡到点自己收；翻译结果卡（phase 不是 Notice）不受此限
+        if let Some(t) = self.notice_until {
+            let is_notice = self.panel.as_ref().is_some_and(|p| matches!(p.phase, Phase::Notice(_)));
+            if is_notice && Instant::now() >= t {
+                self.notice_until = None;
+                tracing::debug!("状态提示卡到点自收");
+                self.close_panel();
             }
         }
 
