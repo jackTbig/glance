@@ -51,6 +51,14 @@ fi
 echo "[3/6] 打包 Chrome 插件"
 (cd extension && npm run build)
 
+# Jack 本机 Chrome 从这个稳定目录加载插件（见 CLAUDE.md「插件加载目录必须固定」）：
+# 目录存在就同步，否则发新版后 Chrome 里跑的还是旧插件。目录不存在则跳过（别的机器没有它）。
+STABLE_EXT_DIR="D:/DevCache/glance-extension"
+if [ -d "$STABLE_EXT_DIR" ]; then
+  cp -r extension/dist/. "$STABLE_EXT_DIR/"
+  echo "  已同步插件到 $STABLE_EXT_DIR"
+fi
+
 echo "[4/6] 核对 AppId"
 # 升级检测按 AppId 去注册表找旧版的卸载记录。.iss 里 [Setup] 的 AppId 与 [Code] 里查注册表用的
 # GUID 是两处手写的——对不上的话「覆盖升级」提示页永远不出现，而且不会报任何错。
