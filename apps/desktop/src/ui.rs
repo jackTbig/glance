@@ -156,6 +156,9 @@ pub struct App {
     settings_raise: bool,
     /// 窗口当前按哪类页定的尺寸（true = 翻译页）；None = 窗口没开
     settings_sized_as: Option<bool>,
+    /// 下次跑 logic 时把窗口从最小化恢复。窗口最小化时 eframe 只跑 logic 不跑 ui，
+    /// 恢复命令必须在 logic 里发，否则点托盘「打开」看着就是没反应（Jack 2026-09-24 实测）
+    settings_unminimize: bool,
     /// 关于页里的词库信息（路径 + 条数）。开词库要读几 MB 索引，算一次就存着
     about_dict: Option<Option<(std::path::PathBuf, usize)>>,
     /// 上次记进日志的内容排版宽度。**窗口宽了而它没跟着宽 = 内容没铺满**
@@ -336,6 +339,7 @@ impl App {
             logged_card_w: None,
             about_dict: None,
             settings_sized_as: None,
+            settings_unminimize: false,
             manual: crate::manual::ManualState {
                 autosubmit: main_input.is_some() && !main_live_only,
                 edited_at: (main_input.is_some() && main_live_only).then(Instant::now),
@@ -1003,6 +1007,11 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events(ctx);
         self.drain_tray(ctx, frame);
+        if self.settings_open && self.settings_unminimize {
+            self.settings_unminimize = false;
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
         self.caption.reap();
         self.count_frame(false);
         // 有事要显示就把绘制拉回来；没事也保持一个低频心跳，
@@ -1191,6 +1200,9 @@ impl App {
 
         let mut close = false;
         let mut toggle = false;
+        // 拖动位移先记在这里、闭包外再落到 overlay 上：闭包已经借走了 `o`（不可变），
+        // 在闭包里再 `as_mut` 就是同一字段上的第二次借用，编译不过
+        let mut drag_by = (0i32, 0i32);
         let o = self.overlay.as_ref().expect("上面刚判过");
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root_ui, |ui| {
             let win_rect = ui.max_rect();
@@ -1232,7 +1244,13 @@ impl App {
                 win_rect.min + egui::vec2(0.0, bar_top),
                 egui::vec2(win_rect.width(), OVERLAY_BAR_H),
             );
-            painter.rect_filled(bar, CornerRadius::same(4), Color32::from_rgb(24, 24, 28));
+            painter.rect_filled(bar, CornerRadius::same(4), Color32::from_rgb(250, 250, 248));
+            painter.rect_stroke(
+                bar,
+                CornerRadius::same(4),
+                egui::Stroke::new(1.0, Color32::from_gray(185)),
+                egui::StrokeKind::Inside,
+            );
             let hint = if o.working {
                 "翻译中…"
             } else if o.show_dst {
@@ -1245,15 +1263,27 @@ impl App {
                 Align2::LEFT_CENTER,
                 hint,
                 egui::FontId::proportional(12.0),
-                Color32::from_gray(230),
+                Color32::from_gray(60),
             );
             painter.text(
                 egui::pos2(bar.right() - 10.0, bar.center().y),
                 Align2::RIGHT_CENTER,
                 "✕ Esc",
                 egui::FontId::proportional(12.0),
-                Color32::from_gray(200),
+                Color32::from_gray(90),
             );
+
+            // 提示栏当手柄拖动整个覆盖窗：截屏译文也是浮窗，钉死在原地会挡着用户要看的东西
+            // （Jack 2026-09-24「所有悬浮窗口需要可以拖动」）。与点击不冲突：egui 的 drag
+            // 要指针移动过阈值才成立，原地点一下仍走下面的关闭/切换。
+            let bar_drag = ui.interact(bar, ui.id().with("overlay-drag"), egui::Sense::drag());
+            if bar_drag.hovered() || bar_drag.dragged() {
+                ui.ctx().set_cursor_icon(if bar_drag.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            }
+            if bar_drag.dragged() {
+                let d = bar_drag.drag_delta();
+                drag_by = (dpi.to_physical_len(d.x), dpi.to_physical_len(d.y));
+            }
 
             let resp = ui.allocate_response(win_rect.size(), egui::Sense::click());
             if resp.clicked() {
@@ -1270,6 +1300,12 @@ impl App {
             }
         });
 
+        if drag_by != (0, 0) {
+            if let Some(o) = self.overlay.as_mut() {
+                o.rect.0 += drag_by.0;
+                o.rect.1 += drag_by.1;
+            }
+        }
         if toggle {
             if let Some(o) = self.overlay.as_mut() {
                 o.show_dst = !o.show_dst;
@@ -1394,13 +1430,19 @@ impl App {
         let entry = (scene_of(p.scene_label) == Scene::Word).then(|| crate::dict::parse(&p.translated)).flatten();
         let base = self.cfg.ui.font_size;
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgba_unmultiplied(28, 28, 32, 246)).corner_radius(CornerRadius::same(10)).inner_margin(12.0))
+            .frame(
+                egui::Frame::NONE
+                    .fill(Color32::from_rgba_unmultiplied(252, 252, 250, 248))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_gray(175)))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(12.0),
+            )
             .show(root_ui, |ui| {
                 let head = ui.horizontal(|ui| {
-                    ui.label(RichText::new(p.scene_label).color(Color32::from_rgb(150, 180, 255)).size(13.0));
-                    ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::GRAY).size(12.0));
+                    ui.label(RichText::new(p.scene_label).color(Color32::from_rgb(40, 90, 180)).size(13.0));
+                    ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::from_gray(120)).size(12.0));
                     if p.offline {
-                        ui.label(RichText::new("· 离线").color(Color32::from_rgb(190, 160, 90)).size(12.0))
+                        ui.label(RichText::new("· 离线").color(Color32::from_rgb(150, 110, 20)).size(12.0))
                             .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1439,7 +1481,7 @@ impl App {
                     .show(ui, |ui| {
                     if let Some(e) = &entry {
                         // 词典卡：词头本身就是原文，不再另起一行灰色原文，省得重复
-                        draw_entry(ui, e, &p.original, base);
+                        draw_entry(ui, e, &p.original, base, true);
                         if p.is_working() {
                             ui.add_space(6.0);
                             ui.horizontal(|ui| {
@@ -1450,7 +1492,7 @@ impl App {
                         return;
                     }
                     if !p.original.is_empty() {
-                        ui.label(RichText::new(&p.original).color(Color32::from_gray(150)).size(base - 1.0));
+                        ui.label(RichText::new(&p.original).color(Color32::from_gray(100)).size(base - 1.0));
                         ui.add_space(6.0);
                     }
                     match &p.phase {
@@ -1461,17 +1503,17 @@ impl App {
                                     ui.label(RichText::new(msg).color(Color32::GRAY).size(12.0));
                                 });
                             } else {
-                                ui.label(RichText::new(&p.translated).color(Color32::from_gray(230)).size(base));
+                                ui.label(RichText::new(&p.translated).color(Color32::from_gray(60)).size(base));
                             }
                         }
                         Phase::Done => {
-                            ui.label(RichText::new(&p.translated).color(Color32::WHITE).size(base));
+                            ui.label(RichText::new(&p.translated).color(Color32::from_gray(20)).size(base));
                         }
                         Phase::Notice(msg) => {
-                            ui.label(RichText::new(msg).color(Color32::from_gray(170)).size(13.0));
+                            ui.label(RichText::new(msg).color(Color32::from_gray(90)).size(13.0));
                         }
                         Phase::Failed(e) => {
-                            ui.label(RichText::new(e).color(Color32::from_rgb(240, 130, 130)).size(13.0));
+                            ui.label(RichText::new(e).color(Color32::from_rgb(185, 45, 45)).size(13.0));
                             if ui.button("重试").clicked() {
                                 retry = true;
                             }
@@ -2211,7 +2253,7 @@ impl App {
                     });
                     ui.add_space(4.0);
                     match &entry {
-                        Some(e) => draw_entry(ui, e, self.manual.input.trim(), base + 1.0),
+                        Some(e) => draw_entry(ui, e, self.manual.input.trim(), base + 1.0, false),
                         None => {
                             ui.label(RichText::new(&markers).size(base).color(Color32::WHITE));
                         }
@@ -2241,7 +2283,7 @@ impl App {
                     });
                     ui.add_space(4.0);
                     if let Some(e) = &entry {
-                        draw_entry(ui, e, &self.manual.original, base + 1.0);
+                        draw_entry(ui, e, &self.manual.original, base + 1.0, false);
                     } else if !self.manual.result.trim().is_empty() {
                         ui.add(egui::Label::new(RichText::new(&self.manual.result).size(base + 1.0).color(Color32::WHITE)).selectable(true));
                     }
@@ -2565,6 +2607,7 @@ impl App {
         if tab == SettingsTab::Translate {
             self.manual.want_focus = true;
         }
+        self.settings_unminimize = true;
         if self.settings_open {
             // 已经开着：只换页、提到前面。**不能重置 draft**，否则设置页里没保存的改动被悄悄丢掉
             if self.settings_tab != tab {
@@ -2647,42 +2690,49 @@ fn window_handle_of(_frame: &eframe::Frame) -> isize {
 ///
 /// 每块都可能缺：模型不知道就整行省略，流式过程中后面的行还没到。所以每块都单独判空，
 /// 不要写成「有词头就一定有音标」那种连坐。
-fn draw_entry(ui: &mut egui::Ui, e: &crate::dict::Entry, original: &str, base: f32) {
+/// 词典条目版式。`light` = 画在明亮底上（浮动卡片）还是深色底上（主窗口结果卡片）：
+/// 同一套版式两种配色，改字色时两处都要看（Jack 2026-09-24 要求浮窗改明亮风格）。
+fn draw_entry(ui: &mut egui::Ui, e: &crate::dict::Entry, original: &str, base: f32, light: bool) {
+    let c = |dark: u8, lite: u8| {
+        if light {
+            Color32::from_gray(lite)
+        } else {
+            Color32::from_gray(dark)
+        }
+    };
+    let accent = if light { Color32::from_rgb(40, 90, 180) } else { Color32::from_rgb(150, 180, 255) };
     // 词头：模型偶尔不回 #词，就拿取到的原文顶上，别让卡片没有标题
     let head = if e.head.is_empty() { original.trim() } else { e.head.as_str() };
     if !head.is_empty() {
-        ui.label(RichText::new(head).color(Color32::WHITE).size(base + 9.0).strong());
+        ui.label(RichText::new(head).color(c(255, 25)).size(base + 9.0).strong());
     }
     if !e.phonetic.is_empty() {
         ui.add_space(1.0);
-        ui.label(RichText::new(&e.phonetic).color(Color32::from_gray(140)).size(base - 3.0));
+        ui.label(RichText::new(&e.phonetic).color(c(140, 110)).size(base - 3.0));
     }
     if !e.senses.is_empty() {
         ui.add_space(8.0);
         for s in &e.senses {
             ui.horizontal_top(|ui| {
                 // 词性列宽固定，多个词性的释义才能左对齐成一栏
-                ui.add_sized(
-                    [34.0, base + 2.0],
-                    egui::Label::new(RichText::new(&s.pos).color(Color32::from_rgb(150, 180, 255)).size(base - 2.0)),
-                );
-                ui.add(egui::Label::new(RichText::new(&s.text).color(Color32::from_gray(235)).size(base)).wrap());
+                ui.add_sized([34.0, base + 2.0], egui::Label::new(RichText::new(&s.pos).color(accent).size(base - 2.0)));
+                ui.add(egui::Label::new(RichText::new(&s.text).color(c(235, 35)).size(base)).wrap());
             });
             ui.add_space(4.0);
         }
     }
     if !e.forms.is_empty() {
         ui.add_space(2.0);
-        ui.add(egui::Label::new(RichText::new(&e.forms).color(Color32::from_gray(130)).size(base - 4.0)).wrap());
+        ui.add(egui::Label::new(RichText::new(&e.forms).color(c(130, 100)).size(base - 4.0)).wrap());
     }
     if !e.example.is_empty() {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new(&e.example).color(Color32::from_gray(205)).size(base - 2.0).italics()).wrap());
+        ui.add(egui::Label::new(RichText::new(&e.example).color(c(205, 70)).size(base - 2.0).italics()).wrap());
         if !e.example_zh.is_empty() {
             ui.add_space(2.0);
-            ui.add(egui::Label::new(RichText::new(&e.example_zh).color(Color32::from_gray(150)).size(base - 3.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(&e.example_zh).color(c(150, 100)).size(base - 3.0)).wrap());
         }
     }
 }

@@ -41,6 +41,21 @@ pub fn reveal_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Chrome 的 Local State 里记的上次使用的配置档（如 "Profile 1" / "Default"）。
+///
+/// 多账号时直接 `chrome.exe <url>` 会先弹账号选择，选完 URL 被吞掉、落在新标签页
+/// （Jack 2026-09-24 实测）。带上 `--profile-directory` 就不弹选择、直接开到目标页。
+fn chrome_last_profile(state: &str) -> Option<String> {
+    // 只挖 "last_used" 那一个字符串值，不为它引一个 JSON 依赖
+    let key = "\"last_used\"";
+    let i = state.find(key)? + key.len();
+    let rest = &state[i..];
+    let q1 = rest.find('"')?;
+    let q2 = rest[q1 + 1..].find('"')? + q1 + 1;
+    let v = rest[q1 + 1..q2].trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
 /// 打开 Chrome 的扩展页。找不到 Chrome 就返回 Err，让调用方提示手动打开。
 pub fn open_extensions_page() -> anyhow::Result<()> {
     let candidates = [
@@ -57,12 +72,23 @@ pub fn open_extensions_page() -> anyhow::Result<()> {
         }
     }
     let chrome = chrome.ok_or_else(|| anyhow::anyhow!("没找到 Chrome，请手动打开 chrome://extensions"))?;
-    std::process::Command::new(chrome)
-        .arg("chrome://extensions")
+    let mut cmd = std::process::Command::new(chrome);
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let user_data = PathBuf::from(local).join(r"Google\Chrome\User Data");
+        let state = std::fs::read_to_string(user_data.join("Local State")).unwrap_or_default();
+        if let Some(p) = chrome_last_profile(&state) {
+            // 配置档目录真的存在才传：传一个不存在的名字 Chrome 会建一个空配置档，设置全丢
+            if user_data.join(&p).is_dir() {
+                cmd.arg(format!("--profile-directory={p}"));
+            }
+        }
+    }
+    cmd.arg("chrome://extensions")
         .spawn()
         .map_err(|e| anyhow::anyhow!("启动 Chrome 失败：{e}"))?;
     Ok(())
 }
+
 
 /// 把目录路径放进剪贴板，方便用户粘到扩展页的目录选择框里
 pub fn copy_path(dir: &Path) -> anyhow::Result<()> {
@@ -72,6 +98,16 @@ pub fn copy_path(dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_last_used_profile() {
+        let s = r#"{ "profile": { "info_cache": {}, "last_used": "Profile 3" } }"#;
+        assert_eq!(chrome_last_profile(s).as_deref(), Some("Profile 3"));
+        let compact = r#"{"profile":{"last_used":"Default"}}"#;
+        assert_eq!(chrome_last_profile(compact).as_deref(), Some("Default"));
+        assert_eq!(chrome_last_profile("{}"), None);
+        assert_eq!(chrome_last_profile(r#"{"last_used": ""}"#), None);
+    }
 
     #[test]
     fn dist_dir_points_at_a_real_manifest() {
