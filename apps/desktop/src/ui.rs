@@ -152,6 +152,8 @@ pub struct App {
     logged_card_w: Option<f32>,
     /// 主窗口「翻译」页的状态
     manual: crate::manual::ManualState,
+    /// 设置页「模型」下拉的候选列表（后台拉取，见 `models.rs`）
+    models: crate::models::ModelList,
     /// 窗口已经开着时又被要求打开（换页）：下一帧把它提到前面、改标题，但不重新摆位
     settings_raise: bool,
     /// 窗口当前按哪类页定的尺寸（true = 翻译页）；None = 窗口没开
@@ -344,6 +346,7 @@ impl App {
             about_dict: None,
             settings_sized_as: None,
             settings_unminimize: false,
+            models: Default::default(),
             manual: crate::manual::ManualState {
                 autosubmit: main_input.is_some() && !main_live_only,
                 edited_at: (main_input.is_some() && main_live_only).then(Instant::now),
@@ -1970,6 +1973,11 @@ impl App {
     }
 
     fn settings_service(&mut self, ui: &mut egui::Ui) {
+        // 模型列表的在途结果每帧收一次；失败写进设置页提示行，别静默
+        self.models.drain();
+        if let Some(e) = self.models.error.take() {
+            self.settings_msg = format!("拉模型列表失败：{e}");
+        }
         Self::row(ui, "翻译方向", "决定所有场景翻成哪种语言；托盘菜单里也能随手切", |ui| {
             let cur = ai_translate::Direction::parse(&self.draft.direction);
             egui::ComboBox::from_id_salt("direction").width(104.0).selected_text(cur.label_zh()).show_ui(ui, |ui| {
@@ -1996,8 +2004,42 @@ impl App {
         Self::row(ui, "API Key", "只存在本机配置文件里，不进浏览器插件", |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_api_key).password(true).desired_width(FIELD_W));
         });
-        Self::row(ui, "模型", "", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_model).desired_width(FIELD_W));
+        Self::row(ui, "模型", "可以直接输入；填好接口地址与 Key 后点右边下拉，从接口拉列表选", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.backend.openai_model).desired_width(FIELD_W - 96.0));
+            let base = self.draft.backend.openai_base_url.clone();
+            let key = self.draft.backend.openai_api_key.clone();
+            let fresh = self.models.fresh_for(&base, &key);
+            let label = if self.models.fetching {
+                "拉取…".to_string()
+            } else if fresh {
+                format!("{} 个模型", self.models.items.len())
+            } else {
+                "模型列表".to_string()
+            };
+            let items = if fresh { self.models.items.clone() } else { Vec::new() };
+            let cur = self.draft.backend.openai_model.clone();
+            let mut picked: Option<String> = None;
+            // 点下拉的那一刻若列表过期就当场拉：弹窗展开的那一两帧里结果通常就回来了
+            let opened = egui::ComboBox::from_id_salt("model-picker")
+                .width(170.0)
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for id in &items {
+                        if ui.selectable_label(cur == *id, id).clicked() {
+                            picked = Some(id.clone());
+                        }
+                    }
+                })
+                .response
+                .clicked();
+            if opened && !self.models.fetching && !fresh {
+                if !self.models.request(&base, &key) && self.models.error.is_some() {
+                    // request 里没起线程之类的错，drain 不收，这里直接提示
+                }
+            }
+            if let Some(id) = picked {
+                self.draft.backend.openai_model = id;
+            }
         });
 
         Self::section(
