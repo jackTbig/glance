@@ -100,6 +100,8 @@ const MIN_REGION_PANEL_W: f32 = 240.0;
 
 /// 覆盖窗口下方那条提示栏的高度（逻辑像素）。**它在截图区之外**，不压原文
 const OVERLAY_BAR_H: f32 = 26.0;
+/// 提示栏右端的关闭区宽度（逻辑像素）：✕ 与 Esc 提示那一段，点它才关窗
+const BAR_CLOSE_W: f32 = 118.0;
 
 /// 空闲时把主窗口丢到哪儿（**逻辑**坐标）。
 ///
@@ -1281,7 +1283,7 @@ impl App {
             painter.text(
                 egui::pos2(bar.right() - 10.0, bar.center().y),
                 Align2::RIGHT_CENTER,
-                "✕ Esc",
+                "拖动移动 · ✕ Esc",
                 egui::FontId::proportional(12.0),
                 Color32::from_gray(90),
             );
@@ -1300,12 +1302,18 @@ impl App {
 
             let resp = ui.allocate_response(win_rect.size(), egui::Sense::click());
             if resp.clicked() {
-                // 点在右上角那条上就是关闭，点别处切换原文/译文
+                // 整窗点击都切换原文/译文——提示栏上的字写着「点击看原文」，点它却关窗，
+                // Jack 2026-09-25 报「点击一次就退了」。关闭只走 Esc、栏右端 ✕ 区、点浮窗外面。
                 let at = ui.input(|i| i.pointer.latest_pos());
-                if at.is_some_and(|p| bar.contains(p)) {
+                let close_zone = egui::Rect::from_min_max(
+                    egui::pos2(bar.right() - BAR_CLOSE_W, bar.top()),
+                    bar.max,
+                );
+                if at.is_some_and(|p| close_zone.contains(p)) {
                     close = true;
                 } else {
                     toggle = true;
+                    tracing::debug!("覆盖窗点击切换原文/译文");
                 }
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1354,10 +1362,12 @@ impl App {
         }
         let (cx, cy) = text_capture::screen::cursor_pos();
         let mut pid = 0u32;
-        unsafe {
-            let hwnd = WindowFromPoint(POINT { x: cx, y: cy });
-            GetWindowThreadProcessId(hwnd, &mut pid);
-        }
+        let hwnd = unsafe {
+            let h = WindowFromPoint(POINT { x: cx, y: cy });
+            GetWindowThreadProcessId(h, &mut pid);
+            h
+        };
+        tracing::debug!("点外判定：物理({cx},{cy}) 窗口 {hwnd:?} 属进程 {pid}（本进程 {}） mode {:?}", std::process::id(), self.mode);
         if pid == std::process::id() {
             return; // 点在自己的浮窗上
         }
