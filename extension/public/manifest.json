@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqZ1OkIEJ4lRbveK+JXNtNNItTSOZa53yWfY5SxEzmseLMluihnZjNkI3t297oeFzuf/NJZp/0q01aIO28gdK+HjqejDuwcInAphSpcmuervP4swvJvXGhP6NriWp8WKRIjfZNiOYtqmLMQHT2yl7vXJc91/vtq3xdY2B1JEljU6P7I0sZxx0xFupEfKJgb5f3D0eCvAs0RmriA7jGHBGUQlCIrGiPcfjOgoacuJ6ZyUTWmrdtjvdtnk/6nB/M//IILckllgLUocOFQB7goP49b6fatSMniNO35CXKxxLoZKr149kZAbhafg0TXJgXVKSh1KmR9T+mp/MJaHp87pubwIDAQAB",
   "name": "简译 Glance",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "整页 / 悬停 / 划词翻译，翻译由本机的简译桌面端完成，API Key 不进浏览器。",
   "permissions": [
     "storage",

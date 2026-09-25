@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::dpi::Dpi;
 use crate::engine::{Engine, Event, Job};
 use crate::hotkey::{parse_hotkey, HoverModifier};
-use crate::panel::{place, place_icon, PanelState, Phase};
+use crate::panel::{place, place_below, place_icon, PanelState, Phase};
 use crate::watcher::{Trigger, WatchConfig, Watcher};
 use ai_translate::Scene;
 use crossbeam_channel::Receiver;
@@ -102,6 +102,9 @@ const MIN_REGION_PANEL_W: f32 = 240.0;
 const OVERLAY_BAR_H: f32 = 26.0;
 /// 提示栏右端的关闭区宽度（逻辑像素）：✕ 与 Esc 提示那一段，点它才关窗
 const BAR_CLOSE_W: f32 = 118.0;
+/// 浮窗外的近失容差（**逻辑**像素，按当前缩放换算）：落在这个范围内的点击忽略，不关浮窗。
+/// 用逻辑值：100% 缩放的机器上物理 100 会是整整 100 逻辑像素的死区，太钝（审核 M5）
+const NEAR_MISS_MARGIN_LOGICAL: f32 = 50.0;
 
 /// 空闲时把主窗口丢到哪儿（**逻辑**坐标）。
 ///
@@ -186,11 +189,12 @@ pub struct App {
     overlay_rect: Option<(i32, i32, u32, u32)>,
     /// 上一帧左键是否按下，配 `poll_outside_click` 认按下沿
     lbtn_was_down: bool,
+    /// 浮窗窗口的物理矩形，只给近失容差判定用（`panel::near_phys`）
+    float_win: Option<(i32, i32, u32, u32)>,
     /// 状态提示卡（托盘/热键切开关时弹的那种）的到期时刻。
     /// **只有状态卡计时自收**：它是瞬态提示，1.6 秒不收就会每次点托盘都积一张卡
     /// （Jack 2026-09-24 报）。翻译结果卡不计时，点浮窗外面才关。
     notice_until: Option<Instant>,
-    /// 状态提示卡片什么时候自己收掉
     settings_open: bool,
     settings_tab: SettingsTab,
     /// 换页后把滚动条拉回顶部
@@ -362,6 +366,7 @@ impl App {
             overlay: None,
             overlay_rect: None,
             lbtn_was_down: false,
+            float_win: None,
             notice_until: None,
             // 调试钩子：设 TT_OPEN_SETTINGS=1 启动即开设置窗（截图与自测用）
             settings_open: open_settings_at_start,
@@ -554,6 +559,11 @@ impl App {
                 }
                 HotkeyAction::ToggleSelection => self.toggle_feature(Feature::Selection, (x, y), true),
                 HotkeyAction::Screenshot => {
+                    // 设置窗独占根视口：这时进框选，遮罩画不出来，关设置窗的瞬间全屏遮罩突然现身（审核 M4）
+                    if self.settings_open {
+                        tracing::debug!("窗口开着，忽略截屏热键");
+                        continue;
+                    }
                     tracing::info!("进入截屏框选");
                     self.mode = Mode::Selecting { start: None };
                     self.panel = None;
@@ -561,6 +571,10 @@ impl App {
                     self.focus_selector = true;
                 }
                 HotkeyAction::TogglePanel => {
+                    if self.settings_open {
+                        tracing::debug!("窗口开着，忽略面板热键");
+                        continue;
+                    }
                     if self.panel.is_some() {
                         self.close_panel();
                     } else {
@@ -823,6 +837,7 @@ impl App {
     }
 
     fn close_panel(&mut self) {
+        self.float_win = None;
         self.notice_until = None;
         self.logged_icon_at = None;
         self.panel = None;
@@ -1018,7 +1033,7 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events(ctx);
         self.drain_tray(ctx, frame);
-        self.poll_outside_click();
+        self.poll_outside_click(ctx);
         if self.settings_open && self.settings_unminimize {
             self.settings_unminimize = false;
             ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -1041,7 +1056,7 @@ impl eframe::App for App {
         self.drain_triggers();
         self.drain_events(&ctx);
         self.drain_tray(&ctx, _frame);
-        self.poll_outside_click();
+        self.poll_outside_click(&ctx);
         // 回收退出的字幕子进程，并按退出码决定要不要重新拉起（改识别参数会请求重启）。
         // 用 try_wait 不用 wait：后者会把 UI 线程堵死。
         self.caption.reap();
@@ -1192,6 +1207,14 @@ impl App {
         self.panel = None;
         self.pending_panel = None;
         self.mode = Mode::Overlay;
+        // 浮窗矩形在摆放之前就预置：从切模式到窗口落位有一两帧空窗，这期间「点外面才关」
+        // 没有矩形可查，恰好的点击会把刚弹的覆盖窗关掉（审核 M1）
+        let dpi = Dpi::from_ctx(ctx);
+        let bar_phys = dpi.to_physical_len(OVERLAY_BAR_H).max(1);
+        let (win, _img_y, _bar_y) = crate::overlay::layout(rect, bar_phys, text_capture::screen::virtual_screen());
+        self.float_win = Some(win);
+        // 覆盖窗要收 Esc：不给焦点的话用户点回自己文档之后 Esc 打不进来（审核 L1）
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
     /// 覆盖式截屏：把原图铺回框选的位置，再把译文盖到每行原文上。
@@ -1208,6 +1231,7 @@ impl App {
         let bar_phys = dpi.to_physical_len(OVERLAY_BAR_H).max(1);
         let screen = text_capture::screen::virtual_screen();
         let (win, img_y, bar_y) = crate::overlay::layout(region, bar_phys, screen);
+        self.float_win = Some(win);
         self.place_window(&ctx, dpi.to_logical_pos((win.0, win.1)), dpi.to_logical_size((win.2, win.3)));
         let img_top = dpi.to_logical_len(img_y as f32);
         let bar_top = dpi.to_logical_len(bar_y as f32);
@@ -1291,7 +1315,10 @@ impl App {
             // 提示栏当手柄拖动整个覆盖窗：截屏译文也是浮窗，钉死在原地会挡着用户要看的东西
             // （Jack 2026-09-24「所有悬浮窗口需要可以拖动」）。与点击不冲突：egui 的 drag
             // 要指针移动过阈值才成立，原地点一下仍走下面的关闭/切换。
-            let bar_drag = ui.interact(bar, ui.id().with("overlay-drag"), egui::Sense::drag());
+            // 拖动手柄只到关闭区左缘：在 ✕ 区起手微拖（<6px 判 click）会直接关窗（审核 M3）
+            let mut drag_bar = bar;
+            drag_bar.max.x = (drag_bar.max.x - BAR_CLOSE_W).max(drag_bar.min.x);
+            let bar_drag = ui.interact(drag_bar, ui.id().with("overlay-drag"), egui::Sense::drag());
             if bar_drag.hovered() || bar_drag.dragged() {
                 ui.ctx().set_cursor_icon(if bar_drag.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
             }
@@ -1305,15 +1332,13 @@ impl App {
                 // 整窗点击都切换原文/译文——提示栏上的字写着「点击看原文」，点它却关窗，
                 // Jack 2026-09-25 报「点击一次就退了」。关闭只走 Esc、栏右端 ✕ 区、点浮窗外面。
                 let at = ui.input(|i| i.pointer.latest_pos());
-                let close_zone = egui::Rect::from_min_max(
-                    egui::pos2(bar.right() - BAR_CLOSE_W, bar.top()),
-                    bar.max,
-                );
+                let close_w = BAR_CLOSE_W.min(bar.width() * 0.4);
+                let close_zone = egui::Rect::from_min_max(egui::pos2(bar.right() - close_w, bar.top()), bar.max);
                 if at.is_some_and(|p| close_zone.contains(p)) {
                     close = true;
                 } else {
                     toggle = true;
-                    tracing::debug!("覆盖窗点击切换原文/译文");
+                    tracing::info!("覆盖窗点击切换原文/译文");
                 }
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -1335,6 +1360,7 @@ impl App {
         if close {
             self.overlay = None;
             self.overlay_rect = None;
+            self.float_win = None;
             self.mode = Mode::Idle;
         }
     }
@@ -1347,7 +1373,7 @@ impl App {
     /// 「点没点在浮窗上」不用矩形算，问系统**点击处是哪个窗口**（`WindowFromPoint`）：
     /// 是自己进程的浮窗就不关。矩形判据会和卡片高度的逐帧变化赛跑——卡片从离线短条
     /// 长成完整词条的那几帧里，点在「看得到的卡片上」却落在旧矩形外，误关（Jack 2026-09-24 实测）。
-    fn poll_outside_click(&mut self) {
+    fn poll_outside_click(&mut self, ctx: &egui::Context) {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
         use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, WindowFromPoint};
@@ -1371,7 +1397,17 @@ impl App {
         if pid == std::process::id() {
             return; // 点在自己的浮窗上
         }
-        tracing::info!("点到浮窗外面 物理({cx},{cy})（窗口属进程 {pid}），收起浮窗");
+        // 贴着浮窗边的近失不关：用户瞄的是浮窗没瞄中（Jack 2026-09-25 偏了 61 物理像素）
+        if let Some(r) = self.float_win {
+            let margin = Dpi::from_ctx(ctx).to_physical_len(NEAR_MISS_MARGIN_LOGICAL).max(1);
+            if crate::panel::near_phys(r, cx, cy, margin) {
+                tracing::info!("点击落在浮窗容差内 物理({cx},{cy})，忽略不关");
+                return;
+            }
+            tracing::info!("点到浮窗外面 物理({cx},{cy})（窗口属进程 {pid}，浮窗矩形 {r:?}），收起浮窗");
+        } else {
+            tracing::info!("点到浮窗外面 物理({cx},{cy})（窗口属进程 {pid}），收起浮窗");
+        }
         if matches!(self.mode, Mode::Overlay) {
             self.overlay = None;
             self.overlay_rect = None;
@@ -1384,6 +1420,7 @@ impl App {
     /// 空闲时把主窗口缩到看不见的一格（egui 的根视口不能真的隐藏）
     fn draw_hidden(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.float_win = None;
         self.place_window(&ctx, HIDDEN_POS, HIDDEN_SIZE);
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |_| {});
     }
@@ -1451,7 +1488,15 @@ impl App {
         // 像悬在半空。高度随内容逐帧变、底边始终钉在指针上方，不会跳。
         let inner_h = if p.view_h > 0.0 { p.view_h.clamp(72.0, h) } else { h };
         let size_phys = (dpi.to_physical_size((w, h)).0, dpi.to_physical_len(inner_h).max(1) as u32);
-        let (mut x, mut y) = if p.pinned { p.pos } else { place(p.anchor, size_phys, screen, dpi.to_physical_len(14.0)) };
+        let gap = dpi.to_physical_len(14.0);
+        let (mut x, mut y) = if p.pinned {
+            p.pos
+        } else if p.source_rect.is_some() {
+            // 截屏卡（非覆盖式）的锚点是选区左下角：下方优先，别盖住刚框的原文（审核 M2）
+            place_below(p.anchor, size_phys, screen, gap)
+        } else {
+            place(p.anchor, size_phys, screen, gap)
+        };
         // 截屏翻译：卡片与框选区同宽、左边缘对齐，看起来才是「这块区域的译文」。
         // 钉住或拖过之后就不再跟框走，用户挪到哪儿就在哪儿。
         // 钉住只是「不自动关闭」，不该改变几何；只有用户亲手拖过才停止跟着框走
@@ -1473,6 +1518,7 @@ impl App {
             tracing::debug!("面板：锚点物理{:?} → 摆到物理({x},{y}) → 逻辑{logical:?} 尺寸逻辑({w}x{inner_h}) ppp={}", p.anchor, dpi.ppp());
         }
         self.place_window(&ctx, logical, egui::vec2(w, inner_h));
+        self.float_win = Some((x, y, dpi.to_physical_len(w).max(1) as u32, dpi.to_physical_len(inner_h).max(1) as u32));
         if self.logged_card_w != Some(w) {
             self.logged_card_w = Some(w);
             tracing::info!(
@@ -1621,6 +1667,10 @@ impl App {
             // 词典卡复制的是整理过的条目，不是带 #标记 的原始回包
             let text = entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| p.translated.clone());
             let _ = text_capture::clipboard::set_text(&text);
+        }
+        // 近失容差让「点旁边关卡片」变钝之后，Esc 是卡片的第二条退出路（审核 M5）
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            close = true;
         }
         if retry {
             let text = p.original.clone();
@@ -2043,9 +2093,7 @@ impl App {
                 .response
                 .clicked();
             if opened && !self.models.fetching && !fresh {
-                if !self.models.request(&base, &key) && self.models.error.is_some() {
-                    // request 里没起线程之类的错，drain 不收，这里直接提示
-                }
+                self.models.request(&base, &key);
             }
             if let Some(id) = picked {
                 self.draft.backend.openai_model = id;
@@ -2266,10 +2314,16 @@ impl App {
         }
 
         // 边输入边查：停手够久就查一次本地词库（界面线程直查，0.2 ms 以内）
-        if let Some(q) = self.manual.due_live_query(now) {
-            let markers = self.engine.lookup_offline(&q);
-            tracing::debug!("主窗口边查 {q:?}：{}", if markers.is_some() { "命中" } else { "没有" });
-            self.manual.live = Some(Live { query: q, markers });
+        if self.cfg.ui.offline_dict {
+            if let Some(q) = self.manual.due_live_query(now) {
+                let markers = self.engine.lookup_offline(&q);
+                tracing::debug!("主窗口边查 {q:?}：{}", if markers.is_some() { "命中" } else { "没有" });
+                self.manual.live = Some(Live { query: q, markers });
+            }
+        } else {
+            // 开关关着别留着待查计时：否则每帧白排一次重绘（审核 L7）
+            self.manual.edited_at = None;
+            self.manual.live = None;
         }
         if self.manual.edited_at.is_some() {
             ui.ctx().request_repaint_after(crate::manual::LIVE_DELAY);
@@ -2318,9 +2372,9 @@ impl App {
             View::Hint => {
                 let t = self.manual.input.trim();
                 let is_word = ai_translate::scene::looks_like_word_in(t, ai_translate::Direction::ToChinese);
-                if is_word && !self.engine.has_offline_dict() {
+                if is_word && self.cfg.ui.offline_dict && !self.engine.has_offline_dict() {
                     hint(ui, "本机没装离线词典，回车问模型");
-                } else if !is_word {
+                } else {
                     hint(ui, "回车翻译，Shift+回车换行");
                 }
             }

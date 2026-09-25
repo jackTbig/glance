@@ -85,6 +85,15 @@ pub fn contains_phys(rect: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
     x >= rect.0 && y >= rect.1 && x <= rect.0 + rect.2 as i32 && y <= rect.1 + rect.3 as i32
 }
 
+/// 点是否落在浮窗矩形外扩 margin 的范围内。贴着窗边的点击多半是瞄它没瞄中
+/// （Jack 2026-09-25 实测偏 61 物理像素），这种近失不关窗，直接忽略。
+pub fn near_phys(rect: (i32, i32, u32, u32), x: i32, y: i32, margin: i32) -> bool {
+    let (rx, ry, rw, rh) = rect;
+    let w = (rw as i32 + margin * 2).max(0) as u32;
+    let h = (rh as i32 + margin * 2).max(0) as u32;
+    contains_phys((rx - margin, ry - margin, w, h), x, y)
+}
+
 /// 把面板摆在触发点旁边，且不出屏幕。优先放右下，放不下依次尝试左下、右上、左上。
 /// 卡片与截屏框对齐：宽度取框宽（夹在 `min_w`..`max_w` 之间——框太窄的话卡片里一行放不下几个字），
 /// 左边缘对齐框的左边缘，超出屏幕右边就收回屏内。纵向位置沿用 `place` 算好的。
@@ -130,6 +139,34 @@ pub fn place(
         }
     }
     // 四个方位都放不下：硬收敛到屏幕内
+    let x = (ax + gap).min(right - w).max(sx);
+    let y = (ay + gap).min(bottom - h).max(sy);
+    (x, y)
+}
+
+/// 摆放候选序：下方优先。给锚点不是鼠标的卡片用（非覆盖式截屏卡的锚点是选区左下角，
+/// 用「右上优先」会让卡片盖住选区底部，审核 M2，2026-09-25 修）。
+pub fn place_below(
+    anchor: (i32, i32),
+    size: (u32, u32),
+    screen: (i32, i32, u32, u32),
+    gap: i32,
+) -> (i32, i32) {
+    let (ax, ay) = anchor;
+    let (w, h) = (size.0 as i32, size.1 as i32);
+    let (sx, sy, sw, sh) = (screen.0, screen.1, screen.2 as i32, screen.3 as i32);
+    let (right, bottom) = (sx + sw, sy + sh);
+    let candidates = [
+        (ax + gap, ay + gap),         // 右下
+        (ax - gap - w, ay + gap),     // 左下
+        (ax + gap, ay - gap - h),     // 右上
+        (ax - gap - w, ay - gap - h), // 左上
+    ];
+    for (x, y) in candidates {
+        if x >= sx && y >= sy && x + w <= right && y + h <= bottom {
+            return (x, y);
+        }
+    }
     let x = (ax + gap).min(right - w).max(sx);
     let y = (ay + gap).min(bottom - h).max(sy);
     (x, y)
@@ -304,6 +341,25 @@ mod tests {
             last = Some(at);
         }
         assert_eq!(last, Some((1661, 386)));
+    }
+
+    #[test]
+    fn region_card_stays_below_the_selection() {
+        // 锚点是选区左下角：卡片必须落在选区下面，不许盖原文
+        let placed = place_below((100, 500), (400, 300), SCREEN, 12);
+        assert_eq!(placed, (112, 512));
+        // 贴屏幕底边才翻到上方
+        let placed = place_below((100, 1070), (400, 300), SCREEN, 12);
+        assert_eq!(placed, (112, 758));
+    }
+
+    #[test]
+    fn near_miss_within_margin_does_not_count_as_outside() {
+        let r = (100, 200, 300, 400);
+        assert!(near_phys(r, 90, 400, 20), "外扩范围内算近失");
+        assert!(near_phys(r, 250, 610, 20));
+        assert!(!near_phys(r, 79, 400, 20), "超出 margin 才算真外面");
+        assert!(!near_phys(r, 250, 621, 20));
     }
 
     #[test]

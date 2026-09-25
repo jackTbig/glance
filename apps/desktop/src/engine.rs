@@ -93,8 +93,12 @@ impl Engine {
                     while let Ok(next) = rx.try_recv() {
                         latest = next;
                     }
-                    let dict = dict.get_or_init(open_dict);
-                    let dict = offline_for_thread.load(std::sync::atomic::Ordering::Relaxed).then_some(dict).unwrap_or(&None);
+                    // 开关关着就别开词库：读几 MB 索引没必要（审核 L2）
+                    let dict = if offline_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                        dict.get_or_init(open_dict)
+                    } else {
+                        &None
+                    };
                     run_job(latest.0, latest.1, &translator, &capturer, dict, &ev_tx);
                 }
             })
@@ -107,6 +111,10 @@ impl Engine {
     /// 主窗口边输入边查用它：不走工作线程的队列——那边「只做最新一件活」，
     /// 打字时的查询会把正在等模型的那次请求挤掉。
     pub fn lookup_offline(&self, text: &str) -> Option<String> {
+        // 开关检查放在引擎内部：调用方漏守不会再旁路（1.0.12 的主窗口边查就是这么漏的，审核 H2）
+        if !self.offline_on.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         let d = self.dict.get_or_init(open_dict).as_ref()?;
         let (e, restored) = d.lock().unwrap().lookup(text)?;
         Some(crate::offline::to_markers(&e, restored, text))
