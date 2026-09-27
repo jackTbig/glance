@@ -193,7 +193,7 @@ impl ManualState {
             }
             Event::Nothing { reason, .. } => self.phase = Phase::Failed(reason),
             // 手动输入不会走截屏覆盖，也不会被「遇目标语言跳过」
-            Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } => {}
+            Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } | Event::OverlayFailed { .. } => {}
         }
     }
 

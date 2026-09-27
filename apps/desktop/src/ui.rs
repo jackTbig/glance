@@ -598,7 +598,8 @@ impl App {
                 | Event::Done { seq, .. }
                 | Event::Failed { seq, .. }
                 | Event::Nothing { seq, .. }
-                | Event::Skipped { seq } => *seq,
+                | Event::Skipped { seq }
+                | Event::OverlayFailed { seq, .. } => *seq,
             };
             // 主窗口手动翻译的回包走自己那一份状态，不碰浮动卡片
             if self.manual.owns(seq) {
@@ -618,6 +619,12 @@ impl App {
                     if let Some(l) = o.lines.get_mut(*idx) {
                         l.dst = Some(text.clone());
                     }
+                }
+                continue;
+            }
+            if let Event::OverlayFailed { count, .. } = &e {
+                if let Some(o) = self.overlay.as_mut() {
+                    o.failed_lines = *count;
                 }
                 continue;
             }
@@ -694,7 +701,7 @@ impl App {
                     p.phase = Phase::Failed(reason);
                 }
                 // 上面已经处理并 continue 了，这三条只是让编译器满意
-                Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } => {}
+                Event::Skipped { .. } | Event::Shot { .. } | Event::Line { .. } | Event::OverlayFailed { .. } => {}
             }
         }
 
@@ -1131,6 +1138,8 @@ struct OverlayState {
     show_dst: bool,
     /// 还在翻的时候给个提示条
     working: bool,
+    /// 没翻出来的行数（网络/服务端失败），提示栏报信用
+    failed_lines: usize,
 }
 
 impl App {
@@ -1204,7 +1213,7 @@ impl App {
             })
             .collect();
         let rect = self.overlay_rect.unwrap_or((0, 0, w as u32, h as u32));
-        self.overlay = Some(OverlayState { rect, tex, lines, bg, show_dst: true, working: true });
+        self.overlay = Some(OverlayState { rect, tex, lines, bg, show_dst: true, working: true, failed_lines: 0 });
         self.panel = None;
         self.pending_panel = None;
         self.mode = Mode::Overlay;
@@ -1291,17 +1300,22 @@ impl App {
                 egui::Stroke::new(1.0, Color32::from_gray(185)),
                 egui::StrokeKind::Inside,
             );
-            let hint = if o.working {
+            let mut hint = if o.working {
                 "翻译中…"
             } else if o.show_dst {
                 "译文 · 点击看原文"
             } else {
                 "原文 · 点击看译文"
-            };
+            }
+            .to_string();
+            // 半篇没翻出来必须说原因：否则用户对着中英交替的覆盖窗以为功能坏了（Jack 2026-09-27 截图）
+            if !o.working && o.failed_lines > 0 {
+                hint.push_str(&format!(" · {} 行没翻出来（网络或服务商）", o.failed_lines));
+            }
             painter.text(
                 egui::pos2(bar.left() + 8.0, bar.center().y),
                 Align2::LEFT_CENTER,
-                hint,
+                &hint,
                 egui::FontId::proportional(12.0),
                 Color32::from_gray(60),
             );

@@ -16,7 +16,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.0.22"
+#define AppVer "1.0.23"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir

@@ -39,6 +39,8 @@ pub enum Event {
     Line { seq: u64, idx: usize, text: String },
     /// 离线词典先查到的释义（行标记格式）。模型的词条回来后会把它替换掉
     Offline { seq: u64, text: String },
+    /// 覆盖式截屏：有 `count` 行没翻出来（网络/服务端），提示栏要报信，别让用户对着半篇原文猜
+    OverlayFailed { seq: u64, count: usize },
 }
 
 pub struct Engine {
@@ -227,19 +229,33 @@ fn run_job(
                         max_retries: 1,
                         base_delay: std::time::Duration::from_millis(600),
                     };
+                    // 短超时 + 网络失败不逐段兜底：坏网络下一次截屏最多等约 21 秒而不是几分钟
+                    let tuned_timeout = std::time::Duration::from_secs(10);
                     let t_batch = std::time::Instant::now();
-                    for r in tr.translate_batch_tuned(Scene::Screenshot, items, 2, &tuned_retry) {
+                    let mut failed_lines = 0usize;
+                    for r in tr.translate_batch_full(Scene::Screenshot, items, 2, &tuned_retry, Some(tuned_timeout), false) {
                         let Ok(idx) = r.id.parse::<usize>() else { continue };
                         match r.result {
                             Ok(text) => {
                                 tracing::info!("截屏第 {idx} 行上屏：自任务起 {} ms", t1.elapsed().as_millis());
                                 let _ = ev.send(Event::Line { seq, idx, text });
                             }
-                            // 单行失败不算整次失败：剩下的行照样盖，用户还能看到大部分译文
-                            Err(e) => tracing::warn!("截屏第 {idx} 行翻译失败：{e}"),
+                            // 单行失败不算整次失败：剩下的行照样盖；失败行数记下来给提示栏报信
+                            Err(e) => {
+                                failed_lines += 1;
+                                tracing::warn!("截屏第 {idx} 行翻译失败：{e}");
+                            }
                         }
                     }
-                    tracing::info!("截屏逐行翻译完成：{} ms（自任务起 {} ms）", t_batch.elapsed().as_millis(), t1.elapsed().as_millis());
+                    tracing::info!(
+                        "截屏逐行翻译完成：{} ms（自任务起 {} ms）失败 {} 行",
+                        t_batch.elapsed().as_millis(),
+                        t1.elapsed().as_millis(),
+                        failed_lines
+                    );
+                    if failed_lines > 0 {
+                        let _ = ev.send(Event::OverlayFailed { seq, count: failed_lines });
+                    }
                     let _ = ev.send(Event::Done { seq, text: String::new(), took_ms: t1.elapsed().as_millis() });
                 }
                 Ok(_) => {
@@ -322,6 +338,27 @@ mod tests {
         let a = e.submit(Job::Text { scene: Scene::Selection, text: "hello world, how are you".into() });
         assert_eq!(a, 1);
         assert_eq!(wait_done(&rx).as_deref(), Some("zh=hello world, how are you"));
+    }
+
+    /// 整包请求失败时：fallback_on_chunk_error=false 全行直接报错（截屏覆盖用，坏网络别串行兜底），
+    /// true 则干净行靠逐段兜底救回来（整页翻译用）
+    #[test]
+    fn chunk_error_fallback_is_opt_in() {
+        let mock = mock_llm::spawn(0);
+        let mut cfg = ai_translate::TranslatorConfig::default();
+        cfg.base.openai_base_url = mock.base_url.clone();
+        let tr = ai_translate::Translator::new(cfg).unwrap();
+        let items = vec![
+            ai_translate::Item { id: "0".into(), text: "clean line".into(), is_html: false },
+            ai_translate::Item { id: "1".into(), text: "bad line [[500]]".into(), is_html: false },
+        ];
+        let retry = ai_translate::RetryPolicy { max_retries: 0, base_delay: std::time::Duration::from_millis(1) };
+        let no_fb = tr.translate_batch_full(ai_translate::Scene::Screenshot, items.clone(), 2, &retry, None, false);
+        assert!(no_fb[0].result.is_err(), "不兜底：干净行也直接报错");
+        assert!(no_fb[1].result.is_err());
+        let fb = tr.translate_batch_full(ai_translate::Scene::Screenshot, items, 2, &retry, None, true);
+        assert!(fb[0].result.is_ok(), "兜底：干净行被逐段救回");
+        assert!(fb[1].result.is_err());
     }
 
     /// 主窗口手动输入：英译中模式下打中文要反过来翻成英文，而不是被当成「已经是中文」退回

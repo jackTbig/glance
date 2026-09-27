@@ -1,4 +1,5 @@
 //! Translator：按场景路由后端、限并发、批量打包、重试
+use std::time::Duration;
 use crate::backend::{Backend, BackendConfig};
 use crate::batch;
 use crate::engine::Engine;
@@ -182,6 +183,20 @@ impl Translator {
         on_delta: &mut dyn FnMut(&str),
         retry: &RetryPolicy,
     ) -> anyhow::Result<String> {
+        self.translate_tuned(scene, text, context, on_delta, retry, None)
+    }
+
+    /// `timeout` 覆盖配置里的单请求超时：截屏覆盖要短超时快速失败，
+    /// 坏网络下别按 30 秒一轮地等（Jack 2026-09-27 实测一次故障等了 175 秒）
+    pub fn translate_tuned(
+        &self,
+        scene: Scene,
+        text: &str,
+        context: Option<&str>,
+        on_delta: &mut dyn FnMut(&str),
+        retry: &RetryPolicy,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<String> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(String::new());
@@ -192,7 +207,7 @@ impl Translator {
         match route.backend {
             Backend::OpenAi => {
                 let client = self.inner.openai.as_ref().expect("openai client").with_model(&route.model);
-                let timeout = self.inner.cfg.base.timeout;
+                let timeout = timeout.unwrap_or(self.inner.cfg.base.timeout);
                 with_retry(retry, || {
                     let _p = self.inner.sem.acquire();
                     client.chat(&sys, &msg, timeout, on_delta)
@@ -246,6 +261,21 @@ impl Translator {
         chunk: usize,
         retry: &RetryPolicy,
     ) -> Vec<ItemResult> {
+        self.translate_batch_full(scene, items, chunk, retry, None, true)
+    }
+
+    /// 全参数批量：`timeout` 覆盖单请求超时；`fallback_on_chunk_error` 控制整包**请求失败**时
+    /// 要不要逐段串行兜底。整页翻译要兜底（模型排版乱了靠它救）；截屏覆盖不要——
+    /// 网络坏时逐段兜底会把 N 行变成 N 次串行长超时（Jack 2026-09-27 的 175 秒就是这么来的）
+    pub fn translate_batch_full(
+        &self,
+        scene: Scene,
+        items: Vec<Item>,
+        chunk: usize,
+        retry: &RetryPolicy,
+        timeout: Option<Duration>,
+        fallback_on_chunk_error: bool,
+    ) -> Vec<ItemResult> {
         let n = items.len();
         let mut results: Vec<Option<ItemResult>> = (0..n).map(|_| None).collect();
         let mut pending: Vec<usize> = Vec::new();
@@ -261,7 +291,7 @@ impl Translator {
             // 常驻子进程后端：逐条串行
             for i in pending {
                 let it = &items[i];
-                let r = self.translate_with(scene, &it.text, None, &mut |_| {}, retry);
+                let r = self.translate_tuned(scene, &it.text, None, &mut |_| {}, retry, timeout);
                 results[i] = Some(ItemResult { id: it.id.clone(), result: r });
             }
             return results.into_iter().map(|r| r.unwrap()).collect();
@@ -274,7 +304,9 @@ impl Translator {
                 .map(|chunk| {
                     let me = self.clone();
                     let items = &items;
-                    s.spawn(move || me.translate_chunk(scene, items, chunk, retry))
+                    s.spawn(move || {
+                        me.translate_chunk(scene, items, chunk, retry, timeout, fallback_on_chunk_error)
+                    })
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("chunk thread")).collect()
@@ -293,10 +325,12 @@ impl Translator {
         items: &[Item],
         idx: &[usize],
         retry: &RetryPolicy,
+        timeout: Option<Duration>,
+        fallback_on_chunk_error: bool,
     ) -> Vec<(usize, anyhow::Result<String>)> {
         let route = self.inner.cfg.route(scene);
         let client = self.inner.openai.as_ref().expect("openai client").with_model(&route.model);
-        let timeout = self.inner.cfg.base.timeout;
+        let timeout = timeout.unwrap_or(self.inner.cfg.base.timeout);
         let protected: Vec<html_guard::Protected> = idx
             .iter()
             .map(|&i| {
@@ -318,6 +352,10 @@ impl Translator {
         let parts: Vec<Option<String>> = match reply {
             Ok(r) => batch::unpack(&r, idx.len()),
             Err(e) => {
+                if !fallback_on_chunk_error {
+                    tracing::warn!("整包请求失败，不兜底直接报错：{e}");
+                    return idx.iter().map(|&i| (i, Err(anyhow::anyhow!("翻译失败：{e}")))).collect();
+                }
                 tracing::warn!("整包失败，逐段兜底：{e}");
                 vec![None; idx.len()]
             }
@@ -335,7 +373,7 @@ impl Translator {
                 });
                 let r = match restored {
                     Some(s) => Ok(s),
-                    None => self.translate_single_fallback(scene, it, retry),
+                    None => self.translate_single_fallback(scene, it, retry, timeout),
                 };
                 (i, r)
             })
@@ -343,12 +381,18 @@ impl Translator {
     }
 
     /// 单段兜底：html 段同样走占位符保护
-    fn translate_single_fallback(&self, scene: Scene, it: &Item, retry: &RetryPolicy) -> anyhow::Result<String> {
+    fn translate_single_fallback(
+        &self,
+        scene: Scene,
+        it: &Item,
+        retry: &RetryPolicy,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         if !it.is_html {
-            return self.translate_with(scene, &it.text, None, &mut |_| {}, retry);
+            return self.translate_tuned(scene, &it.text, None, &mut |_| {}, retry, Some(timeout));
         }
         let p = html_guard::protect(&it.text);
-        let t = self.translate_with(scene, &p.text, None, &mut |_| {}, retry)?;
+        let t = self.translate_tuned(scene, &p.text, None, &mut |_| {}, retry, Some(timeout))?;
         html_guard::restore(&t, &p.tags)
     }
 }
