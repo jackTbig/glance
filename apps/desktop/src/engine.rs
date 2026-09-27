@@ -229,8 +229,10 @@ fn run_job(
                         max_retries: 1,
                         base_delay: std::time::Duration::from_millis(600),
                     };
-                    // 短超时 + 网络失败不逐段兜底：坏网络下一次截屏最多等约 21 秒而不是几分钟
-                    let tuned_timeout = std::time::Duration::from_secs(10);
+                    // 网络失败不逐段兜底：坏网络下不会叠成几分钟。超时不能太短：长段落整块生成
+                    // 实测要 16-26 秒，10 秒会把慢生成当网络错误砍掉（Jack 2026-09-27 报没翻译出来）；
+                    // 30 秒 + 重试一轮：断连类失败仍约 1 秒报错，连接挂死最坏 60 秒
+                    let tuned_timeout = std::time::Duration::from_secs(30);
                     let t_batch = std::time::Instant::now();
                     let mut failed_lines = 0usize;
                     for r in tr.translate_batch_full(Scene::Screenshot, items, 2, &tuned_retry, Some(tuned_timeout), false) {
