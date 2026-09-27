@@ -22,6 +22,50 @@ pub struct Config {
     /// 认不出来的值一律当默认方向，别因为手改错配置就翻不动
     #[serde(default = "default_direction")]
     pub direction: String,
+    ///  OpenAI 兼容服务的历史记录（地址+Key+模型），设置页一键切换
+    #[serde(default)]
+    pub services: Vec<ServiceProfile>,
+}
+
+/// 一条 OpenAI 兼容服务档案（Jack 2026-09-27：多个模型服务间切换，历史保存）
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ServiceProfile {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// 历史最多留几条：再多下拉就没法看了
+pub const SERVICE_HISTORY_MAX: usize = 8;
+
+/// 自动命名：主机名 · 模型名。Key 不进名字（名字会显示在界面上）
+pub fn service_auto_name(base_url: &str, model: &str) -> String {
+    let t = base_url.trim();
+    let host = t.split_once("://").map(|x| x.1).unwrap_or(t);
+    let host = host.split(['/', '?']).next().unwrap_or(host);
+    let host = if host.is_empty() { t } else { host };
+    format!("{host} · {}", model.trim())
+}
+
+/// 把当前组合写进历史：按（地址、Key、模型）去重，命中的挪到最前，超上限丢最旧。
+/// 同名不同组合的加序号，别在下拉里长成两个一样的名字
+pub fn upsert_service(list: Vec<ServiceProfile>, cur: &ServiceProfile) -> Vec<ServiceProfile> {
+    let same = |p: &ServiceProfile| p.base_url == cur.base_url && p.api_key == cur.api_key && p.model == cur.model;
+    let mut out: Vec<ServiceProfile> = list.into_iter().filter(|p| !same(p)).collect();
+    let mut cur = cur.clone();
+    if cur.name.trim().is_empty() {
+        cur.name = service_auto_name(&cur.base_url, &cur.model);
+    }
+    let base_name = cur.name.clone();
+    let mut n = 2;
+    while out.iter().any(|p| p.name == cur.name) {
+        cur.name = format!("{base_name} #{n}");
+        n += 1;
+    }
+    out.insert(0, cur);
+    out.truncate(SERVICE_HISTORY_MAX);
+    out
 }
 
 fn default_direction() -> String {
@@ -39,6 +83,7 @@ impl Default for Config {
             server: ServerCfg::default(),
             glossary: Vec::new(),
             direction: default_direction(),
+            services: Vec::new(),
         }
     }
 }
@@ -406,6 +451,39 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prof(base: &str, key: &str, model: &str) -> ServiceProfile {
+        ServiceProfile { name: String::new(), base_url: base.into(), api_key: key.into(), model: model.into() }
+    }
+
+    #[test]
+    fn auto_name_uses_host_and_model_not_the_key() {
+        assert_eq!(service_auto_name("https://api.deepseek.com/v1", "deepseek-flash"), "api.deepseek.com · deepseek-flash");
+        assert_eq!(service_auto_name("", "m"), " · m");
+    }
+
+    #[test]
+    fn upsert_dedupes_moves_to_front_and_caps() {
+        let mut l = vec![prof("a", "k1", "m1"), prof("b", "k2", "m2")];
+        l = upsert_service(l, &prof("b", "k2", "m2"));
+        assert_eq!(l[0].base_url, "b", "命中的挪到最前");
+        assert_eq!(l.len(), 2);
+        l = upsert_service(l, &prof("c", "k3", "m3"));
+        assert_eq!(l.len(), 3);
+        for i in 0..10 {
+            l = upsert_service(l, &prof(&format!("x{i}"), "k", "m"));
+        }
+        assert_eq!(l.len(), SERVICE_HISTORY_MAX, "超上限丢最旧");
+        assert_eq!(l[0].base_url, "x9");
+    }
+
+    #[test]
+    fn same_name_different_key_gets_a_suffix() {
+        let mut l = vec![ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k1".into(), model: "m".into() }];
+        l = upsert_service(l, &ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k2".into(), model: "m".into() });
+        assert_eq!(l[0].name, "gw · m #2");
+        assert_eq!(l.len(), 2);
+    }
 
     #[test]
     fn direction_defaults_to_chinese_and_round_trips() {

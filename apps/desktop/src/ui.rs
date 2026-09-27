@@ -877,6 +877,17 @@ impl App {
     }
 
     fn apply_settings(&mut self) {
+        // 保存即记入服务历史（地址+Key+模型）：切换服务的动作本身就值得记，
+        // 不额外要用户点「保存当前」（Jack 2026-09-27 要的历史保存）
+        let prof = crate::config::ServiceProfile {
+            name: String::new(),
+            base_url: self.draft.backend.openai_base_url.clone(),
+            api_key: self.draft.backend.openai_api_key.clone(),
+            model: self.draft.backend.openai_model.clone(),
+        };
+        if !prof.base_url.trim().is_empty() {
+            self.draft.services = crate::config::upsert_service(std::mem::take(&mut self.draft.services), &prof);
+        }
         match ai_translate::Translator::new(self.draft.translator_config()) {
             Ok(t) => {
                 *self.translator.lock().unwrap() = t;
@@ -2053,6 +2064,50 @@ impl App {
                     ui.selectable_value(&mut self.draft.direction, d.as_str().to_string(), d.label_zh());
                 }
             });
+        });
+        Self::row(ui, "已存服务", "每次保存自动记住「地址+Key+模型」；选一条立即切换生效", |ui| {
+            let names: Vec<String> = self.draft.services.iter().map(|p| p.name.clone()).collect();
+            let cur = crate::config::ServiceProfile {
+                name: String::new(),
+                base_url: self.draft.backend.openai_base_url.clone(),
+                api_key: self.draft.backend.openai_api_key.clone(),
+                model: self.draft.backend.openai_model.clone(),
+            };
+            let cur_idx = self
+                .draft
+                .services
+                .iter()
+                .position(|p| p.base_url == cur.base_url && p.api_key == cur.api_key && p.model == cur.model);
+            let label = match cur_idx {
+                Some(i) => self.draft.services[i].name.clone(),
+                None => if names.is_empty() { "（暂无历史）".to_string() } else { "当前组合不在历史里".to_string() },
+            };
+            let mut picked: Option<usize> = None;
+            egui::ComboBox::from_id_salt("service-history")
+                .width(190.0)
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        if ui.selectable_label(cur_idx == Some(i), n).clicked() {
+                            picked = Some(i);
+                        }
+                    }
+                });
+            if cur_idx.is_some() {
+                if ui.small_button("删这条").on_hover_text("从历史里移除当前这条服务档案").clicked() {
+                    let i = cur_idx.unwrap();
+                    self.draft.services.remove(i);
+                    self.apply_settings();
+                }
+            }
+            if let Some(i) = picked {
+                let p = self.draft.services[i].clone();
+                self.draft.backend.openai_base_url = p.base_url.clone();
+                self.draft.backend.openai_api_key = p.api_key.clone();
+                self.draft.backend.openai_model = p.model.clone();
+                self.apply_settings();
+                self.settings_msg = format!("已切换到 {}", p.name);
+            }
         });
         Self::row(ui, "服务商", "选一个就自动填好下面的接口地址与模型；手改地址后这里显示「自定义」", |ui| {
             let cur = crate::presets::label_of(&self.draft.backend.openai_base_url);
