@@ -150,6 +150,17 @@ test("整页翻译：逐段插入译文，中文段与代码块跳过", async ()
   await page.close();
 });
 
+test("整页翻译：译文里的 LaTeX 定界符渲染成 KaTeX 公式", async () => {
+  const page = await openPage();
+  await triggerPage(page);
+  const dst = page.locator("#math .tt-translation");
+  await expect(dst).toHaveText(/zh=/, { timeout: 30_000 });
+  // 行内与块级都渲染：块级给 .katex-display
+  await expect(dst.locator(".katex")).not.toHaveCount(0);
+  await expect(dst.locator(".katex-display")).toHaveCount(1);
+  await page.close();
+});
+
 test("整页翻译：再触发一次切到仅译文，第三次回到原文", async () => {
   const page = await openPage();
   await triggerPage(page);

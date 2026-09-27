@@ -1,4 +1,5 @@
 /** 页面里的整页翻译、悬停翻译、划词翻译 */
+import { hasMath, renderMath } from "./math";
 import {
   blockAt,
   collectBlocks,
@@ -278,6 +279,8 @@ function attachTranslation(el: HTMLElement, text: string, failed: boolean, origi
   d.className = TRANSLATION_CLASS;
   // 译文可能带行内标签，用 innerHTML 但先去掉脚本类节点
   d.innerHTML = sanitize(text);
+  // 译文里的 LaTeX 定界符渲染成公式（Jack 2026-09-27）；没有定界符时零开销
+  if (hasMath(text)) renderMath(d);
   el.appendChild(d);
   el.setAttribute(MARK_ATTR, "1");
 }
@@ -629,6 +632,8 @@ function setPanelBody(html: string, failed = false) {
   if (failed) {
     body.textContent = html;
     body.style.color = "#e88";
+  } else if (hasMath(html)) {
+    renderMath(body);
   }
 }
 

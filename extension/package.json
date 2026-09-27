@@ -1,6 +1,6 @@
 {
   "name": "translate-tool-extension",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,11 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
-    "typescript": "^5.7.2",
-    "esbuild": "^0.24.2"
+    "@types/katex": "^0.16.8",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "katex": "^0.18.9"
   }
 }
