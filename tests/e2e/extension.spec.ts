@@ -150,6 +150,21 @@ test("整页翻译：逐段插入译文，中文段与代码块跳过", async ()
   await page.close();
 });
 
+test("整页翻译：源页已渲染的公式节点（含公式图片）原样进译文，占位符不泄漏", async () => {
+  const page = await openPage();
+  await triggerPage(page);
+  const dst = page.locator("#kx .tt-translation");
+  await expect(dst).toHaveText(/zh=/, { timeout: 30_000 });
+  // 源页的 katex 节点被摘走占位、译文回来后原样回填
+  await expect(dst.locator("span.katex")).toHaveCount(1);
+  await expect(dst).not.toContainText("[[M");
+  // 公式图片同样原样回填
+  const dstImg = page.locator("#kximg .tt-translation");
+  await expect(dstImg).toHaveText(/zh=/, { timeout: 30_000 });
+  await expect(dstImg.locator("img.formula")).toHaveCount(1);
+  await page.close();
+});
+
 test("整页翻译：译文里的 LaTeX 定界符渲染成 KaTeX 公式", async () => {
   const page = await openPage();
   await triggerPage(page);

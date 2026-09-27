@@ -1,5 +1,5 @@
 /** 页面里的整页翻译、悬停翻译、划词翻译 */
-import { hasMath, renderMath } from "./math";
+import { extractMath, hasMath, renderMath, restoreMath } from "./math";
 import {
   blockAt,
   collectBlocks,
@@ -267,6 +267,16 @@ function attachFailed(el: HTMLElement, reason: string, original: string) {
   el.setAttribute(MARK_ATTR, "1");
 }
 
+/// 每段被摘走的公式节点（占位符 → 原 HTML）。元素级，段被移除自然失效
+const mathParts = new WeakMap<Element, Record<string, string>>();
+
+/// 送翻文本构造：带内联标签的段先摘公式节点，模型只翻散文
+function mathProtect(el: HTMLElement, html: string): string {
+  const ex = extractMath(html);
+  if (Object.keys(ex.parts).length > 0) mathParts.set(el, ex.parts);
+  return ex.text;
+}
+
 function attachTranslation(el: HTMLElement, text: string, failed: boolean, original?: string) {
   if (failed) {
     attachFailed(el, text, original ?? el.textContent ?? "");
@@ -278,9 +288,11 @@ function attachTranslation(el: HTMLElement, text: string, failed: boolean, origi
   const d = document.createElement("div");
   d.className = TRANSLATION_CLASS;
   // 译文可能带行内标签，用 innerHTML 但先去掉脚本类节点
-  d.innerHTML = sanitize(text);
-  // 译文里的 LaTeX 定界符渲染成公式（Jack 2026-09-27）；没有定界符时零开销
-  if (hasMath(text)) renderMath(d);
+  const parts = mathParts.get(el);
+  const safe = sanitize(text);
+  d.innerHTML = parts ? restoreMath(safe, parts) : safe;
+  // 译文里的 LaTeX 定界符渲染成公式（Jack 2026-09-27）；回填了源公式节点时也要确保 KaTeX 样式在
+  if (parts || hasMath(text)) renderMath(d);
   el.appendChild(d);
   el.setAttribute(MARK_ATTR, "1");
 }
@@ -374,7 +386,7 @@ async function translatePage() {
     }
     const items: TranslateItem[] = blocks.map((el, i) => {
       const isHtml = hasInlineMarkup(el);
-      return { id: String(i), text: isHtml ? el.innerHTML : (el.textContent ?? ""), is_html: isHtml };
+      return { id: String(i), text: isHtml ? mathProtect(el, el.innerHTML) : (el.textContent ?? ""), is_html: isHtml };
     });
 
     const h = await send({ kind: "health" });
@@ -495,7 +507,7 @@ async function flushPending() {
   try {
     const items = blocks.map((el, i) => {
       const isHtml = hasInlineMarkup(el);
-      return { id: String(i), text: isHtml ? el.innerHTML : (el.textContent ?? ""), is_html: isHtml };
+      return { id: String(i), text: isHtml ? mathProtect(el, el.innerHTML) : (el.textContent ?? ""), is_html: isHtml };
     });
     const results = await translate("full_page", items);
     for (const r of results) {
@@ -764,7 +776,7 @@ function scheduleHoverAt(x: number, y: number, force = false) {
 async function translateHover(el: HTMLElement) {
   if (el.hasAttribute(MARK_ATTR)) return;
   const isHtml = hasInlineMarkup(el);
-  const text = isHtml ? el.innerHTML : (el.textContent ?? "");
+  const text = isHtml ? mathProtect(el, el.innerHTML) : (el.textContent ?? "");
   el.setAttribute(MARK_ATTR, "1");
   el.classList.add("tt-working"); // 翻译中给个淡淡的高亮，知道点中的是哪段
   try {
