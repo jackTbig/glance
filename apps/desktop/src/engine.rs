@@ -203,10 +203,15 @@ fn run_job(
         // 覆盖式截屏走自己的一条路：要的是「每行原文 + 每行位置 + 每行译文」，
         // 与普通卡片那条「一整段文本」完全不同，混在一起写会互相牵制
         Job::Region { x, y, w, h, overlay: true } => {
+            let t_ocr = std::time::Instant::now();
             match capturer.region_shot(x, y, w, h) {
                 Ok(s) if !s.is_empty() => {
                     let shot = Arc::new(s);
-                    tracing::debug!("截屏覆盖：识别到 {} 行", shot.lines.len());
+                    tracing::info!(
+                        "截屏识别完成：{} 行，OCR+抓图 {} ms",
+                        shot.lines.len(),
+                        t_ocr.elapsed().as_millis()
+                    );
                     let _ = ev.send(Event::Shot { seq, shot: shot.clone() });
                     // 逐行翻：批量接口内部会并发分块，比一行一个请求省得多
                     let items: Vec<ai_translate::Item> = shot
@@ -216,16 +221,25 @@ fn run_job(
                         .map(|(i, l)| ai_translate::Item { id: i.to_string(), text: l.text.clone(), is_html: false })
                         .collect();
                     let t1 = std::time::Instant::now();
-                    for r in tr.translate_batch(Scene::Screenshot, items) {
+                    // 小块并发：首行尽快上屏；重试一轮就放弃：坏网络下别让用户干等三轮退避
+                    // （Jack 2026-09-27 报截屏延迟过高，实测 4 行整包 6.7 秒、坏网络 21 秒）
+                    let tuned_retry = ai_translate::RetryPolicy {
+                        max_retries: 1,
+                        base_delay: std::time::Duration::from_millis(600),
+                    };
+                    let t_batch = std::time::Instant::now();
+                    for r in tr.translate_batch_tuned(Scene::Screenshot, items, 2, &tuned_retry) {
                         let Ok(idx) = r.id.parse::<usize>() else { continue };
                         match r.result {
                             Ok(text) => {
+                                tracing::info!("截屏第 {idx} 行上屏：自任务起 {} ms", t1.elapsed().as_millis());
                                 let _ = ev.send(Event::Line { seq, idx, text });
                             }
                             // 单行失败不算整次失败：剩下的行照样盖，用户还能看到大部分译文
                             Err(e) => tracing::warn!("截屏第 {idx} 行翻译失败：{e}"),
                         }
                     }
+                    tracing::info!("截屏逐行翻译完成：{} ms（自任务起 {} ms）", t_batch.elapsed().as_millis(), t1.elapsed().as_millis());
                     let _ = ev.send(Event::Done { seq, text: String::new(), took_ms: t1.elapsed().as_millis() });
                 }
                 Ok(_) => {

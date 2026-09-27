@@ -169,6 +169,19 @@ impl Translator {
 
     /// 单条（划词 / 悬停 / 截屏）：流式回调，带重试；claude / codex 失败后重建引擎再试一次
     pub fn translate(&self, scene: Scene, text: &str, context: Option<&str>, on_delta: &mut dyn FnMut(&str)) -> anyhow::Result<String> {
+        self.translate_with(scene, text, context, on_delta, &self.inner.cfg.retry)
+    }
+
+    /// 同 `translate`，重试策略由调用方定：截屏覆盖要快速失败，
+    /// 网络坏时别让用户对着「翻译中」等三轮退避（Jack 2026-09-27 报延迟）
+    pub fn translate_with(
+        &self,
+        scene: Scene,
+        text: &str,
+        context: Option<&str>,
+        on_delta: &mut dyn FnMut(&str),
+        retry: &RetryPolicy,
+    ) -> anyhow::Result<String> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(String::new());
@@ -180,7 +193,7 @@ impl Translator {
             Backend::OpenAi => {
                 let client = self.inner.openai.as_ref().expect("openai client").with_model(&route.model);
                 let timeout = self.inner.cfg.base.timeout;
-                with_retry(&self.inner.cfg.retry, || {
+                with_retry(retry, || {
                     let _p = self.inner.sem.acquire();
                     client.chat(&sys, &msg, timeout, on_delta)
                 })
@@ -220,6 +233,19 @@ impl Translator {
 
     /// 批量（整页）：纯中文段本地直接返回；其余按 batch_size 分块并发；缺段 / 还原失败的段再走单条兜底
     pub fn translate_batch(&self, scene: Scene, items: Vec<Item>) -> Vec<ItemResult> {
+        let bs = self.inner.cfg.batch_size.max(1);
+        self.translate_batch_tuned(scene, items, bs, &self.inner.cfg.retry)
+    }
+
+    /// 同 `translate_batch`，分块大小与重试策略由调用方定：
+    /// 块越小首行上屏越快（各块并发），重试越少坏网络下等得越短
+    pub fn translate_batch_tuned(
+        &self,
+        scene: Scene,
+        items: Vec<Item>,
+        chunk: usize,
+        retry: &RetryPolicy,
+    ) -> Vec<ItemResult> {
         let n = items.len();
         let mut results: Vec<Option<ItemResult>> = (0..n).map(|_| None).collect();
         let mut pending: Vec<usize> = Vec::new();
@@ -235,12 +261,12 @@ impl Translator {
             // 常驻子进程后端：逐条串行
             for i in pending {
                 let it = &items[i];
-                let r = self.translate(scene, &it.text, None, &mut |_| {});
+                let r = self.translate_with(scene, &it.text, None, &mut |_| {}, retry);
                 results[i] = Some(ItemResult { id: it.id.clone(), result: r });
             }
             return results.into_iter().map(|r| r.unwrap()).collect();
         }
-        let bs = self.inner.cfg.batch_size.max(1);
+        let bs = chunk.max(1);
         let chunks: Vec<Vec<usize>> = pending.chunks(bs).map(|c| c.to_vec()).collect();
         let outs: Vec<Vec<(usize, anyhow::Result<String>)>> = std::thread::scope(|s| {
             let hs: Vec<_> = chunks
@@ -248,7 +274,7 @@ impl Translator {
                 .map(|chunk| {
                     let me = self.clone();
                     let items = &items;
-                    s.spawn(move || me.translate_chunk(scene, items, chunk))
+                    s.spawn(move || me.translate_chunk(scene, items, chunk, retry))
                 })
                 .collect();
             hs.into_iter().map(|h| h.join().expect("chunk thread")).collect()
@@ -261,7 +287,13 @@ impl Translator {
         results.into_iter().map(|r| r.unwrap()).collect()
     }
 
-    fn translate_chunk(&self, scene: Scene, items: &[Item], idx: &[usize]) -> Vec<(usize, anyhow::Result<String>)> {
+    fn translate_chunk(
+        &self,
+        scene: Scene,
+        items: &[Item],
+        idx: &[usize],
+        retry: &RetryPolicy,
+    ) -> Vec<(usize, anyhow::Result<String>)> {
         let route = self.inner.cfg.route(scene);
         let client = self.inner.openai.as_ref().expect("openai client").with_model(&route.model);
         let timeout = self.inner.cfg.base.timeout;
@@ -279,7 +311,7 @@ impl Translator {
         let packed = batch::pack(&protected.iter().map(|p| p.text.as_str()).collect::<Vec<_>>());
         let sys = prompts::system_prompt(scene, None, self.inner.cfg.direction);
         let msg = self.user_message(scene, &packed, None);
-        let reply = with_retry(&self.inner.cfg.retry, || {
+        let reply = with_retry(retry, || {
             let _p = self.inner.sem.acquire();
             client.chat(&sys, &msg, timeout, &mut |_| {})
         });
@@ -303,7 +335,7 @@ impl Translator {
                 });
                 let r = match restored {
                     Some(s) => Ok(s),
-                    None => self.translate_single_fallback(scene, it),
+                    None => self.translate_single_fallback(scene, it, retry),
                 };
                 (i, r)
             })
@@ -311,12 +343,12 @@ impl Translator {
     }
 
     /// 单段兜底：html 段同样走占位符保护
-    fn translate_single_fallback(&self, scene: Scene, it: &Item) -> anyhow::Result<String> {
+    fn translate_single_fallback(&self, scene: Scene, it: &Item, retry: &RetryPolicy) -> anyhow::Result<String> {
         if !it.is_html {
-            return self.translate(scene, &it.text, None, &mut |_| {});
+            return self.translate_with(scene, &it.text, None, &mut |_| {}, retry);
         }
         let p = html_guard::protect(&it.text);
-        let t = self.translate(scene, &p.text, None, &mut |_| {})?;
+        let t = self.translate_with(scene, &p.text, None, &mut |_| {}, retry)?;
         html_guard::restore(&t, &p.tags)
     }
 }

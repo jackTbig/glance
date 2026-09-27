@@ -100,8 +100,6 @@ const MIN_REGION_PANEL_W: f32 = 240.0;
 
 /// 覆盖窗口下方那条提示栏的高度（逻辑像素）。**它在截图区之外**，不压原文
 const OVERLAY_BAR_H: f32 = 26.0;
-/// 提示栏右端的关闭区宽度（逻辑像素）：✕ 与 Esc 提示那一段，点它才关窗
-const BAR_CLOSE_W: f32 = 118.0;
 /// 浮窗外的近失容差（**逻辑**像素，按当前缩放换算）：落在这个范围内的点击忽略，不关浮窗。
 /// 用逻辑值：100% 缩放的机器上物理 100 会是整整 100 逻辑像素的死区，太钝（审核 M5）
 const NEAR_MISS_MARGIN_LOGICAL: f32 = 50.0;
@@ -567,6 +565,9 @@ impl App {
                     tracing::info!("进入截屏框选");
                     self.mode = Mode::Selecting { start: None };
                     self.panel = None;
+                    // 上一次覆盖窗的残留清掉：否则取消框选后旧 overlay 还挂在状态里
+                    self.overlay = None;
+                    self.overlay_rect = None;
                     self.pending_region = None;
                     self.focus_selector = true;
                 }
@@ -1307,7 +1308,7 @@ impl App {
             painter.text(
                 egui::pos2(bar.right() - 10.0, bar.center().y),
                 Align2::RIGHT_CENTER,
-                "拖动移动 · ✕ Esc",
+                "拖动移动 · Esc 关闭",
                 egui::FontId::proportional(12.0),
                 Color32::from_gray(90),
             );
@@ -1315,10 +1316,8 @@ impl App {
             // 提示栏当手柄拖动整个覆盖窗：截屏译文也是浮窗，钉死在原地会挡着用户要看的东西
             // （Jack 2026-09-24「所有悬浮窗口需要可以拖动」）。与点击不冲突：egui 的 drag
             // 要指针移动过阈值才成立，原地点一下仍走下面的关闭/切换。
-            // 拖动手柄只到关闭区左缘：在 ✕ 区起手微拖（<6px 判 click）会直接关窗（审核 M3）
-            let mut drag_bar = bar;
-            drag_bar.max.x = (drag_bar.max.x - BAR_CLOSE_W).max(drag_bar.min.x);
-            let bar_drag = ui.interact(drag_bar, ui.id().with("overlay-drag"), egui::Sense::drag());
+            // 整条栏都是拖动手柄：关闭区已撤（只留 Esc），微拖误关的问题（审核 M3）随之消失
+            let bar_drag = ui.interact(bar, ui.id().with("overlay-drag"), egui::Sense::drag());
             if bar_drag.hovered() || bar_drag.dragged() {
                 ui.ctx().set_cursor_icon(if bar_drag.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
             }
@@ -1327,19 +1326,13 @@ impl App {
                 drag_by = (dpi.to_physical_len(d.x), dpi.to_physical_len(d.y));
             }
 
+            // 整窗点击都切换原文/译文（Jack 2026-09-25：栏上写着「点击看原文」，点它不能关窗）。
+            // **关闭只留 Esc 一条路**（Jack 2026-09-27：「有 esc 按钮就不用其他退出机制」）：
+            // ✕ 区与点浮窗外面都不再关覆盖窗——它要一直留在原处对照，直到用户按 Esc。
             let resp = ui.allocate_response(win_rect.size(), egui::Sense::click());
             if resp.clicked() {
-                // 整窗点击都切换原文/译文——提示栏上的字写着「点击看原文」，点它却关窗，
-                // Jack 2026-09-25 报「点击一次就退了」。关闭只走 Esc、栏右端 ✕ 区、点浮窗外面。
-                let at = ui.input(|i| i.pointer.latest_pos());
-                let close_w = BAR_CLOSE_W.min(bar.width() * 0.4);
-                let close_zone = egui::Rect::from_min_max(egui::pos2(bar.right() - close_w, bar.top()), bar.max);
-                if at.is_some_and(|p| close_zone.contains(p)) {
-                    close = true;
-                } else {
-                    toggle = true;
-                    tracing::info!("覆盖窗点击切换原文/译文");
-                }
+                toggle = true;
+                tracing::info!("覆盖窗点击切换原文/译文");
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close = true;
@@ -1383,7 +1376,8 @@ impl App {
         if !edge {
             return;
         }
-        if !matches!(self.mode, Mode::Panel | Mode::Overlay) {
+        // 覆盖窗只认 Esc（Jack 2026-09-27），点外面不关；卡片仍点外面关
+        if self.mode != Mode::Panel {
             return;
         }
         let (cx, cy) = text_capture::screen::cursor_pos();
