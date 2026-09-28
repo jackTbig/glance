@@ -5,7 +5,9 @@
 //!   `stream=true` 按 SSE 分 3 片吐，否则普通 JSON。
 //! - 文本含 `[[429]]` → 该文本首次返回 429 + `Retry-After: 0`，第二次正常；
 //!   `[[500]]` → 永远 500；`[[slow:N]]` → 延迟 N ms；`[[drop:K]]` → 回包中删掉以 `⟨K⟩` 开头的那一行。
-//! - `GET /stats` → `{ "requests", "max_inflight", "inflight" }`；`POST /reset` 清零。
+//! - `GET /stats` → `{ "requests", "max_inflight", "inflight", "last_thinking" }`；`POST /reset` 清零。
+//!   `last_thinking` = 最近一次请求体里的 `enable_thinking`（null = 没带这个参数；
+//!   只认布尔值——应用侧配置是强类型 Option<bool>，不会有别的形状上来）。
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -24,6 +26,9 @@ pub struct Stats {
     pub requests: u64,
     pub max_inflight: u64,
     pub inflight: u64,
+    /// 最近一次请求体里的 enable_thinking：None = 没带这个参数
+    #[serde(default)]
+    pub last_thinking: Option<bool>,
 }
 
 #[derive(Default)]
@@ -106,6 +111,7 @@ async fn chat(State(st): State<Shared>, Json(body): Json<serde_json::Value>) -> 
         g.stats.requests += 1;
         g.stats.inflight += 1;
         g.stats.max_inflight = g.stats.max_inflight.max(g.stats.inflight);
+        g.stats.last_thinking = body.get("enable_thinking").and_then(|v| v.as_bool());
     }
     let _guard = InflightGuard(st.clone());
     let text = last_user_text(&body);

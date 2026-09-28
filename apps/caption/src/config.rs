@@ -155,6 +155,10 @@ pub struct TranslateCfg {
     pub openai_base_url: String,
     pub openai_api_key: String,
     pub openai_model: String,
+    /// OpenAI 兼容后端的请求体带不带 `enable_thinking`：不写 = 不带（服务默认行为）；
+    /// false = 显式关思考。百炼的 deepseek-v4-flash 默认开思考、翻译慢 12 倍
+    /// （2026-09-28 实测 20.0s → 1.5s），走该网关的思考型模型要写 false
+    pub enable_thinking: Option<bool>,
     pub timeout_secs: u64,
     pub rotate_every: u32,
     pub max_backlog: usize,
@@ -174,6 +178,7 @@ impl Default for TranslateCfg {
             openai_base_url: "https://api.deepseek.com".into(),
             openai_api_key: String::new(),
             openai_model: "deepseek-flash".into(),
+            enable_thinking: None,
             timeout_secs: 15,
             rotate_every: 60,
             max_backlog: 10,

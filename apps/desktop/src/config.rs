@@ -34,6 +34,11 @@ pub struct ServiceProfile {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    /// 该服务的请求体要不要带 enable_thinking。参数是「按服务」的：切服务时跟着档案走，
+    /// 百炼的 false 串到 DeepSeek 官方（对未知参数容忍度未验证）会全场景报错。
+    /// None = 不带参数（服务默认行为）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 /// 历史最多留几条：再多下拉就没法看了
@@ -106,6 +111,10 @@ pub struct BackendCfg {
     /// 整页翻译每请求打包多少段
     pub batch_size: usize,
     pub max_retries: u32,
+    /// 请求体带不带 `enable_thinking`：不写 = 不带（服务默认行为）；false = 关思考。
+    /// 百炼网关的 deepseek-v4-flash 默认开思考，翻译慢 12 倍，该服务要写 false
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
 }
 
 impl Default for BackendCfg {
@@ -122,6 +131,7 @@ impl Default for BackendCfg {
             concurrency: 8,
             batch_size: 10,
             max_retries: 3,
+            enable_thinking: None,
         }
     }
 }
@@ -428,6 +438,7 @@ impl Config {
                 openai_api_key: b.openai_api_key.clone(),
                 openai_model: b.openai_model.clone(),
                 timeout: std::time::Duration::from_secs(b.timeout_secs.max(1)),
+                enable_thinking: b.enable_thinking,
                 command_override: Vec::new(),
             },
             routes,
@@ -453,7 +464,7 @@ mod tests {
     use super::*;
 
     fn prof(base: &str, key: &str, model: &str) -> ServiceProfile {
-        ServiceProfile { name: String::new(), base_url: base.into(), api_key: key.into(), model: model.into() }
+        ServiceProfile { name: String::new(), base_url: base.into(), api_key: key.into(), model: model.into(), enable_thinking: None }
     }
 
     #[test]
@@ -479,8 +490,8 @@ mod tests {
 
     #[test]
     fn same_name_different_key_gets_a_suffix() {
-        let mut l = vec![ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k1".into(), model: "m".into() }];
-        l = upsert_service(l, &ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k2".into(), model: "m".into() });
+        let mut l = vec![ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k1".into(), model: "m".into(), enable_thinking: None }];
+        l = upsert_service(l, &ServiceProfile { name: "gw · m".into(), base_url: "gw".into(), api_key: "k2".into(), model: "m".into(), enable_thinking: None });
         assert_eq!(l[0].name, "gw · m #2");
         assert_eq!(l.len(), 2);
     }
@@ -622,5 +633,33 @@ hover_modifier = \"none\"
         let t = c.translator_config();
         assert_eq!(t.concurrency, 64);
         assert_eq!(t.batch_size, 1);
+    }
+
+    /// enable_thinking 从配置文件透传到翻译核心：不写 = 不发参数（老配置文件加载后
+    /// 行为不变）；写 false 才随请求发出去。序列化时 None 不落盘，配置文件不多一行
+    #[test]
+    fn enable_thinking_flows_from_toml_to_backend() {
+        let c: Config = toml::from_str("version = 3\n").unwrap();
+        assert_eq!(c.backend.enable_thinking, None);
+        assert_eq!(c.translator_config().base.enable_thinking, None);
+        let c2: Config = toml::from_str("version = 3\n[backend]\nenable_thinking = false\n").unwrap();
+        assert_eq!(c2.translator_config().base.enable_thinking, Some(false));
+        let saved = toml::to_string(&c).unwrap();
+        assert!(!saved.contains("enable_thinking"), "None 不该写进配置文件：{saved}");
+    }
+
+    /// 服务档案要记住 enable_thinking：切服务时参数跟着档案走，不串味
+    /// （百炼的 false 带到 DeepSeek 官方，官方对未知参数的容忍度未验证）
+    #[test]
+    fn service_profile_carries_enable_thinking() {
+        let l = upsert_service(
+            vec![],
+            &ServiceProfile { name: "gw".into(), base_url: "gw".into(), api_key: "k".into(), model: "m".into(), enable_thinking: Some(false) },
+        );
+        assert_eq!(l[0].enable_thinking, Some(false));
+        // 老配置文件里没这个字段：读出来是 None 不报错；None 也不写回文件
+        let p: ServiceProfile = toml::from_str("name = 'a'\nbase_url = 'b'\napi_key = 'k'\nmodel = 'm'\n").unwrap();
+        assert_eq!(p.enable_thinking, None);
+        assert!(!toml::to_string(&p).unwrap().contains("enable_thinking"));
     }
 }

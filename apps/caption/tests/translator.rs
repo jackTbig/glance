@@ -14,6 +14,7 @@ fn base_cfg() -> TranslatorConfig {
         openai_base_url: String::new(),
         openai_api_key: String::new(),
         openai_model: "fake".into(),
+        enable_thinking: None,
         timeout: Duration::from_secs(5),
         rotate_every: 100,
         max_backlog: 10,

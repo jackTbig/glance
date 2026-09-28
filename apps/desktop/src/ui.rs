@@ -884,6 +884,7 @@ impl App {
             base_url: self.draft.backend.openai_base_url.clone(),
             api_key: self.draft.backend.openai_api_key.clone(),
             model: self.draft.backend.openai_model.clone(),
+            enable_thinking: self.draft.backend.enable_thinking,
         };
         if !prof.base_url.trim().is_empty() {
             self.draft.services = crate::config::upsert_service(std::mem::take(&mut self.draft.services), &prof);
@@ -2072,6 +2073,7 @@ impl App {
                 base_url: self.draft.backend.openai_base_url.clone(),
                 api_key: self.draft.backend.openai_api_key.clone(),
                 model: self.draft.backend.openai_model.clone(),
+                enable_thinking: self.draft.backend.enable_thinking,
             };
             let cur_idx = self
                 .draft
@@ -2105,6 +2107,8 @@ impl App {
                 self.draft.backend.openai_base_url = p.base_url.clone();
                 self.draft.backend.openai_api_key = p.api_key.clone();
                 self.draft.backend.openai_model = p.model.clone();
+                // 思考开关跟着服务档案走：百炼的 false 不能串到对参数容忍度未验证的服务上
+                self.draft.backend.enable_thinking = p.enable_thinking;
                 self.apply_settings();
                 self.settings_msg = format!("已切换到 {}", p.name);
             }
@@ -2117,6 +2121,7 @@ impl App {
                     if ui.selectable_label(cur == p.name, p.name).clicked() {
                         self.draft.backend.openai_base_url = p.base_url.to_string();
                         self.draft.backend.openai_model = p.model.to_string();
+                        self.draft.backend.enable_thinking = p.enable_thinking;
                     }
                 }
             });

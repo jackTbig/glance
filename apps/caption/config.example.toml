@@ -25,6 +25,8 @@ codex_model = ""          # 留空用 codex 默认
 openai_base_url = "https://api.deepseek.com"   # 通义千问：https://dashscope.aliyuncs.com/compatible-mode/v1
 openai_api_key = ""
 openai_model = "deepseek-flash"
+# 思考型模型（如百炼的 deepseek-v4-flash）默认开思考、翻译慢 12 倍；该网关写下行开关关掉
+# enable_thinking = false
 timeout_secs = 15         # claude 首句冷启动约 10 s，故不能设太短
 rotate_every = 60         # claude 会话每 60 句轮换（提前 5 句预热备用会话，无感）
 max_backlog = 10

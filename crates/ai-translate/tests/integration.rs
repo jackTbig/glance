@@ -110,3 +110,25 @@ fn glossary_goes_into_user_message() {
     // mock 会把用户消息里每一行都回显，术语块的那一行也在
     assert!(out.contains("pod → Pod"), "{out}");
 }
+
+/// 配置的 enable_thinking 要真的上线：config → BackendConfig → OpenAi → 请求体，
+/// 中间任何一环漏拷贝就悄悄退回「思考开」的慢速路径
+#[test]
+fn thinking_flag_reaches_the_wire() {
+    let server = mock_llm::spawn(0);
+    let mut cfg = TranslatorConfig::default();
+    cfg.base.openai_base_url = server.base_url.clone();
+    cfg.base.enable_thinking = Some(false);
+    let t = Translator::new(cfg).unwrap();
+    let out = t.translate(Scene::Selection, "hello", None, &mut |_| {}).unwrap();
+    assert_eq!(out, "zh=hello");
+    assert_eq!(server.stats().last_thinking, Some(false));
+}
+
+/// 不配置就不带参数：未验证的服务（DeepSeek 官方等）保持既有行为
+#[test]
+fn thinking_flag_absent_unless_configured() {
+    let (s, t) = setup(4, 10);
+    t.translate(Scene::Selection, "hello", None, &mut |_| {}).unwrap();
+    assert_eq!(s.stats().last_thinking, None);
+}

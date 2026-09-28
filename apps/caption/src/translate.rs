@@ -22,6 +22,8 @@ pub struct TranslatorConfig {
     pub openai_base_url: String,
     pub openai_api_key: String,
     pub openai_model: String,
+    /// 请求体带不带 enable_thinking（None = 不带）；见 TranslateCfg 同名字段
+    pub enable_thinking: Option<bool>,
     pub timeout: Duration,
     pub rotate_every: u32,
     pub max_backlog: usize,
@@ -45,6 +47,7 @@ impl TranslatorConfig {
             openai_api_key: self.openai_api_key.clone(),
             openai_model: self.openai_model.clone(),
             timeout: self.timeout,
+            enable_thinking: self.enable_thinking,
             command_override: self.command_override.clone(),
         }
     }
@@ -64,6 +67,7 @@ impl From<&TranslateCfg> for TranslatorConfig {
             openai_base_url: c.openai_base_url.clone(),
             openai_api_key: c.openai_api_key.clone(),
             openai_model: c.openai_model.clone(),
+            enable_thinking: c.enable_thinking,
             timeout: Duration::from_secs(c.timeout_secs.max(1)),
             rotate_every: c.rotate_every.max(1),
             max_backlog: c.max_backlog.max(1),
@@ -356,8 +360,17 @@ pub fn spawn_partial_translator(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TranslateCfg;
 
-
+    /// 字幕配置里写了 enable_thinking 就透传到共享 crate 的请求参数；
+    /// 不写保持 None（请求体不带参数，服务默认行为）
+    #[test]
+    fn backend_cfg_carries_enable_thinking() {
+        let mut c = TranslateCfg::default();
+        assert_eq!(TranslatorConfig::from(&c).backend_cfg().enable_thinking, None);
+        c.enable_thinking = Some(false);
+        assert_eq!(TranslatorConfig::from(&c).backend_cfg().enable_thinking, Some(false));
+    }
 
 
 

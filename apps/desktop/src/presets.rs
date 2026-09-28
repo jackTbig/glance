@@ -11,19 +11,23 @@ pub struct Preset {
     pub name: &'static str,
     pub base_url: &'static str,
     pub model: &'static str,
+    /// 选中预设时一并写入配置的思考开关。只有实测过该网关接受 `enable_thinking`
+    /// 参数的才带值（百炼 2026-09-28 实测）；未验证的服务保持 None = 不发参数
+    pub enable_thinking: Option<bool>,
 }
 
 /// 认得的服务商。顺序即下拉里的顺序，把常用的放前面。
 pub const PRESETS: &[Preset] = &[
-    Preset { name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-flash" },
+    Preset { name: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-flash", enable_thinking: None },
     Preset {
         name: "通义千问",
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
         model: "qwen-plus",
+        enable_thinking: Some(false),
     },
-    Preset { name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash" },
-    Preset { name: "月之暗面 Kimi", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
-    Preset { name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+    Preset { name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4", model: "glm-4-flash", enable_thinking: None },
+    Preset { name: "月之暗面 Kimi", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k", enable_thinking: None },
+    Preset { name: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", enable_thinking: None },
 ];
 
 /// 当前地址属于哪个预设。**只比地址不比模型**：同一家的模型用户经常自己换，
@@ -75,5 +79,15 @@ mod tests {
         let p = detect("https://api.deepseek.com").unwrap();
         assert_eq!(p.name, "DeepSeek");
         assert_eq!(label_of(p.base_url), "DeepSeek");
+    }
+
+    /// 只有实测过参数行为的网关才带关思考开关：百炼/dashscope 接受 enable_thinking
+    /// （2026-09-28 实测 deepseek-v4-flash 关思考 20.0s → 1.5s）；
+    /// DeepSeek 官方等对未知参数的容忍度未验证，预设不带
+    #[test]
+    fn only_verified_gateway_disables_thinking() {
+        assert_eq!(detect("https://dashscope.aliyuncs.com/compatible-mode/v1").unwrap().enable_thinking, Some(false));
+        assert_eq!(PRESETS.iter().find(|p| p.name == "DeepSeek").unwrap().enable_thinking, None);
+        assert_eq!(PRESETS.iter().find(|p| p.name == "OpenAI").unwrap().enable_thinking, None);
     }
 }

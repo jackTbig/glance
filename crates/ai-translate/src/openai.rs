@@ -24,6 +24,24 @@ pub struct OpenAi {
     url: String,
     key: String,
     model: String,
+    enable_thinking: Option<bool>,
+}
+
+/// 请求体。enable_thinking 只在配置了才带上（未验证的服务对未知参数的容忍度不明）
+fn chat_body(model: &str, system_prompt: &str, user_message: &str, enable_thinking: Option<bool>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "temperature": 0.2,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_message }
+        ]
+    });
+    if let Some(t) = enable_thinking {
+        body["enable_thinking"] = serde_json::Value::Bool(t);
+    }
+    body
 }
 
 impl OpenAi {
@@ -36,6 +54,7 @@ impl OpenAi {
             url: format!("{base}/chat/completions"),
             key: cfg.openai_api_key.trim().to_string(),
             model: cfg.openai_model.trim().to_string(),
+            enable_thinking: cfg.enable_thinking,
         })
     }
 
@@ -53,15 +72,7 @@ impl OpenAi {
     }
 
     pub fn chat(&self, system_prompt: &str, user_message: &str, timeout: Duration, on_delta: &mut dyn FnMut(&str)) -> anyhow::Result<String> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "stream": true,
-            "temperature": 0.2,
-            "messages": [
-                { "role": "system", "content": system_prompt },
-                { "role": "user", "content": user_message }
-            ]
-        });
+        let body = chat_body(&self.model, system_prompt, user_message, self.enable_thinking);
         let mut req = self.client.post(&self.url).timeout(timeout).json(&body);
         if !self.key.is_empty() {
             req = req.bearer_auth(&self.key);
@@ -112,5 +123,30 @@ impl OpenAi {
             }
         }
         Ok(acc.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chat_body;
+
+    /// 没配置时请求体里不许出现 enable_thinking：DeepSeek 官方 API 等未验证服务
+    /// 对未知参数的容忍度不明，默认一律不带，保持既有行为
+    #[test]
+    fn body_omits_enable_thinking_by_default() {
+        let b = chat_body("m", "sys", "user", None);
+        assert!(b.get("enable_thinking").is_none());
+        assert_eq!(b["model"], "m");
+        assert_eq!(b["stream"], true);
+        assert_eq!(b["messages"][0]["content"], "sys");
+        assert_eq!(b["messages"][1]["content"], "user");
+    }
+
+    /// 配置了就原样带上：百炼网关 deepseek-v4-flash 默认开思考，翻译任务 97% 的
+    /// 生成量耗在思考上，关掉实测 21.2s → 1.76s（2026-09-28）
+    #[test]
+    fn body_carries_enable_thinking_when_set() {
+        assert_eq!(chat_body("m", "s", "u", Some(false))["enable_thinking"], false);
+        assert_eq!(chat_body("m", "s", "u", Some(true))["enable_thinking"], true);
     }
 }

@@ -42,6 +42,11 @@ pub struct BackendConfig {
     pub openai_api_key: String,
     pub openai_model: String,
     pub timeout: Duration,
+    /// OpenAI 兼容后端的请求体要不要带 `enable_thinking`：None = 不带（默认，
+    /// 未验证服务的行为不变），Some(false) = 显式关思考。
+    /// 百炼网关的 deepseek-v4-flash 默认开思考，翻译任务 97% 的生成量耗在思考上，
+    /// 关掉实测 21.2s → 1.76s（2026-09-28）
+    pub enable_thinking: Option<bool>,
     /// 测试用：整体替换 claude 命令（如 ["python", "tests/fake_claude.py"]）
     pub command_override: Vec<String>,
 }
@@ -58,6 +63,7 @@ impl Default for BackendConfig {
             openai_api_key: String::new(),
             openai_model: "deepseek-flash".into(),
             timeout: Duration::from_secs(15),
+            enable_thinking: None,
             command_override: Vec::new(),
         }
     }
