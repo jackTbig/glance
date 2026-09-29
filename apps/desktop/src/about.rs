@@ -103,6 +103,8 @@ mod tests {
         let v = version_line();
         assert!(v.starts_with(env!("CARGO_PKG_VERSION")), "{v}");
         assert!(!v.contains("未知"), "没有构建信息时就只写版本号：{v}");
+        // build.rs 不再调 cmd，版本行不该再含 UTF-8 替换字符
+        assert!(!v.contains('\u{FFFD}'), "版本行里混进了 U+FFFD：{v:?}");
     }
 
     /// 排障要问的东西必须都在：配置、日志、词典、字幕、插件、服务
