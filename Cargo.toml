@@ -11,7 +11,7 @@ members = ["apps/desktop", "apps/caption", "crates/ai-translate", "crates/deskto
 default-members = ["apps/desktop", "crates/ai-translate", "crates/desktop-shell", "crates/offline-dict", "crates/text-capture", "tests/mock-llm"]
 
 [workspace.package]
-version = "1.0.28"
+version = "1.0.29"
 edition = "2021"
 
 [workspace.dependencies]

@@ -2104,11 +2104,7 @@ impl App {
             }
             if let Some(i) = picked {
                 let p = self.draft.services[i].clone();
-                self.draft.backend.openai_base_url = p.base_url.clone();
-                self.draft.backend.openai_api_key = p.api_key.clone();
-                self.draft.backend.openai_model = p.model.clone();
-                // 思考开关跟着服务档案走：百炼的 false 不能串到对参数容忍度未验证的服务上
-                self.draft.backend.enable_thinking = p.enable_thinking;
+                crate::config::pick_service_into(&mut self.draft.backend, &p);
                 self.apply_settings();
                 self.settings_msg = format!("已切换到 {}", p.name);
             }
@@ -2119,9 +2115,17 @@ impl App {
                 for p in crate::presets::PRESETS {
                     // 选中就填字段；Key 不动——每家的 Key 不一样，替用户清空只会更糟
                     if ui.selectable_label(cur == p.name, p.name).clicked() {
-                        self.draft.backend.openai_base_url = p.base_url.to_string();
-                        self.draft.backend.openai_model = p.model.to_string();
-                        self.draft.backend.enable_thinking = p.enable_thinking;
+                        let key = self.draft.backend.openai_api_key.clone();
+                        crate::config::pick_service_into(
+                            &mut self.draft.backend,
+                            &crate::config::ServiceProfile {
+                                name: String::new(),
+                                base_url: p.base_url.to_string(),
+                                api_key: key,
+                                model: p.model.to_string(),
+                                enable_thinking: p.enable_thinking,
+                            },
+                        );
                     }
                 }
             });

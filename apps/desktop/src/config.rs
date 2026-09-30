@@ -77,6 +77,19 @@ fn default_direction() -> String {
     ai_translate::Direction::default().as_str().to_string()
 }
 
+/// 服务切换（已存服务 / 服务商预设）的逻辑：地址/Key/model 覆盖到位，
+/// `enable_thinking` **仅当当前未设**（None）时才用档案的值补——
+/// 避免选「DeepSeek 预设」（None）把之前手动写的 `false` 擦掉，
+/// 切回「通义千问」也不会改用户的逻辑。放出来给 ui.rs 两处下拉复用，便于单测。
+pub fn pick_service_into(dst: &mut BackendCfg, src: &ServiceProfile) {
+    dst.openai_base_url = src.base_url.clone();
+    dst.openai_api_key = src.api_key.clone();
+    dst.openai_model = src.model.clone();
+    if dst.enable_thinking.is_none() {
+        dst.enable_thinking = src.enable_thinking;
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -646,6 +659,36 @@ hover_modifier = \"none\"
         assert_eq!(c2.translator_config().base.enable_thinking, Some(false));
         let saved = toml::to_string(&c).unwrap();
         assert!(!saved.contains("enable_thinking"), "None 不该写进配置文件：{saved}");
+    }
+
+    /// 切服务时：地址/Key/model 覆盖到位；enable_thinking **保留用户已设的值**，
+    /// 仅当当前未设（None）时才用档案的值补——避免选 DeepSeek 预设（None）
+    /// 把用户之前手动写的 false 擦掉
+    #[test]
+    fn pick_service_preserves_existing_enable_thinking() {
+        let mk_src = |thinking: Option<bool>| ServiceProfile {
+            name: "x".into(), base_url: "u".into(), api_key: "k".into(), model: "m".into(),
+            enable_thinking: thinking,
+        };
+        // 已设为 false：选 None 档案不能擦掉
+        let mut dst = BackendCfg { enable_thinking: Some(false), ..BackendCfg::default() };
+        crate::config::pick_service_into(&mut dst, &mk_src(None));
+        assert_eq!(dst.enable_thinking, Some(false), "已设 false 不能被 None 擦掉");
+        // 已设为 false：选 Some(true) 也不能擦掉
+        crate::config::pick_service_into(&mut dst, &mk_src(Some(true)));
+        assert_eq!(dst.enable_thinking, Some(false), "已设 false 不能被 true 覆盖");
+        // 当前是 None：选 Some(false) 补上
+        dst.enable_thinking = None;
+        crate::config::pick_service_into(&mut dst, &mk_src(Some(false)));
+        assert_eq!(dst.enable_thinking, Some(false), "None 时应补档案的值");
+        // 当前是 None：选 None 仍是 None
+        dst.enable_thinking = None;
+        crate::config::pick_service_into(&mut dst, &mk_src(None));
+        assert_eq!(dst.enable_thinking, None);
+        // URL/Key/model 总是被覆盖
+        assert_eq!(dst.openai_base_url, "u");
+        assert_eq!(dst.openai_api_key, "k");
+        assert_eq!(dst.openai_model, "m");
     }
 
     /// 服务档案要记住 enable_thinking：切服务时参数跟着档案走，不串味
