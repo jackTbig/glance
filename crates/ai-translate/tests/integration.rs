@@ -111,6 +111,25 @@ fn glossary_goes_into_user_message() {
     assert!(out.contains("pod → Pod"), "{out}");
 }
 
+/// 相同 (model, system_prompt, user_message) 第二次不再发请求：截屏/划词重复点很常见
+#[test]
+fn cache_hits_duplicate_chat() {
+    let (s, t) = setup(4, 10);
+    let _ = t.translate(Scene::Selection, "deploy failed", None, &mut |_| {}).unwrap();
+    assert_eq!(s.stats().requests, 1);
+    let _ = t.translate(Scene::Selection, "deploy failed", None, &mut |_| {}).unwrap();
+    assert_eq!(s.stats().requests, 1, "重复同文本应走缓存，不再请求：{}", s.stats().requests);
+}
+
+/// 不同 system_prompt 的同文本不共享缓存（场景不同输出可能不同）
+#[test]
+fn cache_distinguishes_system_prompt() {
+    let (s, t) = setup(4, 10);
+    let _ = t.translate(Scene::Selection, "deploy failed", None, &mut |_| {}).unwrap();
+    let _ = t.translate(Scene::Screenshot, "deploy failed", None, &mut |_| {}).unwrap();
+    assert_eq!(s.stats().requests, 2, "不同场景的同文本走两条请求");
+}
+
 /// 配置的 enable_thinking 要真的上线：config → BackendConfig → OpenAi → 请求体，
 /// 中间任何一环漏拷贝就悄悄退回「思考开」的慢速路径
 #[test]

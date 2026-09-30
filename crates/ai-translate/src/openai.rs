@@ -1,6 +1,8 @@
 //! OpenAI 兼容接口（/chat/completions，SSE 流式，非 SSE 回包也兼容）
 use crate::backend::BackendConfig;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// HTTP 非 2xx 的结构化错误，供重试逻辑判断
@@ -25,6 +27,9 @@ pub struct OpenAi {
     key: String,
     model: String,
     enable_thinking: Option<bool>,
+    /// 重复请求复用同一回复（截屏 OCR 重复行/反复点同一选词很常见）。
+    /// 仅内存，进程退出即丢；key = (model, system_prompt, user_message)
+    cache: std::sync::Arc<Mutex<HashMap<Vec<u8>, String>>>,
 }
 
 /// 请求体。enable_thinking 只在配置了才带上（未验证的服务对未知参数的容忍度不明）
@@ -55,6 +60,7 @@ impl OpenAi {
             key: cfg.openai_api_key.trim().to_string(),
             model: cfg.openai_model.trim().to_string(),
             enable_thinking: cfg.enable_thinking,
+            cache: std::sync::Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -72,6 +78,15 @@ impl OpenAi {
     }
 
     pub fn chat(&self, system_prompt: &str, user_message: &str, timeout: Duration, on_delta: &mut dyn FnMut(&str)) -> anyhow::Result<String> {
+        let mut key = Vec::with_capacity(self.model.len() + system_prompt.len() + user_message.len() + 2);
+        key.extend_from_slice(self.model.as_bytes());
+        key.push(b'|');
+        key.extend_from_slice(system_prompt.as_bytes());
+        key.push(b'|');
+        key.extend_from_slice(user_message.as_bytes());
+        if let Some(cached) = self.cache.lock().unwrap().get(&key).cloned() {
+            return Ok(cached);
+        }
         let body = chat_body(&self.model, system_prompt, user_message, self.enable_thinking);
         let mut req = self.client.post(&self.url).timeout(timeout).json(&body);
         if !self.key.is_empty() {
@@ -122,7 +137,9 @@ impl OpenAi {
                 anyhow::bail!("接口错误：{err}");
             }
         }
-        Ok(acc.trim().to_string())
+        let out = acc.trim().to_string();
+        self.cache.lock().unwrap().insert(key, out.clone());
+        Ok(out)
     }
 }
 
