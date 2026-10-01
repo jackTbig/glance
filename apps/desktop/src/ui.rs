@@ -1273,7 +1273,11 @@ impl App {
                 egui::vec2(win_rect.width(), img_h),
             );
             let painter = ui.painter();
-            painter.image(o.tex.id(), full, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            // 切换语义（Jack 2026-09-30）：默认显示译文（无原图），点一下切到原文（无译文）。
+            // 原文/译文不再同时出现，免去"重叠"错觉。
+            if !o.show_dst {
+                painter.image(o.tex.id(), full, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            }
 
             if o.show_dst {
                 // 排版算在 overlay::plan 里（纯函数、有测试盯着），这里只负责照着画
