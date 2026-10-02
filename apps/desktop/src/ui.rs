@@ -1273,24 +1273,38 @@ impl App {
                 egui::vec2(win_rect.width(), img_h),
             );
             let painter = ui.painter();
+            // 覆盖式（原 1.0.29 行为，1.0.30 改的"互斥"翻车了，1.0.32 退回）：
+            // 原图始终铺底，译文盖在每行原图上；点一下切到只显示原图。
+            painter.image(
+                o.tex.id(),
+                full,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
             if o.show_dst {
-                // 只显示译文、不画原图：避免"重叠"错觉（Jack 2026-09-30 要求）。
-                // 先铺一层不透明深色底——窗口主题色浅时透明底上看不见字。
-                crate::overlay::draw_translation_layer(
-                    &painter,
-                    full,
-                    &o.lines,
-                    &o.bg,
-                    (o.tex.size()[0] as i32, o.tex.size()[1] as i32),
-                    &ctx,
-                );
-            } else {
-                painter.image(
-                    o.tex.id(),
-                    full,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                // 排版算在 overlay::plan 里（纯函数、有测试盯着），这里只负责照着画
+                let bg: Vec<[u8; 4]> = o.bg.iter().map(|c| [c.r(), c.g(), c.b(), 255]).collect();
+                let img = (o.tex.size()[0] as i32, o.tex.size()[1] as i32);
+                let ops = crate::overlay::plan(&o.lines, &bg, img, (full.width(), full.height()), |t, size| {
+                    ctx.fonts_mut(|f| {
+                        f.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), Color32::WHITE).size().x
+                    })
+                });
+                for op in ops {
+                    let r = egui::Rect::from_min_size(
+                        full.min + egui::vec2(op.rect.0, op.rect.1),
+                        egui::vec2(op.rect.2, op.rect.3),
+                    );
+                    painter.rect_filled(r, CornerRadius::ZERO, Color32::from_rgb(op.bg[0], op.bg[1], op.bg[2]));
+                    let fg = if op.dark_text { Color32::from_gray(20) } else { Color32::from_gray(245) };
+                    painter.text(
+                        egui::pos2(r.left() + 1.0, r.center().y),
+                        Align2::LEFT_CENTER,
+                        &op.text,
+                        egui::FontId::proportional(op.font_size),
+                        fg,
+                    );
+                }
             }
             // 提示栏：独占窗口下（或上）的一条，绝不压住截图内容
             let bar = egui::Rect::from_min_size(
