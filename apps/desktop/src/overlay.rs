@@ -4,6 +4,9 @@
 //! 点一下在原文 / 译文之间切换。要做到「盖得像」，两件事必须算对：
 //! 1. 盖住原文用什么底色——直接涂黑会把版面毁掉，要取这一行周围的背景色；
 //! 2. 译文用多大字号——中文比英文短、但字宽，字号照搬行高会溢出行外。
+//!
+//! **1.0.30 改语义**：原图与译文不再同时显示——`show_dst=true` 只画译文（铺深色底保字看得见），
+//! `show_dst=false` 只画原图。决定走下面的 [`layer_for`] 纯函数，方便单测盯住。
 
 /// 一行的覆盖信息（坐标都相对截图左上角，物理像素）
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +83,63 @@ pub fn fit_font_size(rect_h: f32, rect_w: f32, measure: impl Fn(f32) -> f32) -> 
     }
     size.max(MIN)
 }
+
+/// 覆盖窗当前要画哪一层（Jack 2026-09-30 切换语义后，互斥）：
+/// `show_dst=true` → 译文层（深色底 + 每行译文）；`show_dst=false` → 原图层（整张图）。
+///
+/// 抽成纯函数给 ui.rs 调用，单测盯住 1.0.30 后的互斥语义，防止误回滚到"两层都画"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    Translation,
+    Original,
+}
+
+pub fn layer_for(show_dst: bool) -> Layer {
+    if show_dst { Layer::Translation } else { Layer::Original }
+}
+
+/// 译文层底色：固定深色（18, 18, 22）。窗口主题色浅时透明底上字看不见，
+/// 译文层必须有不透明底色保证可读。bg 由 [`plan`] 算出每行自己的颜色盖上去。
+const TRANSLATION_BG: (u8, u8, u8) = (18, 18, 22);
+
+/// 把译文层画到 painter 上：先铺深色底，再按 [`plan`] 的 ops 画每行底色 + 文字。
+/// `lines` / `bg` / `tex_size` 的语义与 [`plan`] 一致；`full` 是窗口里截图区的逻辑矩形。
+pub fn draw_translation_layer(
+    painter: &egui::Painter,
+    full: egui::Rect,
+    lines: &[Line],
+    bg: &[egui::Color32],
+    tex_size: (i32, i32),
+    ctx: &egui::Context,
+) {
+    painter.rect_filled(
+        full,
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgb(TRANSLATION_BG.0, TRANSLATION_BG.1, TRANSLATION_BG.2),
+    );
+    let bg_rgba: Vec<[u8; 4]> = bg.iter().map(|c| [c.r(), c.g(), c.b(), 255]).collect();
+    let ops = plan(lines, &bg_rgba, tex_size, (full.width(), full.height()), |t, size| {
+        ctx.fonts_mut(|f| {
+            f.layout_no_wrap(t.to_string(), egui::FontId::proportional(size), egui::Color32::WHITE).size().x
+        })
+    });
+    for op in ops {
+        let r = egui::Rect::from_min_size(
+            full.min + egui::vec2(op.rect.0, op.rect.1),
+            egui::vec2(op.rect.2, op.rect.3),
+        );
+        painter.rect_filled(r, egui::CornerRadius::ZERO, egui::Color32::from_rgb(op.bg[0], op.bg[1], op.bg[2]));
+        let fg = if op.dark_text { egui::Color32::from_gray(20) } else { egui::Color32::from_gray(245) };
+        painter.text(
+            egui::pos2(r.left() + 1.0, r.center().y),
+            egui::Align2::LEFT_CENTER,
+            &op.text,
+            egui::FontId::proportional(op.font_size),
+            fg,
+        );
+    }
+}
+
 
 /// 盖住原文的矩形：比识别框稍微放大一点。
 ///
@@ -161,6 +221,14 @@ pub fn layout(region: (i32, i32, u32, u32), bar_h: i32, screen: (i32, i32, u32, 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// `layer_for` 决定哪一层画——1.0.30 切换语义后两层互斥，单测盯住防回滚到"两层都画"。
+    #[test]
+    fn layer_for_is_mutually_exclusive() {
+        assert_eq!(layer_for(true), Layer::Translation);
+        assert_eq!(layer_for(false), Layer::Original);
+    }
     use super::*;
 
     /// 提示栏不能压住原文：正常情况放在截图区下方，窗口相应加高
@@ -292,5 +360,49 @@ mod tests {
         assert_eq!(cover_rect((10, 10, 50, 20), 2, (200, 100)), (8, 8, 54, 24));
         // 贴边的行不能越出图外，否则画出来会糊到别的地方
         assert_eq!(cover_rect((0, 0, 50, 20), 3, (40, 10)), (0, 0, 40, 10));
+    }
+
+    /// `draw_translation_layer` 必须真把深色底 + 译文画出来（Jack 报 1.0.30 译文看不见）。
+    /// 用 `ctx.run_ui` 收集 painter 实际产出的 shape，深色底 + 至少一行文字 shape 都要在。
+    #[test]
+    fn translation_layer_actually_paints_dark_bg_and_text() {
+        let lines = vec![
+            Line { rect: (10, 10, 200, 30), src: "Hello world".into(), dst: Some("你好世界".into()) },
+            Line { rect: (10, 50, 200, 30), src: "Goodbye".into(), dst: Some("再见".into()) },
+        ];
+        // 每行一行采到的背景色（白底文档：白）
+        let bg = vec![
+            egui::Color32::from_rgb(255, 255, 255),
+            egui::Color32::from_rgb(255, 255, 255),
+        ];
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let full = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(400.0, 200.0));
+            draw_translation_layer(
+                ui.painter(),
+                full,
+                &lines,
+                &bg,
+                (400, 200),
+                ui.ctx(),
+            );
+        });
+        out.textures_delta.clear();
+        // 1. 至少有一个深色 (18,18,22) 的矩形（不透明背景）
+        let has_dark_bg = out.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Rect(r) => r.fill == egui::Color32::from_rgb(18, 18, 22),
+            _ => false,
+        });
+        assert!(has_dark_bg, "译文层没画深色底——文字在浅主题窗口上读不出来");
+        // 2. 至少画了两个文本 shape（每行一个译文）——egui 的 TextShape 字段名会随版本变，
+        // 这里只断言数量 + 包含换行渲染结构（两条 line 应有 ≥2 个 TextShape）
+        let text_count = out.shapes.iter().filter(|c| matches!(c.shape, egui::Shape::Text(_))).count();
+        assert!(text_count >= 2, "译文行没真的画上去，画了 {text_count} 个文本 shape");
+        // 3. 至少有一个白色矩形（每行原文位置的 bg，cover_rect 算出的那个）
+        let has_line_bg = out.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Rect(r) => r.fill == egui::Color32::from_rgb(255, 255, 255),
+            _ => false,
+        });
+        assert!(has_line_bg, "每行 bg 没画");
     }
 }
