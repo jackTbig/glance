@@ -86,12 +86,11 @@ mod win {
         let pt = Point::new(x, y);
         let el = auto.element_from_point(pt).ok()?;
 
-        // 逐级收窄：段落 → 行 → 词。
-        // 只要「段落」这一级在某些应用里会把整篇文档算作一段（实测拿到过 3667 字），
-        // 悬停就变成了翻整屏。超过上限就换更小的单位重取。
+        // 1.0.36：Word 优先、Line 兜底、Paragraph 最后。Youdao 风格。
+        // 之前 Paragraph 起手——浏览器/编辑器的一段话常在 400 字内，整段被直接送翻译。
         if let Ok(tp) = el.get_pattern::<UITextPattern>() {
             let mut best: Option<String> = None;
-            for unit in [TextUnit::Paragraph, TextUnit::Line, TextUnit::Word] {
+            for unit in [TextUnit::Word, TextUnit::Line, TextUnit::Paragraph] {
                 match text_by_unit(&tp, pt, unit) {
                     Some(t) if t.chars().count() <= MAX_HOVER_CHARS => return Some(t),
                     Some(t) => {
