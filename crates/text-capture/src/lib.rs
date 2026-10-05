@@ -209,8 +209,8 @@ impl Capturer {
         let engine = self.ocr.as_ref().ok_or_else(|| anyhow::anyhow!("本机没有可用的文字识别引擎"))?;
         let img = screen::capture_rect(rx, ry, rw, rh)?;
         let r = engine.recognize(&img)?;
-        // 鼠标在这张截图里的位置，用来挑行
-        let text = pick_line_at(&r, x - rx, y - ry).unwrap_or_else(|| r.text.clone());
+        // 1.0.34：只挑光标位置那个单词（Youdao 风格），不是整行。
+        let text = pick_word_at(&r, x - rx, y - ry).unwrap_or_else(|| r.text.clone());
         Ok(Captured { text, source: Source::Ocr, took_ms: t0.elapsed().as_millis() })
     }
 
@@ -264,6 +264,64 @@ pub fn pick_line_at(r: &OcrResult, x: i32, y: i32) -> Option<String> {
     best.map(|(_, l)| l.text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
+/// 1.0.34：悬停取词取单词（Youdao 风格），不再是整行。
+///
+/// 算法：先按 `pick_line_at` 同样的方式定位鼠标所在行（找不到就 None），再在
+/// 行内按字/词中心最接近光标 x 挑一个。英文按空白切词；CJK 没空白时按字切。
+/// 行宽按字数均摊到字/词上是粗略估计，Youdao 也是这么算的，单词取词够用。
+pub fn pick_word_at(r: &OcrResult, x: i32, y: i32) -> Option<String> {
+    if r.lines.is_empty() {
+        return None;
+    }
+    let line = r.lines.iter().find(|l| {
+        let (lx, ly, lw, lh) = l.rect;
+        x >= lx && x <= lx + lw && y >= ly && y <= ly + lh
+    })?;
+    let (lx, _ly, lw, _lh) = line.rect;
+    let text = line.text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let rel_x = (x - lx) as f32;
+    let lw_f = lw as f32;
+    if !text.chars().any(|c| c.is_whitespace()) {
+        // CJK 一行：按字挑
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+        let char_w = lw_f / chars.len() as f32;
+        let idx = ((rel_x / char_w) as usize).min(chars.len() - 1);
+        return Some(chars[idx].to_string());
+    }
+    // 英文（含空白）：按空白分词，估算每个词的中心 x，挑最近的
+    let chars_total = text.chars().count() as f32;
+    let mut word_positions: Vec<(f32, f32, &str)> = Vec::new();
+    let mut consumed_chars = 0f32;
+    for w in text.split_whitespace() {
+        let w_chars = w.chars().count() as f32;
+        let w_w = lw_f * (w_chars / chars_total);
+        let start = consumed_chars / chars_total * lw_f;
+        word_positions.push((start, start + w_w, w));
+        consumed_chars += w_chars;
+        // 跳过这个词之后的空白字符
+        let trailing_ws = text[consumed_chars as usize..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .count() as f32;
+        consumed_chars += trailing_ws;
+    }
+    let mut best: Option<(f32, &str)> = None;
+    for (s, e, w) in &word_positions {
+        let center = (s + e) / 2.0;
+        let d = (center - rel_x).abs();
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, w));
+        }
+    }
+    best.map(|(_, w)| w.to_string())
+}
+
 #[cfg(test)]
 mod pick_tests {
     use super::*;
@@ -292,6 +350,49 @@ mod pick_tests {
         // 落在两行之间的空隙里，取中心更近的那行
         assert_eq!(pick_line_at(&r, 100, 36).as_deref(), Some("second"), "36 离 52 更近");
         assert_eq!(pick_line_at(&r, 100, 28).as_deref(), Some("first"), "28 离 12 更近");
+    }
+
+    /// 1.0.34：悬停取词改"取单词"语义——光标在哪个词就只翻哪个词，Youdao 风格。
+    /// 之前用 `pick_line_at` 整行返回（Jack 2026-10-05 反馈：一悬停把整行都翻了一长串）。
+    /// 估计策略：行宽按字数平摊到字/词上，挑中心最接近光标 x 的那个。
+    /// 文本没空格（CJK）时按字切；英文按空白切。
+    #[test]
+    fn pick_word_in_english_line() {
+        // "Hello world foo bar" 共 19 字符，4 词，行宽 500
+        // 按行宽均摊：Hello 131.6, world 131.6, foo 78.9, bar 78.9
+        // 词中心（相对 lx=10）：Hello=65.8, world=223.7, foo=355.2, bar=460.5
+        let r = result(vec![line("Hello world foo bar", 0)]);
+        assert_eq!(pick_word_at(&r, 10 + 65, 12).as_deref(), Some("Hello"), "光标在 Hello 中心");
+        assert_eq!(pick_word_at(&r, 10 + 220, 12).as_deref(), Some("world"), "光标在 world 中心");
+        assert_eq!(pick_word_at(&r, 10 + 355, 12).as_deref(), Some("foo"), "光标在 foo 中心");
+        assert_eq!(pick_word_at(&r, 10 + 460, 12).as_deref(), Some("bar"), "光标在 bar 中心");
+        // 边界：两词之间，取最近的
+        assert_eq!(pick_word_at(&r, 10 + 144, 12).as_deref(), Some("Hello"), "在 Hello/world 边界偏 Hello");
+        assert_eq!(pick_word_at(&r, 10 + 146, 12).as_deref(), Some("world"), "在 Hello/world 边界偏 world");
+    }
+
+    #[test]
+    fn pick_word_handles_cjk_without_spaces() {
+        // CJK 一行没空格：按字挑（Youdao 对中文就是这样取单字的）
+        let r = result(vec![line("你好世界", 0)]);
+        // 行宽 500、4 个字 → 每字 125 宽。中心：62, 187, 312, 437
+        assert_eq!(pick_word_at(&r, 60, 12).as_deref(), Some("你"));
+        assert_eq!(pick_word_at(&r, 185, 12).as_deref(), Some("好"));
+        assert_eq!(pick_word_at(&r, 310, 12).as_deref(), Some("世"));
+        assert_eq!(pick_word_at(&r, 440, 12).as_deref(), Some("界"));
+    }
+
+    #[test]
+    fn pick_word_returns_none_when_no_line_under_cursor() {
+        let r = result(vec![line("Hello", 0)]);
+        // y=1000 远在第一行外
+        assert_eq!(pick_word_at(&r, 100, 1000), None);
+    }
+
+    #[test]
+    fn pick_word_handles_empty_text() {
+        let r = result(vec![line("   ", 0)]);
+        assert_eq!(pick_word_at(&r, 100, 12), None, "全是空白算空");
     }
 
     #[test]
