@@ -234,6 +234,9 @@ enum HotkeyAction {
     /// 开着的时候用单键/双键 + 鼠标动作调用（悬停按 Ctrl、划词直接选中）。
     ToggleHover,
     ToggleSelection,
+    /// 打开主窗口（翻译页）。Jack 2026-10-05 加：托盘双击已有，但手离开键盘去找托盘
+    /// 慢，一键直达更顺手。**打开状态等价于 `open_main`**，已开着只换页 / 提到前面。
+    OpenMainWindow,
     /// 字幕：无条件切回可点击。**父进程只转发一个字幕热键的话，必须是这个**——
     /// 「切换穿透」在状态不同步时可能反而把穿透打开，而这一条永远往安全方向走。
     CaptionClickable,
@@ -260,6 +263,7 @@ impl App {
             (&cfg.hotkeys.toggle_hover, HotkeyAction::ToggleHover, "悬停开关"),
             (&cfg.hotkeys.toggle_selection, HotkeyAction::ToggleSelection, "划词开关"),
             (&cfg.hotkeys.toggle_panel, HotkeyAction::TogglePanel, "面板"),
+            (&cfg.hotkeys.open_main_window, HotkeyAction::OpenMainWindow, "翻译窗口"),
             // 字幕的两个热键由简译统一注册再转发：托管模式下字幕自己不注册，
             // 两个进程各注册一遍的话后者必然失败（组合已被占）。
             (&cfg.hotkeys.caption_clickable, HotkeyAction::CaptionClickable, "字幕切回可点击"),
@@ -583,6 +587,7 @@ impl App {
                         self.start(Job::Selection { target: None, clip_seq: None }, "划词翻译", (x, y), Source::Clipboard);
                     }
                 }
+                HotkeyAction::OpenMainWindow => self.open_main(),
             }
         }
     }
@@ -2279,6 +2284,9 @@ impl App {
         });
         Self::row(ui, "面板开关", "显示或收起最近一次的译文面板", |ui| {
             ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.toggle_panel).desired_width(120.0));
+        });
+        Self::row(ui, "翻译窗口", "一键打开主窗口翻译页（手动输入翻译那条）。已开着只换页/提到前面", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.draft.hotkeys.open_main_window).desired_width(120.0));
         });
 
         Self::section(ui, "例外程序", "这些程序里不弹图标、不响应悬停。每行一个可执行文件名，留空表示不排除。");

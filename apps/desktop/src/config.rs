@@ -77,6 +77,11 @@ fn default_direction() -> String {
     ai_translate::Direction::default().as_str().to_string()
 }
 
+/// 默认快捷键：打开翻译窗口（手动输入翻译那条）。Ctrl+Alt+K 不在 FALLBACK 候选里。
+fn default_open_main_window() -> String {
+    "Ctrl+Alt+K".into()
+}
+
 /// 服务切换（已存服务 / 服务商预设）的逻辑：地址/Key/model 覆盖到位，
 /// `enable_thinking` **仅当当前未设**（None）时才用档案的值补——
 /// 避免选「DeepSeek 预设」（None）把之前手动写的 `false` 擦掉，
@@ -219,6 +224,11 @@ pub struct HotkeyCfg {
     pub hover_modifier: String,
     /// 悬停多久才触发（毫秒）
     pub hover_delay_ms: u64,
+    /// 打开翻译窗口（手动输入翻译那条）。Jack 2026-10-05 加：托盘菜单要点的动作，
+    /// 给个一键直达。**注册失败会自动沿 FALLBACK_HOTKEYS 往下试**，
+    /// 留空字符串表示未启用（不注册、不响应）。
+    #[serde(default = "default_open_main_window")]
+    pub open_main_window: String,
     /// 旧字段，保留只为读得进老配置；语义已由 toggle_selection 接管
     #[serde(default, skip_serializing)]
     pub selection: String,
@@ -238,6 +248,7 @@ impl Default for HotkeyCfg {
             caption_passthrough: default_caption_passthrough(),
             hover_modifier: "ctrl".into(),
             hover_delay_ms: 300,
+            open_main_window: default_open_main_window(),
             selection: String::new(),
         }
     }
@@ -478,6 +489,29 @@ mod tests {
 
     fn prof(base: &str, key: &str, model: &str) -> ServiceProfile {
         ServiceProfile { name: String::new(), base_url: base.into(), api_key: key.into(), model: model.into(), enable_thinking: None }
+    }
+
+    /// `open_main_window` 是 1.0.33 新加的快捷键：默认 Ctrl+Alt+K、用户可改、老配置
+    /// 不带这字段也要有默认值（serde 默认函数接住）。
+    #[test]
+    fn open_main_window_default_and_round_trip() {
+        // 默认值
+        assert_eq!(HotkeyCfg::default().open_main_window, "Ctrl+Alt+K");
+        // 老配置没这字段：走 serde 默认值，不报错也不丢键
+        let old_cfg = "version = 3\n[hotkeys]\nscreenshot = \"Ctrl+Alt+G\"\n";
+        let c: Config = toml::from_str(old_cfg).unwrap();
+        assert_eq!(c.hotkeys.open_main_window, "Ctrl+Alt+K");
+        // 写自定义值能 round-trip
+        let mut c = Config::default();
+        c.hotkeys.open_main_window = "Ctrl+Alt+O".into();
+        let s = toml::to_string(&c).unwrap();
+        let c2: Config = toml::from_str(&s).unwrap();
+        assert_eq!(c2.hotkeys.open_main_window, "Ctrl+Alt+O");
+        // 空串表示不启用（用户手动清空）——序列化为空，反序列化保持空
+        let mut c = Config::default();
+        c.hotkeys.open_main_window = String::new();
+        let c2: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c2.hotkeys.open_main_window, "");
     }
 
     #[test]
