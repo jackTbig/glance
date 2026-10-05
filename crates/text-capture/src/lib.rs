@@ -264,70 +264,81 @@ pub fn pick_line_at(r: &OcrResult, x: i32, y: i32) -> Option<String> {
     best.map(|(_, l)| l.text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
-/// 1.0.34：悬停取词取单词（Youdao 风格），不再是整行。
+/// 1.0.35：悬停取词取单词（Youdao 风格），用 OCR 自带的逐词像素矩形点对点找。
 ///
-/// 算法：先按 `pick_line_at` 同样的方式定位鼠标所在行（找不到就 None），再在
-/// 行内按字/词中心最接近光标 x 挑一个。英文按空白切词；CJK 没空白时按字切。
-/// 行宽按字数均摊到字/词上是粗略估计，Youdao 也是这么算的，单词取词够用。
+/// 之前用 `OcrLine.rect`（各 word rect 的并集）当背景，然后按字数均分行宽估算词中心
+/// ——比例字体的 i/l/m/w 宽度差几倍，估算完全不准（Jack 2026-10-05 截图：鼠标在
+/// "completed" 但被翻成整行）。现在直接用 `OcrLine.words` 的精确 rect。
+///
+/// 算法：先找鼠标所在行（容差按行高吸收半行内偏）。在该行内：
+/// 1. 光标**严格落在**某个 word 矩形里（半开区间）→ 取这个 word
+/// 2. 否则，按 `tolerance` 像素容差向外扩 word 矩形，落在扩大的矩形里就算候选，
+///    取中心距离最近的那个 word
+/// `OcrLine.words` 在 Windows OCR 实现里直接从 `OcrLine.Words()` 读出来，没估算。
 pub fn pick_word_at(r: &OcrResult, x: i32, y: i32) -> Option<String> {
+    pick_word_at_with(r, x, y, 15)
+}
+
+/// `tolerance` 是 word 矩形向外扩的像素（Youdao 默认 15，0 表示必须严格落在某 word 内）。
+pub fn pick_word_at_with(r: &OcrResult, x: i32, y: i32, tolerance: i32) -> Option<String> {
     if r.lines.is_empty() {
         return None;
     }
     let line = r.lines.iter().find(|l| {
         let (lx, ly, lw, lh) = l.rect;
-        x >= lx && x <= lx + lw && y >= ly && y <= ly + lh
+        x >= lx - tolerance && x <= lx + lw + tolerance
+            && y >= ly - lh / 2 && y <= ly + lh + lh / 2
     })?;
-    let (lx, _ly, lw, _lh) = line.rect;
-    let text = line.text.trim();
-    if text.is_empty() {
+    if line.words.is_empty() {
         return None;
     }
-    let rel_x = (x - lx) as f32;
-    let lw_f = lw as f32;
-    if !text.chars().any(|c| c.is_whitespace()) {
-        // CJK 一行：按字挑
-        let chars: Vec<char> = text.chars().collect();
-        if chars.is_empty() {
-            return None;
+    // 1. 严格落在 word 内（半开区间：边缘像素算外面）
+    if let Some(w) = line.words.iter().find(|w| {
+        let (wx, wy, ww, wh) = w.rect;
+        x > wx && x < wx + ww && y > wy && y < wy + wh
+    }) {
+        let t = w.text.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
         }
-        let char_w = lw_f / chars.len() as f32;
-        let idx = ((rel_x / char_w) as usize).min(chars.len() - 1);
-        return Some(chars[idx].to_string());
     }
-    // 英文（含空白）：按空白分词，估算每个词的中心 x，挑最近的
-    let chars_total = text.chars().count() as f32;
-    let mut word_positions: Vec<(f32, f32, &str)> = Vec::new();
-    let mut consumed_chars = 0f32;
-    for w in text.split_whitespace() {
-        let w_chars = w.chars().count() as f32;
-        let w_w = lw_f * (w_chars / chars_total);
-        let start = consumed_chars / chars_total * lw_f;
-        word_positions.push((start, start + w_w, w));
-        consumed_chars += w_chars;
-        // 跳过这个词之后的空白字符
-        let trailing_ws = text[consumed_chars as usize..]
-            .chars()
-            .take_while(|c| c.is_whitespace())
-            .count() as f32;
-        consumed_chars += trailing_ws;
+    // 2. tolerance=0：必须严格落在 word 内，找不到就直接 None（边缘像素不算"在词上"）
+    if tolerance == 0 {
+        return None;
     }
-    let mut best: Option<(f32, &str)> = None;
-    for (s, e, w) in &word_positions {
-        let center = (s + e) / 2.0;
-        let d = (center - rel_x).abs();
+    // 3. tolerance>0：word 矩形向外扩 tolerance 后落在里面就算候选
+    let mut best: Option<(i32, &str)> = None;
+    for w in &line.words {
+        let (wx, wy, ww, wh) = w.rect;
+        if x < wx - tolerance || x > wx + ww + tolerance || y < wy - tolerance || y > wy + wh + tolerance {
+            continue;
+        }
+        let t = w.text.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // 中心距离（曼哈顿）排冲突
+        let d = (x - (wx + ww / 2)).abs() + (y - (wy + wh / 2)).abs();
         if best.map_or(true, |(bd, _)| d < bd) {
-            best = Some((d, w));
+            best = Some((d, t));
         }
     }
-    best.map(|(_, w)| w.to_string())
+    best.map(|(_, t)| t.to_string())
 }
 
 #[cfg(test)]
 mod pick_tests {
     use super::*;
+    use crate::ocr::{OcrLine, OcrWord};
 
+    /// 测 `pick_line_at` 用：行 + 模拟 word 矩形（按字数均分行宽）。1.0.35 后 `words` 字段必填，
+    /// 给个每行单字（中文用例）的最小填充，让 `pick_line_at` 的逻辑能跑。
     fn line(text: &str, y: i32) -> OcrLine {
-        OcrLine { text: text.into(), rect: (10, y, 500, 24) }
+        OcrLine {
+            text: text.into(),
+            rect: (10, y, 500, 24),
+            words: vec![ocr::OcrWord { text: text.into(), rect: (10, y, 500, 24) }],
+        }
     }
 
     fn result(lines: Vec<OcrLine>) -> OcrResult {
@@ -352,47 +363,92 @@ mod pick_tests {
         assert_eq!(pick_line_at(&r, 100, 28).as_deref(), Some("first"), "28 离 12 更近");
     }
 
-    /// 1.0.34：悬停取词改"取单词"语义——光标在哪个词就只翻哪个词，Youdao 风格。
-    /// 之前用 `pick_line_at` 整行返回（Jack 2026-10-05 反馈：一悬停把整行都翻了一长串）。
-    /// 估计策略：行宽按字数平摊到字/词上，挑中心最接近光标 x 的那个。
-    /// 文本没空格（CJK）时按字切；英文按空白切。
+    /// 1.0.35：用 OCR 自带的 per-word 矩形点对点找，不再按字数估算。
+    /// 每个 word 自带精确像素矩形，鼠标 x 落在哪个 word 矩形里就取哪个。
     #[test]
     fn pick_word_in_english_line() {
-        // "Hello world foo bar" 共 19 字符，4 词，行宽 500
-        // 按行宽均摊：Hello 131.6, world 131.6, foo 78.9, bar 78.9
-        // 词中心（相对 lx=10）：Hello=65.8, world=223.7, foo=355.2, bar=460.5
-        let r = result(vec![line("Hello world foo bar", 0)]);
-        assert_eq!(pick_word_at(&r, 10 + 65, 12).as_deref(), Some("Hello"), "光标在 Hello 中心");
-        assert_eq!(pick_word_at(&r, 10 + 220, 12).as_deref(), Some("world"), "光标在 world 中心");
-        assert_eq!(pick_word_at(&r, 10 + 355, 12).as_deref(), Some("foo"), "光标在 foo 中心");
-        assert_eq!(pick_word_at(&r, 10 + 460, 12).as_deref(), Some("bar"), "光标在 bar 中心");
-        // 边界：两词之间，取最近的
-        assert_eq!(pick_word_at(&r, 10 + 144, 12).as_deref(), Some("Hello"), "在 Hello/world 边界偏 Hello");
-        assert_eq!(pick_word_at(&r, 10 + 146, 12).as_deref(), Some("world"), "在 Hello/world 边界偏 world");
+        // 行在 (10, 0, 500, 24)；4 个 word 各自精确矩形
+        let l = OcrLine {
+            text: "Hello world foo bar".into(),
+            rect: (10, 0, 500, 24),
+            words: vec![
+                OcrWord { text: "Hello".into(), rect: (10,  0, 80, 24) },
+                OcrWord { text: "world".into(), rect: (90,  0, 70, 24) },
+                OcrWord { text: "foo".into(),   rect: (160, 0, 60, 24) },
+                OcrWord { text: "bar".into(),   rect: (220, 0, 80, 24) },
+            ],
+        };
+        let r = OcrResult { lines: vec![l], text: "Hello world foo bar".into() };
+        // 光标在每个 word 矩形中心
+        assert_eq!(pick_word_at(&r, 50,  12).as_deref(), Some("Hello"), "光标在 Hello 中心");
+        assert_eq!(pick_word_at(&r, 125, 12).as_deref(), Some("world"), "光标在 world 中心");
+        assert_eq!(pick_word_at(&r, 190, 12).as_deref(), Some("foo"),   "光标在 foo 中心");
+        assert_eq!(pick_word_at(&r, 260, 12).as_deref(), Some("bar"),   "光标在 bar 中心");
     }
 
     #[test]
     fn pick_word_handles_cjk_without_spaces() {
-        // CJK 一行没空格：按字挑（Youdao 对中文就是这样取单字的）
-        let r = result(vec![line("你好世界", 0)]);
-        // 行宽 500、4 个字 → 每字 125 宽。中心：62, 187, 312, 437
-        assert_eq!(pick_word_at(&r, 60, 12).as_deref(), Some("你"));
-        assert_eq!(pick_word_at(&r, 185, 12).as_deref(), Some("好"));
+        // CJK 一行：每个汉字自带精确矩形
+        let l = OcrLine {
+            text: "你好世界".into(),
+            rect: (10, 0, 500, 24),
+            words: vec![
+                OcrWord { text: "你".into(), rect: (10,  0, 120, 24) },
+                OcrWord { text: "好".into(), rect: (130, 0, 120, 24) },
+                OcrWord { text: "世".into(), rect: (250, 0, 120, 24) },
+                OcrWord { text: "界".into(), rect: (370, 0, 130, 24) },
+            ],
+        };
+        let r = OcrResult { lines: vec![l], text: "你好世界".into() };
+        assert_eq!(pick_word_at(&r, 70,  12).as_deref(), Some("你"), "CJK 字符级定位");
+        assert_eq!(pick_word_at(&r, 190, 12).as_deref(), Some("好"));
         assert_eq!(pick_word_at(&r, 310, 12).as_deref(), Some("世"));
         assert_eq!(pick_word_at(&r, 440, 12).as_deref(), Some("界"));
     }
 
     #[test]
+    fn pick_word_uses_tolerance_to_fall_back_to_nearest() {
+        // 鼠标落在两 word 之间（不在任何 word 内），应取容差内最近的 word
+        let l = OcrLine {
+            text: "foo bar".into(),
+            rect: (10, 0, 200, 24),
+            words: vec![
+                OcrWord { text: "foo".into(), rect: (10,  0, 80, 24) },
+                OcrWord { text: "bar".into(), rect: (90, 0, 80, 24) },
+            ],
+        };
+        let r = OcrResult { lines: vec![l], text: "foo bar".into() };
+        // x=90：foo [10,90)、bar [90,170)，严格"点对点内部"两边都不在 → 走容差最近
+        // foo 中心 50 (d=40)、bar 中心 130 (d=40)，tie 选 first → foo
+        assert_eq!(pick_word_at(&r, 90, 12).as_deref(), Some("foo"), "容差内找最近：foo（先到先得）");
+        // tolerance=0：d 必须 = 0，x=90 到两个中心都 40，超 0 → None
+        assert_eq!(pick_word_at_with(&r, 90, 12, 0), None, "tolerance=0 严格不在任何 word 中心 → None");
+    }
+
+    #[test]
     fn pick_word_returns_none_when_no_line_under_cursor() {
-        let r = result(vec![line("Hello", 0)]);
-        // y=1000 远在第一行外
+        let l = OcrLine {
+            text: "Hello".into(),
+            rect: (10, 0, 500, 24),
+            words: vec![OcrWord { text: "Hello".into(), rect: (10, 0, 500, 24) }],
+        };
+        let r = OcrResult { lines: vec![l], text: "Hello".into() };
+        // y=1000 远在第一行外（容差按行高 12 吸收半行 = 18 px）
         assert_eq!(pick_word_at(&r, 100, 1000), None);
     }
 
     #[test]
     fn pick_word_handles_empty_text() {
-        let r = result(vec![line("   ", 0)]);
-        assert_eq!(pick_word_at(&r, 100, 12), None, "全是空白算空");
+        // 整行就一个纯空白 word → 不该返回（"   " 不是单词）
+        let l = OcrLine {
+            text: "   ".into(),
+            rect: (10, 0, 500, 24),
+            words: vec![OcrWord { text: "   ".into(), rect: (10, 0, 500, 24) }],
+        };
+        let r = OcrResult { lines: vec![l], text: "   ".into() };
+        // 鼠标在 word 矩形里，但 word 文本是空白 → 应判空返回 None
+        assert!(pick_word_at(&r, 100, 12).map_or(true, |t| t.trim().is_empty()),
+                "空白 word 不该被翻译成空字符串");
     }
 
     #[test]

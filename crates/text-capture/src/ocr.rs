@@ -2,11 +2,24 @@
 //!
 //! 引擎可插拔：以后加 RapidOCR 等本地模型只需再实现一次 [`OcrEngine`]，在 [`default_engine`] 里选。
 
+/// 1.0.35：把 `Windows.Media.Ocr.OcrWord` 的精确像素位置留下来。
+/// 之前 `OcrLine.rect` 是各 word rect 的并集，单词各自的位置丢了，
+/// `pick_word_at` 只能按字数均分行宽估算——对比例字体完全不准。
 #[derive(Debug, Clone, PartialEq)]
-pub struct OcrLine {
+pub struct OcrWord {
     pub text: String,
     /// 版面坐标（相对送进来的图片）：x, y, w, h
     pub rect: (i32, i32, i32, i32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrLine {
+    pub text: String,
+    /// 整行版面坐标（相对送进来的图片）：x, y, w, h
+    pub rect: (i32, i32, i32, i32),
+    /// 行内逐词的精确版面坐标（与 `text` 按空白切出来的词一一对应）。
+    /// 行宽按字数均分的估算不再用——Youdao/QTranslate 都是直接点对点找词。
+    pub words: Vec<OcrWord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -102,18 +115,24 @@ mod win {
             let mut lines = Vec::new();
             for l in r.Lines()? {
                 let text = l.Text()?.to_string_lossy();
-                let mut rect = (i32::MAX, i32::MAX, 0i32, 0i32);
+                let mut words: Vec<OcrWord> = Vec::new();
+                let mut lx0 = i32::MAX;
+                let mut ly0 = i32::MAX;
+                let mut lx1 = 0i32;
+                let mut ly1 = 0i32;
                 for w in l.Words()? {
+                    let wt = w.Text()?.to_string_lossy();
                     let b = w.BoundingRect()?;
                     let (x0, y0) = (b.X as i32, b.Y as i32);
                     let (x1, y1) = (x0 + b.Width as i32, y0 + b.Height as i32);
-                    rect.0 = rect.0.min(x0);
-                    rect.1 = rect.1.min(y0);
-                    rect.2 = rect.2.max(x1);
-                    rect.3 = rect.3.max(y1);
+                    words.push(OcrWord { text: wt, rect: (x0, y0, x1 - x0, y1 - y0) });
+                    lx0 = lx0.min(x0);
+                    ly0 = ly0.min(y0);
+                    lx1 = lx1.max(x1);
+                    ly1 = ly1.max(y1);
                 }
-                let rect = if rect.0 == i32::MAX { (0, 0, 0, 0) } else { (rect.0, rect.1, rect.2 - rect.0, rect.3 - rect.1) };
-                lines.push(OcrLine { text, rect });
+                let rect = if lx0 == i32::MAX { (0, 0, 0, 0) } else { (lx0, ly0, lx1 - lx0, ly1 - ly0) };
+                lines.push(OcrLine { text, rect, words });
             }
             let raw: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
             let text = crate::text::merge_ocr_lines(&raw);
