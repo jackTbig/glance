@@ -600,12 +600,18 @@ impl App {
         let Some(rx) = self.file_events.as_ref() else { return };
         let mut last: Option<crate::file_translate::FileEvent> = None;
         let mut count = 0usize;
+        let mut sender_dropped = false;
         while let Ok(ev) = rx.try_recv() {
             last = Some(ev);
             count += 1;
             if count > 64 {
                 break;
             }
+        }
+        // 一次 try_recv 拿到 Err，可能是「空」也可能是「发送端关闭」；
+        // 关闭表示后台线程已结束，整个字段清掉，下次点击托盘能正常起新任务
+        if let Err(crossbeam_channel::TryRecvError::Disconnected) = rx.try_recv() {
+            sender_dropped = true;
         }
         if let Some(ev) = last {
             match ev {
@@ -626,6 +632,9 @@ impl App {
                     ctx.request_repaint();
                 }
             }
+        }
+        if sender_dropped {
+            self.file_events = None;
         }
     }
 
@@ -935,7 +944,7 @@ impl App {
                         let _ = tx.send(ev.clone());
                     },
                 );
-                let _ = translator; // 持引用让 Arc 计数不归零
+                drop(translator); // 显式 drop：让 Arc 计数归零，UI 端改 cfg 后不会被这条链锁住
             })
             .expect("起后台线程失败");
     }
