@@ -7,6 +7,7 @@ pub mod config;
 pub mod dict;
 pub mod engine;
 pub mod extension;
+pub mod file_translate;
 pub mod manual;
 pub mod models;
 pub mod offline;

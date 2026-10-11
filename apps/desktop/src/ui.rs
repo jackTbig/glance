@@ -135,6 +135,8 @@ pub struct App {
     capturer: Arc<Capturer>,
     engine: Engine,
     events: Receiver<Event>,
+    /// 文件翻译后台线程的事件流（点击托盘「翻译文件…」时启动）
+    file_events: Option<Receiver<crate::file_translate::FileEvent>>,
     triggers: Receiver<Trigger>,
     watcher: Watcher,
     _hotkeys: GlobalHotKeyManager,
@@ -337,6 +339,7 @@ impl App {
             capturer,
             engine,
             events,
+            file_events: None,
             triggers,
             watcher,
             _hotkeys: hk,
@@ -592,7 +595,42 @@ impl App {
         }
     }
 
+    /// 文件翻译后台线程的事件流（点击托盘「翻译文件…」时启动）
+    fn drain_file_events(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.file_events.as_ref() else { return };
+        let mut last: Option<crate::file_translate::FileEvent> = None;
+        let mut count = 0usize;
+        while let Ok(ev) = rx.try_recv() {
+            last = Some(ev);
+            count += 1;
+            if count > 64 {
+                break;
+            }
+        }
+        if let Some(ev) = last {
+            match ev {
+                crate::file_translate::FileEvent::Started { path, .. } => {
+                    tracing::info!("文件翻译开始：{}", path.display());
+                }
+                crate::file_translate::FileEvent::Progress { path, done, total } => {
+                    tracing::debug!("文件翻译进度：{} {done}/{total}", path.display());
+                }
+                crate::file_translate::FileEvent::Done { path, output } => {
+                    let msg = format!("已保存：{}\n源文件：{}", output.display(), path.display());
+                    self.notice("文件翻译", msg, (0, 0));
+                    ctx.request_repaint();
+                }
+                crate::file_translate::FileEvent::Failed { path, error } => {
+                    let msg = format!("{}\n{}", path.display(), error);
+                    self.notice("文件翻译失败", msg, (0, 0));
+                    ctx.request_repaint();
+                }
+            }
+        }
+    }
+
     fn drain_events(&mut self, ctx: &egui::Context) {
+        self.drain_file_events(ctx);
         while let Ok(e) = self.events.try_recv() {
             let seq = match &e {
                 Event::Shot { seq, .. }
@@ -716,7 +754,7 @@ impl App {
     fn drain_tray(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         use crate::tray::{
             MENU_CAPTION_CLICKABLE, MENU_CAPTION_MINI, MENU_CAPTION_PAUSE, MENU_CAPTION_SETTINGS, MENU_CAPTION_TOGGLE,
-            MENU_DIRECTION, MENU_MAIN, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
+            MENU_DIRECTION, MENU_FILE_TRANSLATE, MENU_MAIN, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
         };
         use desktop_shell::caption_ipc::Command;
         use desktop_shell::tray::{Action, Input};
@@ -748,6 +786,7 @@ impl App {
         let hwnd = window_handle_of(frame);
         let mut items = vec![
             (MENU_MAIN, "翻译窗口…".to_string(), false),
+            (MENU_FILE_TRANSLATE, "翻译文件…".to_string(), false),
             (MENU_SETTINGS, "设置…".to_string(), false),
             (MENU_PAUSE, "暂停取词".to_string(), self.paused),
             (
@@ -779,6 +818,7 @@ impl App {
         items.push((MENU_QUIT, "退出".to_string(), false));
         match crate::tray::show_menu(hwnd, x, y, &items) {
             Some(MENU_MAIN) => self.open_main(),
+            Some(MENU_FILE_TRANSLATE) => self.start_file_translate(hwnd),
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_DIRECTION) => self.flip_direction(),
             Some(id) if Feature::from_menu_id(id).is_some() => {
@@ -849,7 +889,58 @@ impl App {
         self.notice_until = Some(Instant::now() + Duration::from_millis(1600));
     }
 
-    fn close_panel(&mut self) {
+    /// 托盘「翻译文件…」：弹文件对话框，多选；在后台线程翻译；进度事件走 `file_events` 通道
+    fn start_file_translate(&mut self, _hwnd: isize) {
+        // 已有任务在跑就忽略——文件翻译不是高频动作，再点一次不会出问题，但事件流会被新值覆盖
+        if self.file_events.is_some() {
+            tracing::info!("文件翻译已在进行，忽略本次触发");
+            return;
+        }
+        let paths = crate::file_translate::pick_files_dialog(Some(_hwnd));
+        let Some(paths) = paths else { return };
+        if paths.is_empty() {
+            return;
+        }
+        tracing::info!("文件翻译：用户选了 {} 个文件", paths.len());
+
+        let (tx, rx) = crossbeam_channel::unbounded::<crate::file_translate::FileEvent>();
+        self.file_events = Some(rx);
+
+        // 复制一份 cfg 与 translator，让后台线程自给自足——不持 App 的引用，避免生命周期与 UI 冲突
+        let cfg = self.cfg.translator_config();
+        let translator = self.translator.clone();
+        std::thread::Builder::new()
+            .name("file-translate".into())
+            .spawn(move || {
+                // 在线程里构造 Translator：避免在 UI 线程持锁太久（多文件大文档时会让热键、托盘都卡住）
+                let tr = match ai_translate::Translator::new(cfg) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = tx.send(crate::file_translate::FileEvent::Failed {
+                            path: paths.first().cloned().unwrap_or_default(),
+                            error: format!("构造翻译器失败：{e}"),
+                        });
+                        return;
+                    }
+                };
+                let _ = tx.send(crate::file_translate::FileEvent::Started {
+                    path: paths.first().cloned().unwrap_or_default(),
+                    total: 0,
+                });
+                let _summary = crate::file_translate::translate_paths(
+                    paths,
+                    &tr,
+                    20,
+                    |ev| {
+                        let _ = tx.send(ev.clone());
+                    },
+                );
+                let _ = translator; // 持引用让 Arc 计数不归零
+            })
+            .expect("起后台线程失败");
+    }
+
+fn close_panel(&mut self) {
         self.float_win = None;
         self.notice_until = None;
         self.logged_icon_at = None;

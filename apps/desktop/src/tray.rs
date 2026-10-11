@@ -24,6 +24,8 @@ pub const MENU_CAPTION_CLICKABLE: u32 = 13;
 pub const MENU_CAPTION_SETTINGS: u32 = 14;
 /// 打开主窗口（手动输入翻译）
 pub const MENU_MAIN: u32 = 15;
+/// 翻译文件…（弹文件选择对话框）
+pub const MENU_FILE_TRANSLATE: u32 = 16;
 
 /// 图标：编译期嵌进来的 PNG（见 `assets/gen_icon.ps1`）。
 /// 32 px 是托盘的常用尺寸；系统需要别的尺寸会自己缩。
@@ -65,6 +67,7 @@ mod tests {
             MENU_CAPTION_CLICKABLE,
             MENU_CAPTION_SETTINGS,
             MENU_MAIN,
+            MENU_FILE_TRANSLATE,
         ];
         let mut sorted = ids.to_vec();
         sorted.sort_unstable();
