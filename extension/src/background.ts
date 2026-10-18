@@ -50,6 +50,15 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
           });
           return { ok: true, results: r.results ?? [] };
         }
+        case "lookup_offline": {
+          const body = JSON.stringify({ text: msg.text });
+          const r = await callLocal("/v1/lookup_offline", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+          return { ok: true, offline: r as { found: boolean; text?: string } };
+        }
         default:
           return { ok: false, error: "未知消息" };
       }
@@ -69,13 +78,13 @@ chrome.runtime.onMessage.addListener((msg: Message, _sender, sendResponse) => {
  * 用户一划词就得到 "Extension context invalidated"，只能自己刷新页面。
  */
 chrome.runtime.onInstalled.addListener(async () => {
-  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*", "file://*/*"] });
   for (const tab of tabs) {
     if (tab.id === undefined) continue;
     try {
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
     } catch {
-      // 有些页面不让注入（下载页、PDF 查看器等），跳过就是
+      // 有些页面不让注入（下载页、PDF 查看器、用户没勾「允许访问文件网址」），跳过就是
     }
   }
 });

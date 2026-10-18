@@ -208,6 +208,13 @@ async function translate(scene: Scene, items: TranslateItem[], context?: string)
   return (r as { ok: true; results: TranslateResult[] }).results;
 }
 
+/** 划词/悬停取到单词时，先查本地词库秒出释义，模型回来再覆盖 */
+async function lookupOffline(text: string): Promise<{ found: boolean; text?: string }> {
+  const r = await send({ kind: "lookup_offline", text });
+  if (!r.ok) return { found: false };
+  return (r as { ok: true; offline: { found: boolean; text?: string } }).offline;
+}
+
 // ---------------- 整页翻译 ----------------
 
 /** 把元素里原有的内容包进 .tt-original 壳（只包一次） */
@@ -540,22 +547,44 @@ function closePanel(force = false) {
 
 /** 卡片「复制」拿走的文本：词典卡是整理后的条目，普通卡是译文 */
 let panelCopyText = "";
+/** 卡片「朗读」要读的原文（取词时拿到的，划词/悬停/截屏都共用） */
+let panelOriginal = "";
 /** 卡片的触发点（页面坐标）。内容到手后卡片会变高，要按它重摆，否则底部被视口切掉 */
 let panelAnchor = { x: 0, y: 0 };
+
+/** 朗读原文：调 Web Speech API。点新按钮会打断上一次（speak() 内部 cancel）。
+ *  不读译文（用户要求"只读原文"）—— 原文是英文单词/句子，TTS 引擎发音最准。 */
+function speak(text: string): void {
+  const t = text.trim();
+  if (!t) return;
+  if (!("speechSynthesis" in window)) {
+    toast("当前浏览器不支持朗读", 1600);
+    return;
+  }
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = /[一-鿿]/.test(t) ? "zh-CN" : "en-US";
+    window.speechSynthesis.speak(u);
+  } catch (e) {
+    toast("朗读失败：" + (e as Error).message, 1600);
+  }
+}
 
 function showPanel(x: number, y: number, title: string, original: string) {
   ensureStyle();
   closePanel(true);
   panelCopyText = "";
+  panelOriginal = original;
   panelAnchor = { x, y };
   const p = document.createElement("div");
   p.id = "tt-panel";
   // 头部与桌面端一致：场景名 · 来源，右侧 复制 / 钉住 / 关闭
-  p.innerHTML = `<div class="tt-head"><span class="tt-title"></span><span class="tt-from">· 网页</span><button class="tt-copy" title="复制">⎘</button><button title="钉住">📍</button><button title="关闭">✕</button></div>
+  p.innerHTML = `<div class="tt-head"><span class="tt-title"></span><span class="tt-from">· 网页</span><button class="tt-copy" title="复制">⎘</button><button title="朗读">🔊</button><button title="钉住">📍</button><button title="关闭">✕</button></div>
     <div class="tt-src"></div><div class="tt-body">翻译中…</div>`;
   (p.querySelector(".tt-title") as HTMLElement).textContent = title;
   (p.querySelector(".tt-src") as HTMLElement).textContent = original.length > 160 ? original.slice(0, 160) + "…" : original;
-  const [copy, pin, close] = Array.from(p.querySelectorAll("button")) as HTMLButtonElement[];
+  const [copy, speakBtn, pin, close] = Array.from(p.querySelectorAll("button")) as HTMLButtonElement[];
   copy.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!panelCopyText) return;
@@ -565,6 +594,10 @@ function showPanel(x: number, y: number, title: string, original: string) {
     } catch {
       toast("复制失败：这个页面不允许写剪贴板", 2200);
     }
+  });
+  speakBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    speak(panelOriginal);
   });
   pin.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -607,11 +640,23 @@ function el(tag: string, cls: string, text?: string): HTMLElement {
  * 每块都可能缺（模型不知道就整行省略），所以逐块判空，不连坐。
  * **一律 textContent，不拼 HTML**：内容来自模型输出，拼进 innerHTML 等于把页面交给它。
  */
-function setPanelDict(e: DictEntry, original: string) {
+function setPanelDict(e: DictEntry, original: string, offline = false) {
   const body = panel?.querySelector(".tt-body") as HTMLElement | null;
   if (!body) return;
   // 词头本身就是原文，不再另起一行灰字——与桌面端一致
   panel?.querySelector(".tt-src")?.remove();
+  if (offline) {
+    // 标「离线」让用户知道「这只是占位，模型的会替换」——不标就分不清是结果还是还在转
+    const head = panel?.querySelector(".tt-head");
+    head?.querySelector(".tt-offline-tag")?.remove();
+    const tag = el("span", "tt-offline-tag", "· 离线");
+    tag.style.color = "rgb(200,160,80)";
+    tag.style.fontSize = "12px";
+    tag.title = "本地词库秒出的释义，模型回来后会替换";
+    head?.appendChild(tag);
+  } else {
+    panel?.querySelector(".tt-offline-tag")?.remove();
+  }
   body.textContent = "";
   const head = e.head || original.trim();
   if (head) body.appendChild(el("div", "tt-dict-head", head));
@@ -660,6 +705,17 @@ async function translateSelection(x: number, y: number) {
   // 取到单个词或短语给词典卡，句子给译文卡。标题也跟桌面端一样叫「取词释义」
   const word = looksLikeWord(text);
   showPanel(x, y, word ? "取词释义" : "划词翻译", text);
+
+  // 单词：先拿离线、模型跟上；句子：直接走模型
+  if (word) {
+    lookupOffline(text).then((o) => {
+      if (o.found && o.text) {
+        const e = parseDictEntry(o.text);
+        if (e) setPanelDict(e, text, true);
+      }
+    }).catch(() => { /* 离线失败不打扰，等模型回 */ });
+  }
+
   try {
     const [r] = await translate(word ? "word" : "selection", [{ id: "s", text }]);
     if (r.text === undefined) {
@@ -668,7 +724,7 @@ async function translateSelection(x: number, y: number) {
       // 模型没按格式回（一条标记都没有）就退回普通译文，别给一张空词典卡
       const entry = word ? parseDictEntry(r.text) : null;
       if (entry) {
-        setPanelDict(entry, text);
+        setPanelDict(entry, text, false);
       } else {
         setPanelBody(r.text);
         panelCopyText = r.text;

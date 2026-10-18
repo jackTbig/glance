@@ -110,11 +110,18 @@ export interface TranslateResult {
   error?: string;
 }
 
+/** background → content：本地词库查词结果 */
+export interface LookupOfflineResult {
+  found: boolean;
+  text?: string;
+}
+
 /** background ← content 的消息 */
 export type Message =
   | { kind: "translate"; scene: Scene; items: TranslateItem[]; context?: string }
   | { kind: "health" }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "lookup_offline"; text: string };
 
 /** popup / background → content script */
 export type PageCommand =
@@ -129,6 +136,7 @@ export type Reply =
   | { ok: true; results: TranslateResult[] }
   | { ok: true; health: Health }
   | { ok: true; settings: Settings }
+  | { ok: true; offline: LookupOfflineResult }
   | { ok: false; error: string };
 
 /** 服务未运行时给用户看的提示 */

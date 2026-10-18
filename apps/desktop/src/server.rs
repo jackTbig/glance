@@ -1,9 +1,10 @@
 //! 本地 HTTP 服务：只绑 127.0.0.1，给 Chrome 插件调用。
 //!
 //! 接口：
-//! - `GET  /v1/health`     → 版本、后端、并发上限
-//! - `POST /v1/translate`  → `{ scene, items: [{id, text, is_html}], context? }` → `{ results: [{id, text?, error?}] }`
-//! - `OPTIONS *`           → CORS 预检
+//! - `GET  /v1/health`        → 版本、后端、并发上限
+//! - `POST /v1/translate`     → `{ scene, items: [{id, text, is_html}], context? }` → `{ results: [{id, text?, error?}] }`
+//! - `POST /v1/lookup_offline`→ `{ text }` → `{ found: bool, text?: string }` — 插件划词先秒出本地词库条目，模型回来再覆盖
+//! - `OPTIONS *`              → CORS 预检
 //!
 //! 来源校验：只接受 `chrome-extension://` 开头的 Origin（可在配置里进一步限定扩展 id）；
 //! 网页发来的请求一律 403，防止任意站点借本机服务翻译。
@@ -49,6 +50,20 @@ pub struct TranslateRequest {
     pub context: Option<String>,
 }
 
+/// `POST /v1/lookup_offline` 的请求体
+#[derive(Debug, serde::Deserialize)]
+pub struct LookupOfflineRequest {
+    pub text: String,
+}
+
+/// `POST /v1/lookup_offline` 的响应：`found=false` 表示没词库或查无此词
+#[derive(Debug, serde::Serialize)]
+pub struct LookupOfflineResponse {
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct ReqItem {
     pub id: String,
@@ -69,6 +84,41 @@ pub struct ResItem {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// 词库：进程内只开一次。`None` = 没装词库或打开失败。`lookup` 要 &mut self，所以得用 Mutex
+type SharedDict = Arc<Mutex<Option<offline_dict::Dict>>>;
+
+/// 打开词库（找不到 / 打不开都返回 None，不报错——离线查词是"有就快"而不是"没就坏"）
+pub fn open_shared_dict() -> SharedDict {
+    let dict = crate::offline::dict_path()
+        .and_then(|p| match offline_dict::Dict::open(&p) {
+            Ok(d) => {
+                tracing::info!("服务侧已加载离线词库：{} 条（{}）", d.len(), p.display());
+                Some(d)
+            }
+            Err(e) => {
+                tracing::warn!("服务侧打开离线词库失败：{e}");
+                None
+            }
+        });
+    Arc::new(Mutex::new(dict))
+}
+
+/// 查离线词库。返回 `(found, marker_text)`：found=false 表示没词库或查无此词，
+/// text 始终是模型那套行标记格式，扩展端拿到直接调现有的 dict.ts 解析器画卡
+pub fn handle_lookup_offline(dict: &SharedDict, text: &str) -> LookupOfflineResponse {
+    let mut g = dict.lock().unwrap();
+    let Some(dict) = g.as_mut() else {
+        return LookupOfflineResponse { found: false, text: None };
+    };
+    match dict.lookup(text) {
+        Some((entry, restored)) => {
+            let markers = crate::offline::to_markers(&entry, restored, text);
+            LookupOfflineResponse { found: true, text: Some(markers) }
+        }
+        None => LookupOfflineResponse { found: false, text: None },
+    }
 }
 
 /// 把请求交给翻译核心；与 HTTP 无关，便于单测
@@ -135,10 +185,12 @@ impl ServerHandle {
 const WORKERS: usize = 8;
 
 /// 起服务。`translator` 用 Mutex 包着以便设置变更后热替换。
+/// `dict` 是离线词库（可能没装/打不开 → 查词返回 found:false），给扩展端"先离线后模型"用
 pub fn spawn(
     port: u16,
     allowed_ids: Vec<String>,
     translator: Arc<Mutex<Translator>>,
+    dict: SharedDict,
     app_version: &'static str,
 ) -> anyhow::Result<ServerHandle> {
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("本地服务无法监听 {port} 端口：{e}"))?;
@@ -152,6 +204,7 @@ pub fn spawn(
       let stop2 = stop.clone();
       let allowed_ids = allowed_ids.clone();
       let translator = translator.clone();
+      let dict = dict.clone();
       let seen = seen.clone();
       std::thread::Builder::new().name(format!("local-server-{i}")).spawn(move || {
         loop {
@@ -217,6 +270,23 @@ pub fn spawn(
                         })
                     };
                     let _ = request.respond(json_response(200, &cfg_summary, origin.as_deref()));
+                }
+                ("POST", "/v1/lookup_offline") => {
+                    let mut raw = Vec::new();
+                    if std::io::Read::read_to_end(&mut request.as_reader(), &mut raw).is_err() {
+                        let _ = request.respond(json_response(400, &serde_json::json!({ "error": "读取请求体失败" }), origin.as_deref()));
+                        continue;
+                    }
+                    let body = String::from_utf8_lossy(&raw).into_owned();
+                    let parsed: Result<LookupOfflineRequest, _> = serde_json::from_str(&body);
+                    let resp = match parsed {
+                        Err(e) => json_response(400, &serde_json::json!({ "error": format!("请求格式错误：{e}") }), origin.as_deref()),
+                        Ok(req) => {
+                            let r = handle_lookup_offline(&dict, &req.text);
+                            json_response(200, &serde_json::to_value(r).unwrap(), origin.as_deref())
+                        }
+                    };
+                    let _ = request.respond(resp);
                 }
                 ("POST", "/v1/translate") => {
                     // 按字节读再宽松解码：请求体若有不完整的多字节字符，
@@ -300,5 +370,31 @@ mod tests {
         let r = TranslateResponse { results: vec![ResItem { id: "a".into(), text: Some("译".into()), error: None }] };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, r#"{"results":[{"id":"a","text":"译"}]}"#);
+    }
+
+    #[test]
+    fn lookup_offline_response_skips_text_when_not_found() {
+        // 没装词库 / 查无此词 → found=false, text 不出现
+        let r = LookupOfflineResponse { found: false, text: None };
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, r#"{"found":false}"#);
+    }
+
+    #[test]
+    fn lookup_offline_response_includes_text_when_found() {
+        let r = LookupOfflineResponse { found: true, text: Some("#词 glance".into()) };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains(r#""found":true"#), "{s}");
+        assert!(s.contains(r#""text":"#), "{s}");
+    }
+
+    /// 查无此词时 found=false。本机的真实词库在 dev path 上，避开它直接用查不到的字符串。
+    /// 跑这条时假定整台机器的词库里都没这个串；机器自带词库的话这条仍是绿的——这串明显是合成字符串
+    #[test]
+    fn lookup_offline_not_in_dict() {
+        let dict = open_shared_dict();
+        let r = handle_lookup_offline(&dict, "xyzqwertynonsensewordzzz");
+        assert!(!r.found, "虚构字符串不该查到：{r:?}");
+        assert!(r.text.is_none());
     }
 }

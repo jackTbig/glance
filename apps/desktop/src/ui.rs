@@ -290,7 +290,8 @@ impl App {
         }
 
         let server = if cfg.server.enabled {
-            match crate::server::spawn(cfg.server.port, cfg.server.allowed_extension_ids.clone(), translator.clone(), APP_VERSION) {
+            let dict = crate::server::open_shared_dict();
+            match crate::server::spawn(cfg.server.port, cfg.server.allowed_extension_ids.clone(), translator.clone(), dict, APP_VERSION) {
                 Ok(h) => Some(h),
                 Err(e) => {
                     tracing::error!("{e}");
@@ -1694,16 +1695,19 @@ impl App {
                         if ui.small_button(pin_label).on_hover_text("钉住不自动关闭").clicked() {
                             pin_toggled = true;
                         }
+                        if ui.small_button("🔊").on_hover_text("朗读原文").clicked() {
+                            crate::tts::speak(&p.original);
+                        }
                         let copy_hint = if entry.is_some() { "复制释义" } else { "复制译文" };
                         if ui.small_button("⎘").on_hover_text(copy_hint).clicked() {
                             copy = true;
                         }
                     });
                 });
-                // 标题栏当拖动手柄。右边留出三个按钮的宽度不参与拖动：
+                // 标题栏当拖动手柄。右边留出四个按钮的宽度不参与拖动：
                 // 手柄压在按钮上会把点击一起吃掉，表现是「关不掉也钉不住」。
                 let mut handle = head.response.rect;
-                handle.max.x = (handle.max.x - 112.0).max(handle.min.x);
+                handle.max.x = (handle.max.x - 152.0).max(handle.min.x);
                 let dr = ui.interact(handle, ui.id().with("panel-drag"), egui::Sense::drag());
                 if dr.hovered() || dr.dragged() {
                     ui.ctx().set_cursor_icon(if dr.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
