@@ -2579,6 +2579,9 @@ impl App {
                             if ui.small_button(if copied { "已复制" } else { "复制" }).clicked() {
                                 copy = Some(entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| markers.clone()));
                             }
+                            if ui.small_button("🔊").on_hover_text("朗读原文").clicked() {
+                                crate::tts::speak(self.manual.input.trim());
+                            }
                         });
                     });
                     ui.add_space(4.0);
@@ -2607,6 +2610,9 @@ impl App {
                                 if ui.small_button(if copied { "已复制" } else { "复制" }).clicked() {
                                     // 词典条目复制整理过的文字，不是带 #标记 的原始回包（与浮动卡片一致）
                                     copy = Some(entry.as_ref().map(|e| e.to_plain()).unwrap_or_else(|| self.manual.result.clone()));
+                                }
+                                if ui.small_button("🔊").on_hover_text("朗读原文").clicked() {
+                                    crate::tts::speak(&self.manual.original);
                                 }
                             });
                         }
