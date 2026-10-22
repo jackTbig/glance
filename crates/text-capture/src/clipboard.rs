@@ -178,7 +178,7 @@ mod win {
     /// 用户刚点了简译的图标，简译此刻是前台，有权把前台交出去；
     /// 仍然先把输入队列挂到前台线程与目标线程上——没有前台权限时 SetForegroundWindow 会被系统忽略
     /// （托盘弹菜单用的是同一招）。
-    fn bring_to_front(target: isize) -> bool {
+    pub fn bring_to_front(target: isize) -> bool {
         unsafe {
             if GetForegroundWindow() as isize == target {
                 return true;
@@ -273,7 +273,7 @@ mod win {
 }
 
 #[cfg(windows)]
-pub use win::{class_name, foreground_window, sequence_number, foreign_foreground_window, get_text, selected_text, selected_text_from, set_text};
+pub use win::{class_name, foreground_window, sequence_number, foreign_foreground_window, get_text, selected_text, selected_text_from, set_text, bring_to_front};
 
 #[cfg(not(windows))]
 pub fn class_name(_hwnd: isize) -> String {
@@ -307,6 +307,18 @@ pub fn is_terminal_class(class: &str) -> bool {
     TERMINALS.contains(&class)
 }
 
+/// 这个窗口类是不是 Chromium 系浏览器。
+///
+/// Chrome / Edge / Brave / Vivaldi / Opera / Arc 都是这一个类名（Firefox 是另一个）。
+///
+/// **浏览器里不能靠模拟 Ctrl+C 取选区**：2026-10-22 Jack 实测，同一个 Chrome 窗口连着两次
+/// 「模拟 Ctrl+C 后剪贴板已更新，取到 0 字」——剪贴板序号变了（说明复制确实发生了）
+/// 但内容是空串，划词因此没取到；同一个窗口里悬停取词（也走无障碍接口）却能读到选区。
+/// 浏览器改走无障碍接口读选区，读不到再退回 Ctrl+C。
+pub fn is_browser_class(class: &str) -> bool {
+    class == "Chrome_WidgetWin_1"
+}
+
 #[cfg(not(windows))]
 pub fn get_text() -> anyhow::Result<String> {
     anyhow::bail!("当前平台不支持剪贴板")
@@ -327,6 +339,10 @@ pub fn selected_text_from(_target: Option<isize>) -> anyhow::Result<String> {
 pub fn foreign_foreground_window() -> Option<isize> {
     None
 }
+#[cfg(not(windows))]
+pub fn bring_to_front(_target: isize) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod terminal_tests {
@@ -340,6 +356,17 @@ mod terminal_tests {
         }
         for c in ["Notepad", "Chrome_WidgetWin_1", "", "cascadia_hosting_window_class"] {
             assert!(!is_terminal_class(c), "{c}");
+        }
+    }
+
+    /// 浏览器要单独认：它的选区走无障碍接口读，不能发 Ctrl+C
+    #[test]
+    fn chromium_browsers_are_recognised() {
+        for c in ["Chrome_WidgetWin_1"] {
+            assert!(is_browser_class(c), "{c}");
+        }
+        for c in ["Notepad", "CASCADIA_HOSTING_WINDOW_CLASS", "", "chrome_widgetwin_1"] {
+            assert!(!is_browser_class(c), "{c}");
         }
     }
 }

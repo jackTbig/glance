@@ -189,6 +189,32 @@ impl Capturer {
                 ),
             };
         }
+        // 浏览器改走无障碍接口读选区：模拟 Ctrl+C 在浏览器里复制到的是空串
+        // （理由见 clipboard::is_browser_class）。读不到再退回 Ctrl+C 兜底。
+        if clipboard::is_browser_class(&class) {
+            if let Some(u) = &self.uia {
+                match u.selection_in(hwnd) {
+                    Ok(Some(t)) if !t.trim().is_empty() => {
+                        tracing::info!(
+                            "划词目标是浏览器（{class}），改读无障碍接口的选区：{} 字",
+                            t.trim().chars().count()
+                        );
+                        // 选区已经读到手里了，把前台还给浏览器——用户还要接着看这一页。
+                        // 老流程（Ctrl+C）也是这么做的，别让交互习惯变掉。
+                        clipboard::bring_to_front(hwnd);
+                        return Ok(Captured {
+                            text: t.trim().to_string(),
+                            source: Source::Uia,
+                            took_ms: t0.elapsed().as_millis(),
+                        });
+                    }
+                    Ok(None) | Ok(Some(_)) => {
+                        tracing::info!("浏览器里无障碍接口没读到选区，退回模拟 Ctrl+C")
+                    }
+                    Err(e) => tracing::warn!("浏览器里读无障碍接口选区出错：{e}"),
+                }
+            }
+        }
         let text = clipboard::selected_text_from(target)?;
         Ok(Captured { text: text.trim().to_string(), source: Source::Clipboard, took_ms: t0.elapsed().as_millis() })
     }
