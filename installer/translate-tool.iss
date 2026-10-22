@@ -16,7 +16,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.1.4"
+#define AppVer "1.1.5"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -80,13 +80,16 @@ Name: "compact"; Description: "只装简译（划词、悬停、截屏、整页�
 Name: "full"; Description: "简译 + 实时字幕（含识别模型，约 700 MB）"
 Name: "custom"; Description: "自定义"; Flags: iscustom
 
-; 顺序别动：[Code] 的 CurPageChanged 按下标 0..3 给组件页标注「无需升级」
+; 顺序别动：[Code] 的 CurPageChanged 按下标 0..5 给组件页标注「无需升级」
 [Components]
 Name: "glance"; Description: "简译（翻译工具，必装）"; Types: compact full custom; Flags: fixed
 Name: "dict"; Description: "离线词典（29 MB，模型慢或断网时先给本地释义）"; Types: compact full custom
 Name: "caption"; Description: "实时字幕（本机识别英文语音并翻译，需要支持 Vulkan 的显卡）"; Types: full custom
 Name: "caption\turbo"; Description: "large-v3-turbo 模型（最终句定稿，最准，574 MB）"; Types: full custom
 Name: "caption\small"; Description: "base.en 模型（说话过程中逐字上屏，最快，148 MB）"; Types: full custom
+; 英文语音包：WinRT 朗读引擎的英文音色（Microsoft David / Zira Natural）。
+; 装之前读英文会退回系统老音色（Zira Desktop），还能用，但不如新的好听。
+Name: "englishvoice"; Description: "英文语音包（朗读英文用，联网下载约几 MB）"; Types: full custom
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
@@ -121,6 +124,9 @@ Name: "{userstartup}\{#AppNameZh}"; Filename: "{app}\{#AppExe}"; Tasks: startup
 
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "正在安装 VC++ 运行库..."; Components: caption; Check: VCRedistNeedsInstall; Flags: waituntilterminated
+; 英文语音包：Windows 可选功能 Language.TextToSpeech（不是 Language.Speech，那个是语音识别）。
+; 已装则跳过（Check 返回真表示跳过）；装失败不打断安装，装完自检页会报出来。
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0' | Out-Null; exit 0"""; StatusMsg: "正在安装英文语音包（联网下载，可能要几分钟）..."; Components: englishvoice; Check: EnglishVoiceNeeded; Flags: waituntilterminated
 Filename: "{app}\{#AppExe}"; Description: "立即启动 {#AppNameZh}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\extension"; Description: "打开插件目录（Chrome 扩展页用「加载已解压的扩展程序」选它）"; Flags: shellexec nowait postinstall skipifsilent unchecked
 
@@ -411,6 +417,34 @@ begin
 end;
 
 // 组件页上逐项标出升级情况。下标按 [Components] 的顺序：0 简译 / 1 字幕 / 2 turbo / 3 base.en
+// 英文语音包（WinRT 引擎的 OneCore 英文音色）装没装。
+// 看 Speech_OneCore 下有没有语言为 en-US（0x409）的音色 token——
+// 那个注册表树只有 WinRT 引擎看得到，经典 SAPI5 看不到。
+function EnglishVoiceInstalled: Boolean;
+var
+  Names: TArrayOfString;
+  I: Integer;
+  Lang: Cardinal;
+begin
+  Result := False;
+  if not RegGetSubkeyNames(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens', Names) then
+    Exit;
+  for I := 0 to GetArrayLength(Names) - 1 do
+  begin
+    if RegQueryDWordValue(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens\' + Names[I] + '\Attributes', 'Language', Lang) and (Lang = 409) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+// [Run] 的 Check 返回真表示**跳过**这条，所以这里取反
+function EnglishVoiceNeeded: Boolean;
+begin
+  Result := not EnglishVoiceInstalled;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 var
   L: TNewCheckListBox;
@@ -420,7 +454,7 @@ begin
     // 来回翻页会多次进这里，只标一次，免得后缀越叠越长
     ComponentsTagged := True;
     L := WizardForm.ComponentsList;
-    // 下标对应 [Components] 的行序：0 简译 / 1 离线词典 / 2 字幕 / 3 turbo 模型 / 4 base.en 模型。
+    // 下标对应 [Components] 的行序：0 简译 / 1 离线词典 / 2 字幕 / 3 turbo 模型 / 4 base.en 模型 / 5 英文语音包。
     // **加组件要同步改这里**，不然标注会挂到隔壁那一行上
     L.ItemCaption[0] := L.ItemCaption[0] + '　（覆盖升级）';
     if DictPresent then
@@ -431,8 +465,11 @@ begin
       L.ItemCaption[3] := L.ItemCaption[3] + '　（已安装，无需升级）';
     if SmallPresent then
       L.ItemCaption[4] := L.ItemCaption[4] + '　（已安装，无需升级）';
+    if EnglishVoiceInstalled then
+      L.ItemCaption[5] := L.ItemCaption[5] + '　（已安装，无需升级）';
   end;
 end;
+
 
 // 装之前先把依赖结论摆给用户。**只检不装**：能自动装的（VC++ 运行库）在 [Run] 里装，
 // 装不了的（Vulkan 随显卡驱动来）说清影响，让用户自己决定要不要继续。

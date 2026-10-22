@@ -9,7 +9,9 @@ fn main() {
     let app_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
     // 建 Capturer 会去初始化 OCR 引擎；这里只要语言列表，失败也不该让自检本身挂掉
     let langs = std::panic::catch_unwind(|| text_capture::Capturer::new().ocr_languages()).unwrap_or_default();
-    let items = desktop_shell::deps::check_all(app_dir.as_deref(), &langs);
+    // 朗读用的音色列表（WinRT 引擎）。取不到就当没有，不让自检本身挂掉
+    let voices = std::panic::catch_unwind(translate_tool::tts::voice_languages).unwrap_or_default();
+    let items = desktop_shell::deps::check_all(app_dir.as_deref(), &langs, &voices);
 
     print!("{}", desktop_shell::deps::report(&items));
 

@@ -59,6 +59,9 @@ winresource = "0.1"
 mock-llm = { path = "../../tests/mock-llm" }
 
 [target.'cfg(windows)'.dependencies]
+# 朗读：Windows.Media.SpeechSynthesis（WinRT 语音合成，和 Chrome 的 Web Speech 同一套引擎，
+# 能拿到 OneCore 新音色；经典 SAPI5 只认老音色）。Media_Playback 用来放合成出来的音频流。
+windows = { version = "0.62", features = ["Media_SpeechSynthesis", "Media_Core", "Media_Playback", "Storage_Streams", "Foundation"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Registry", "Win32_Graphics_Gdi",

@@ -2443,7 +2443,8 @@ impl App {
     fn refresh_env(&mut self) {
         let app_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
         let langs = self.capturer.ocr_languages();
-        self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs));
+        let voices = crate::tts::voice_languages();
+        self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs, &voices));
     }
 
     /// 主窗口（翻译页）的外框：顶栏（名字 + 设置入口）+ 翻译区。返回是否要关窗。

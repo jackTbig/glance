@@ -74,12 +74,19 @@ impl Fix {
 }
 
 /// 检查这台机器的运行环境。`app_dir` 是程序所在目录（找内嵌的 vc_redist 用）。
-pub fn check_all(app_dir: Option<&std::path::Path>, ocr_languages: &[String]) -> Vec<Item> {
+///
+/// `voice_languages` 是系统里可用的语音音色语言标签（朗读用），由调用方从朗读模块拿。
+pub fn check_all(
+    app_dir: Option<&std::path::Path>,
+    ocr_languages: &[String],
+    voice_languages: &[String],
+) -> Vec<Item> {
     vec![
         vc_redist(app_dir),
         vulkan(),
         ocr_chinese(ocr_languages),
         ocr_english(ocr_languages),
+        english_voice(voice_languages),
         offline_dict(app_dir),
         chrome(),
         cli("claude"),
@@ -181,6 +188,32 @@ fn ocr_english(langs: &[String]) -> Item {
         fix: (!ok).then_some(Fix::Elevated {
             label: "安装英文 OCR 包",
             powershell: "Add-WindowsCapability -Online -Name 'Language.OCR~~~en-US~0.0.1.0'".into(),
+        }),
+    }
+}
+
+/// 英文语音包（朗读用）。**不是硬缺失**：缺了只是英文朗读退回老音色，还能用。
+///
+/// 朗读走 WinRT 引擎（和 Chrome 的 Web Speech 同一套），它只列 OneCore 音色；
+/// 英文那几个（Microsoft David / Zira Natural）要装系统语音包才有。
+/// 没装时读英文会退回 SAPI5 的 Zira Desktop——能用，只是老一点。
+fn english_voice(voice_langs: &[String]) -> Item {
+    let ok = voice_langs.iter().any(|l| l.to_lowercase().starts_with("en"));
+    Item {
+        name: "英文语音包（朗读）",
+        status: if ok { Status::Ok } else { Status::Optional },
+        detail: if ok {
+            "已装".into()
+        } else if voice_langs.is_empty() {
+            "系统里没有可用音色".into()
+        } else {
+            format!("未装（现有：{}）", voice_langs.join("、"))
+        },
+        impact: "英文朗读退回系统老音色（Zira Desktop）；装上后改用 WinRT 的新音色（David / Zira Natural），浏览器插件也会一起变好",
+        how: "以管理员身份运行：Add-WindowsCapability -Online -Name \"Language.TextToSpeech~~~en-US~0.0.1.0\"（安装向导里也有这个可选项）".into(),
+        fix: (!ok).then_some(Fix::Elevated {
+            label: "安装英文语音包",
+            powershell: "Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0'".into(),
         }),
     }
 }
@@ -438,7 +471,7 @@ mod tests {
 
     #[test]
     fn every_item_explains_itself() {
-        let items = check_all(None, &[]);
+        let items = check_all(None, &[], &[]);
         for i in &items {
             assert!(!i.impact.is_empty(), "{} 没写影响，用户无从判断要不要管", i.name);
             assert!(!i.how.is_empty(), "{} 没写办法", i.name);
@@ -446,5 +479,17 @@ mod tests {
                 assert!(i.fix.is_some() || !i.how.is_empty(), "{} 既不能一键修也没给步骤", i.name);
             }
         }
+    }
+
+    /// 英文语音包：没装只是读英文用老音色，不能报成硬缺失吓人
+    #[test]
+    fn english_voice_reads_the_voice_list() {
+        assert_eq!(english_voice(&["en-US".into()]).status, Status::Ok);
+        assert!(english_voice(&["en-US".into()]).fix.is_none(), "装好的不该给修复按钮");
+
+        let none = english_voice(&["zh-CN".into()]);
+        assert_eq!(none.status, Status::Optional);
+        assert!(none.detail.contains("zh-CN"), "要说清现在有哪些音色");
+        assert!(none.fix.as_ref().unwrap().needs_admin(), "装语音包要提权，界面得先告诉用户");
     }
 }
