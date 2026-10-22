@@ -10,8 +10,13 @@
 //! **不处理**：音速/音量/语种切换——简译只读原文一种语言，一种就够了。
 
 use std::io::Write;
+use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+
+/// `CREATE_NO_WINDOW`：不弹控制台窗口。父进程是 GUI 程序（windows_subsystem="windows"），
+/// 但子进程照样会开一个可见的 powershell 窗口——每次点朗读都闪一个黑框，很跳。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 全局朗读器：`None` 表示还没起过进程；`Some(child)` 是当前在跑的 PS 进程
 static SPEAKER: Mutex<Option<Speaker>> = Mutex::new(None);
@@ -51,6 +56,7 @@ pub fn speak(text: &str) {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {
         Ok(mut child) => {
@@ -71,10 +77,20 @@ pub fn speak(text: &str) {
 mod tests {
     use super::*;
 
+    /// 测试串行锁：`SPEAKER` 是全局单槽，几个测试并行跑会互相踩——
+    /// 一个测试的 `speak()` 正好落在另一个测试断言「不该起进程」的窗口里。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 取测试锁。上一条测试 panic 过的话锁中毒，这里照样拿到锁（测试之间不该连坐）。
+    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 不依赖真实 TTS：发空字符串、不应起进程；发普通字符串、应起进程并清理。
     /// 真机朗读听感靠手动验证。
     #[test]
     fn empty_text_does_not_spawn() {
+        let _g = lock_tests();
         // 先清掉前序测试可能残留的进程
         if let Some(mut s) = SPEAKER.lock().unwrap().take() {
             let _ = s.child.kill();
@@ -88,6 +104,7 @@ mod tests {
 
     #[test]
     fn speak_then_speak_replaces() {
+        let _g = lock_tests();
         speak("hello world");
         {
             let slot = SPEAKER.lock().unwrap();
@@ -103,5 +120,33 @@ mod tests {
             let _ = s.child.kill();
             let _ = s.child.wait();
         }
+    }
+
+    /// 回归：生产用的 spawn 必须带 `CREATE_NO_WINDOW`，否则会弹终端窗口。
+    ///
+    /// 真机验证过：GUI 父进程（release 版 `windows_subsystem="windows"`）起 powershell
+    /// 不带这个标志时，屏幕上会多出一个 Windows Terminal 窗口——类名
+    /// `CASCADIA_HOSTING_WINDOW_CLASS`，标题是 powershell.exe 的完整路径。
+    /// 用户点一次朗读闪一个窗口，很跳。
+    ///
+    /// 为什么查源码不查窗口：窗口是否真出现取决于**父进程有没有控制台**。
+    /// 测试进程通常自带控制台，子进程继承它就不新开窗口，测了也是白测
+    /// （去掉标志照样绿）。插件测试也是这么从 `scene.rs` 抠用例跑的。
+    #[test]
+    fn production_spawn_carries_create_no_window() {
+        // 常量值写错会让标志静默失效（宁可不生效也不能弹窗）
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000, "CREATE_NO_WINDOW 的值不对");
+
+        let src = include_str!("tts.rs");
+        // 只看 speak() 里那次 spawn，测试模块自己的 spawn 不算
+        let body = src
+            .split("pub fn speak")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(test)]").next())
+            .expect("找不到 speak()");
+        assert!(
+            body.contains(".creation_flags(CREATE_NO_WINDOW)"),
+            "speak() 起的 powershell 必须带 CREATE_NO_WINDOW，否则会弹终端窗口"
+        );
     }
 }

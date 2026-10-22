@@ -206,11 +206,19 @@ mod tests {
     fn picks_a_port_that_is_actually_free() {
         let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let busy = taken.local_addr().unwrap().port();
-        let got = pick_free_port(busy).expect("总该找得到空端口");
-        assert_ne!(got, busy, "占用的端口不能选");
-        assert!(got > busy && got < busy + 20);
-        // 选出来的确实能绑
-        assert!(std::net::TcpListener::bind(("127.0.0.1", got)).is_ok());
+        // `pick_free_port` bind 完就释放监听器，所以「挑端口」与「再绑一次」之间
+        // 天然有 TOCTOU 窗口——别的进程/线程可能抢走那个端口。重试几次。
+        let mut got = None;
+        for _ in 0..5 {
+            let p = pick_free_port(busy).expect("总该找得到空端口");
+            assert_ne!(p, busy, "占用的端口不能选");
+            assert!(p > busy && p < busy + 20);
+            if std::net::TcpListener::bind(("127.0.0.1", p)).is_ok() {
+                got = Some(p);
+                break;
+            }
+        }
+        assert!(got.is_some(), "挑出来的端口该能绑上（重试 5 次都被抢走了才算失败）");
     }
 
     #[test]

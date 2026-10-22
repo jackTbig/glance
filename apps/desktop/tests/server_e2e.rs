@@ -28,7 +28,15 @@ fn setup() -> (mock_llm::MockServer, server::ServerHandle) {
     cfg.backend.openai_model = "mock".into();
     cfg.backend.max_retries = 0;
     let tr = Translator::new(cfg.translator_config()).unwrap();
-    let h = server::spawn(0, cfg.server.allowed_extension_ids.clone(), Arc::new(Mutex::new(tr)), "test").unwrap();
+    // 词库传 None：本地服务没有词典时 /v1/lookup_offline 照样工作（只是查不到）
+    let h = server::spawn(
+        0,
+        cfg.server.allowed_extension_ids.clone(),
+        Arc::new(Mutex::new(tr)),
+        Arc::new(Mutex::new(None)),
+        "test",
+    )
+    .unwrap();
     (mock, h)
 }
 
