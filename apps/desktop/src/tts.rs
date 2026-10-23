@@ -76,7 +76,9 @@ fn is_cjk(c: char) -> bool {
 /// 用 PowerShell shim 是为了不引 SAPI COM 绑定：System.Speech 是 .NET Framework 自带，
 /// PowerShell 一句 `Add-Type -AssemblyName System.Speech` 就把它加载进来了。
 ///
-/// 只在没有对应语言的 WinRT 音色时才走这条路（比如没装英文语音包时读英文）。
+/// **只在 WinRT 整个不可用时才走这条路**：这套是老的 SAPI5 引擎，机器味重
+/// （Jack 2026-10-23 报「主程序的朗读还是机器味」就是落到了这里）。
+/// 哪怕语言对不上，也宁可让 WinRT 的默认音色念——那和浏览器插件是同一个引擎。
 fn sapi_speak(text: &str) {
     if text.trim().is_empty() {
         return;
@@ -153,16 +155,22 @@ mod win {
                 // 下面换上新音频流再 Play()，旧的那段就断了。
                 let _ = p.Pause();
             }
-            match voice_for(&text) {
-                Some(voice) => {
-                    if let Err(e) = play(&text, &voice, player.as_ref()) {
+            // 优先挑语言对得上的音色；没有就用系统默认音色（**不要退回 SAPI**——
+            // 那套是老的 SAPI5 引擎，机器味重；WinRT 默认音色和浏览器插件是同一个引擎，
+            // 听感一致。Jack 2026-10-23 报「主程序的朗读还是机器味」就是退回 SAPI 造成的）
+            let voice = voice_for(&text).or_else(default_voice);
+            match voice {
+                Some(v) => {
+                    if let Err(e) = play(&text, &v, player.as_ref()) {
                         tracing::warn!("WinRT 朗读失败（{e}），退回系统自带朗读");
                         sapi_speak(&text);
                     }
                 }
-                // 这个语言没有 WinRT 音色（比如没装英文语音包时读英文）：
-                // SAPI5 那边有 Zira Desktop，宁可用它也别让英文变成中文口音
-                None => sapi_speak(&text),
+                // WinRT 整个不可用（没装语音合成组件等），才走老路
+                None => {
+                    tracing::warn!("系统没有可用语音音色，退回系统自带朗读");
+                    sapi_speak(&text);
+                }
             }
         }
     }
@@ -170,12 +178,12 @@ mod win {
     /// 挑一个念这段文本的音色。系统默认音色语言对得上就用它（用户可能自己换过默认）。
     pub(super) fn voice_for(text: &str) -> Option<VoiceInformation> {
         let prefix = lang_prefix(text);
-        let voices = SpeechSynthesizer::AllVoices().ok()?;
-        if let Ok(def) = SpeechSynthesizer::DefaultVoice() {
+        if let Some(def) = default_voice() {
             if lang_of(&def).to_lowercase().starts_with(prefix) {
                 return Some(def);
             }
         }
+        let voices = SpeechSynthesizer::AllVoices().ok()?;
         let n = voices.Size().unwrap_or(0);
         for i in 0..n {
             let Ok(v) = voices.GetAt(i) else { continue };
@@ -184,6 +192,11 @@ mod win {
             }
         }
         None
+    }
+
+    /// 系统默认音色。没有匹配语言的音色时用它——**和浏览器插件同一套引擎**。
+    fn default_voice() -> Option<VoiceInformation> {
+        SpeechSynthesizer::DefaultVoice().ok()
     }
 
     fn lang_of(v: &VoiceInformation) -> String {
@@ -199,6 +212,12 @@ mod win {
         let player = player.ok_or_else(|| anyhow::anyhow!("音频播放器不可用"))?;
         player.SetStreamSource(&ras)?;
         player.Play()?;
+        tracing::info!(
+            "朗读：WinRT 引擎，音色 {:?}（{}），{} 字",
+            voice.DisplayName().map(|s| s.to_string_lossy().to_string()),
+            lang_of(voice),
+            text.chars().count()
+        );
         Ok(())
     }
 

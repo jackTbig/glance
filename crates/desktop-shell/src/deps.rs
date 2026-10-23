@@ -192,11 +192,11 @@ fn ocr_english(langs: &[String]) -> Item {
     }
 }
 
-/// 英文语音包（朗读用）。**不是硬缺失**：缺了只是英文朗读退回老音色，还能用。
+/// 英文语音包（朗读用）。**不是硬缺失**：缺了只是英文朗读用中文音色念，还能用。
 ///
 /// 朗读走 WinRT 引擎（和 Chrome 的 Web Speech 同一套），它只列 OneCore 音色；
-/// 英文那几个（Microsoft David / Zira Natural）要装系统语音包才有。
-/// 没装时读英文会退回 SAPI5 的 Zira Desktop——能用，只是老一点。
+/// 英文那几个（Microsoft David / Zira / Mark）要装系统语音包才有。
+/// 没装时读英文会拿中文音色念（和浏览器插件一样），没有纯正英文音色。
 fn english_voice(voice_langs: &[String]) -> Item {
     let ok = voice_langs.iter().any(|l| l.to_lowercase().starts_with("en"));
     Item {
@@ -209,11 +209,14 @@ fn english_voice(voice_langs: &[String]) -> Item {
         } else {
             format!("未装（现有：{}）", voice_langs.join("、"))
         },
-        impact: "英文朗读退回系统老音色（Zira Desktop）；装上后改用 WinRT 的新音色（David / Zira Natural），浏览器插件也会一起变好",
-        how: "以管理员身份运行：Add-WindowsCapability -Online -Name \"Language.TextToSpeech~~~en-US~0.0.1.0\"（安装向导里也有这个可选项）".into(),
+        impact: "英文朗读用中文音色念（和浏览器插件一样），没有纯正英文音色；装上后桌面端与插件都会用 Microsoft David / Zira / Mark",
+        how: "以管理员身份运行下面两条（**Basic 必须一起装**，只装 TextToSpeech 会因缺依赖挂死半小时报 0x80073712）：\n"
+            .to_string()
+            + "Add-WindowsCapability -Online -Name \"Language.Basic~~~en-US~0.0.1.0\"\n"
+            + "Add-WindowsCapability -Online -Name \"Language.TextToSpeech~~~en-US~0.0.1.0\"",
         fix: (!ok).then_some(Fix::Elevated {
             label: "安装英文语音包",
-            powershell: "Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0'".into(),
+            powershell: "Add-WindowsCapability -Online -Name 'Language.Basic~~~en-US~0.0.1.0' | Out-Null; Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0' | Out-Null".into(),
         }),
     }
 }

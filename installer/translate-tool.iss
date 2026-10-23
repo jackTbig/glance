@@ -16,7 +16,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.1.5"
+#define AppVer "1.1.6"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -124,9 +124,13 @@ Name: "{userstartup}\{#AppNameZh}"; Filename: "{app}\{#AppExe}"; Tasks: startup
 
 [Run]
 Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "正在安装 VC++ 运行库..."; Components: caption; Check: VCRedistNeedsInstall; Flags: waituntilterminated
-; 英文语音包：Windows 可选功能 Language.TextToSpeech（不是 Language.Speech，那个是语音识别）。
-; 已装则跳过（Check 返回真表示跳过）；装失败不打断安装，装完自检页会报出来。
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0' | Out-Null; exit 0"""; StatusMsg: "正在安装英文语音包（联网下载，可能要几分钟）..."; Components: englishvoice; Check: EnglishVoiceNeeded; Flags: waituntilterminated
+; 英文语音包：Windows 可选功能。
+; **必须 Language.Basic 与 Language.TextToSpeech 一起装**：只装 TextToSpeech 会因为
+; 缺同语言的 Basic 依赖而挂死半小时，最后报 0x80073712（2026-10-23 实测）。
+; 两个一起装 27 秒就完事，装完注册表 Speech_OneCore 下多出 en-US 的音色 token。
+; Check 返回真表示已装、跳过；装失败不打断安装，装完自检页会报出来。
+; 用 job 卡 10 分钟上限：网络不通时别让安装向导一直转。
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""$j = Start-Job {{ Add-WindowsCapability -Online -Name 'Language.Basic~~~en-US~0.0.1.0' | Out-Null; Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0' | Out-Null }}; if (Wait-Job $j -Timeout 600) {{ Receive-Job $j }} else {{ Stop-Job $j; '安装超时（多半是连不上 Windows Update）' }}; exit 0"""; StatusMsg: "正在安装英文语音包（联网下载，可能要几分钟）..."; Components: englishvoice; Check: EnglishVoiceNeeded; Flags: waituntilterminated
 Filename: "{app}\{#AppExe}"; Description: "立即启动 {#AppNameZh}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\extension"; Description: "打开插件目录（Chrome 扩展页用「加载已解压的扩展程序」选它）"; Flags: shellexec nowait postinstall skipifsilent unchecked
 
