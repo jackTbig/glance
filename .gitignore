@@ -3,6 +3,7 @@
 /dist
 config.toml
 words.json
+installer/english-voice-install.log
 node_modules
 extension/dist
 tests/e2e/test-results

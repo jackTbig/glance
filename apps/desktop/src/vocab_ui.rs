@@ -40,18 +40,22 @@ impl VocabPage {
     }
 }
 
-/// 画整个生词库页。`root_ui` 是根视口的 Ui（与设置窗同一个）
-pub fn draw(page: &mut VocabPage, root_ui: &mut egui::Ui, store: &SharedVocab) {
+/// 画整个生词库页。`root_ui` 是根视口的 Ui（与设置窗同一个）。
+/// 返回 true = 用户点了「设置」，要去设置页。
+pub fn draw(page: &mut VocabPage, root_ui: &mut egui::Ui, store: &SharedVocab) -> bool {
+    let mut to_settings = false;
     egui::Panel::left("vocab-list").exact_size(240.0).show(root_ui, |ui| {
         draw_list(ui, store);
     });
     egui::CentralPanel::default().show(root_ui, |ui| {
-        draw_right(page, ui, store);
+        to_settings = draw_right(page, ui, store);
     });
+    to_settings
 }
 
-/// 右边：标题 + 设置 + 测验区
-fn draw_right(page: &mut VocabPage, ui: &mut egui::Ui, store: &SharedVocab) {
+/// 右边：标题 + 设置 + 测验区。返回 true = 要去设置页
+fn draw_right(page: &mut VocabPage, ui: &mut egui::Ui, store: &SharedVocab) -> bool {
+    let mut to_settings = false;
     let (total, eligible) = {
         let g = store.lock().unwrap();
         (g.len(), g.eligible().len())
@@ -64,6 +68,15 @@ fn draw_right(page: &mut VocabPage, ui: &mut egui::Ui, store: &SharedVocab) {
                 .color(Color32::from_gray(140)),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // 这页独占整个窗口，没有左侧导航——**必须留一个回设置页的入口**，
+            // 否则用户进来了就出不去了（1.2.0 就这样，Jack 报的）
+            if ui
+                .add(egui::Button::new(RichText::new("⚙").size(15.0)).frame(false))
+                .on_hover_text("设置：翻译服务、快捷键、术语表……")
+                .clicked()
+            {
+                to_settings = true;
+            }
             let b = egui::Button::new(RichText::new("开始测验").size(13.0));
             if ui.add_enabled(eligible > 0, b).clicked() {
                 page.start(store);
@@ -74,6 +87,7 @@ fn draw_right(page: &mut VocabPage, ui: &mut egui::Ui, store: &SharedVocab) {
     draw_settings(ui, store);
     ui.separator();
     draw_quiz(page, ui);
+    to_settings
 }
 
 /// 设置行：收录开关、推送时刻、每次几个词、题型

@@ -16,7 +16,7 @@
 ; 界面上显示的全名走 AppNameZh。crate 与仓库名仍是 translate-tool，两者不必一致。
 #define AppName "简译Glance"
 #define AppNameZh "简译 Glance"
-#define AppVer "1.2.0"
+#define AppVer "1.2.1"
 #define AppExe "translate-tool.exe"
 #define CaptionExe "live-caption.exe"
 #ifndef TargetDir
@@ -112,6 +112,9 @@ Source: "{#RepoDir}\apps\caption\config.example.toml"; DestDir: "{app}"; Flags: 
 ; 模型从不原地改（换模型必换文件名），已装的同名同大小就跳过，省下 700 多 MB 的解压
 Source: "{#ModelTurbo}"; DestDir: "{app}\models"; Flags: ignoreversion; Components: caption\turbo; Check: ModelNeedsCopy('ggml-large-v3-turbo-q5_0.bin', {#TurboSize})
 Source: "{#ModelSmall}"; DestDir: "{app}\models"; Flags: ignoreversion; Components: caption\small; Check: ModelNeedsCopy('ggml-base.en.bin', {#SmallSize})
+; 英文语音包的安装脚本：**参数里不能带花括号**（Inno 的转义会把 }} 原样留着，命令括号不配对
+; → PowerShell 解析失败 → 弹红字终端窗口、语音包还压根没装上，1.2.0 就栽在这）
+Source: "{#RepoDir}\installer\install-english-voice.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: englishvoice
 Source: "{#RepoDir}\apps\caption\installer\deps\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Components: caption; Check: VCRedistNeedsInstall
 
 [Icons]
@@ -130,7 +133,11 @@ Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; S
 ; 两个一起装 27 秒就完事，装完注册表 Speech_OneCore 下多出 en-US 的音色 token。
 ; Check 返回真表示已装、跳过；装失败不打断安装，装完自检页会报出来。
 ; 用 job 卡 10 分钟上限：网络不通时别让安装向导一直转。
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""$j = Start-Job {{ Add-WindowsCapability -Online -Name 'Language.Basic~~~en-US~0.0.1.0' | Out-Null; Add-WindowsCapability -Online -Name 'Language.TextToSpeech~~~en-US~0.0.1.0' | Out-Null }}; if (Wait-Job $j -Timeout 600) {{ Receive-Job $j }} else {{ Stop-Job $j; '安装超时（多半是连不上 Windows Update）' }}; exit 0"""; StatusMsg: "正在安装英文语音包（联网下载，可能要几分钟）..."; Components: englishvoice; Check: EnglishVoiceNeeded; Flags: waituntilterminated
+; **用 -File 调脚本，隐藏窗口跑（runhidden）**：原来那条 -Command 一行命令有两个毛病——
+; 参数里的花括号被 Inno 的转义弄坏（`{{` 还原成 `{`，`}}` 原样留着 → 括号不配对 → PowerShell 解析失败，
+; 弹了个红字终端窗口，语音包压根没装上），而且没隐藏窗口。现在脚本自己查注册表判断装没装上
+; （它跑在 64 位 PowerShell 里，看得到原生视图），失败会写标记文件，AfterInstall 里据此提示用户。
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -File ""{app}\install-english-voice.ps1"""; StatusMsg: "正在安装英文语音包（联网下载，可能要几分钟）..."; Components: englishvoice; AfterInstall: ShowEnglishVoiceResult; Flags: waituntilterminated runhidden
 Filename: "{app}\{#AppExe}"; Description: "立即启动 {#AppNameZh}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\extension"; Description: "打开插件目录（Chrome 扩展页用「加载已解压的扩展程序」选它）"; Flags: shellexec nowait postinstall skipifsilent unchecked
 
@@ -140,6 +147,9 @@ Filename: "{app}\extension"; Description: "打开插件目录（Chrome 扩展页
 Type: filesandordirs; Name: "{app}\dict"
 Type: filesandordirs; Name: "{app}\models"
 Type: files; Name: "{app}\live-caption.stamp"
+Type: files; Name: "{app}\install-english-voice.ps1"
+Type: files; Name: "{app}\english-voice-install.log"
+Type: files; Name: "{app}\english-voice-failed.txt"
 
 [Code]
 const
@@ -443,10 +453,21 @@ begin
   end;
 end;
 
-// [Run] 的 Check 返回真表示**跳过**这条，所以这里取反
-function EnglishVoiceNeeded: Boolean;
+// 英文语音包装完后的提示：脚本失败会留标记文件，这里告诉用户，别让他以为装好了。
+// 失败不影响别的功能（朗读英文退回系统老音色，只是没那么自然），所以不打断安装。
+procedure ShowEnglishVoiceResult;
+var
+  F: String;
 begin
-  Result := not EnglishVoiceInstalled;
+  F := ExpandConstant('{app}\english-voice-failed.txt');
+  if not FileExists(F) then
+    Exit;
+  DeleteFile(F);
+  if not WizardSilent then
+    MsgBox('英文语音包没装上（多半是连不上 Windows Update，或者安装权限不够）。' + #13#10 + #13#10 +
+           '不影响其他功能：朗读英文会退回系统自带的旧音色，只是没那么自然。' + #13#10 +
+           '想补装：简译设置窗的「运行环境」页里点「英文语音包」一键重试。',
+           mbError, MB_OK);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

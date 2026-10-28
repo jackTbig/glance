@@ -2574,7 +2574,12 @@ impl App {
 
     /// 生词库页（独占窗口，跟翻译页一样不画左侧导航）。返回是否要关窗。
     fn draw_vocab_window(&mut self, root_ui: &mut egui::Ui) -> bool {
-        crate::vocab_ui::draw(&mut self.vocab_page, root_ui, &self.vocab);
+        // 点「⚙ 设置」：回设置页。这页没有左侧导航，不给入口就出不去了（1.2.0 的坑）
+        if crate::vocab_ui::draw(&mut self.vocab_page, root_ui, &self.vocab) {
+            self.settings_tab = SettingsTab::Service;
+            self.settings_scroll_top = true;
+            root_ui.ctx().send_viewport_cmd(ViewportCommand::Title(window_title(SettingsTab::Service)));
+        }
         // Esc 收起窗口（与浮动卡片、翻译页一致）
         root_ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
     }
@@ -3065,9 +3070,13 @@ impl App {
         self.open_window(SettingsTab::Translate);
     }
 
-    /// 打开设置。从翻译页进来的话落到第一个设置页，否则回到上次看的那页
+    /// 打开设置。从翻译页/生词库页进来的话落到第一个设置页，否则回到上次看的那页
     pub fn open_settings(&mut self) {
-        let tab = if self.settings_tab == SettingsTab::Translate { SettingsTab::Service } else { self.settings_tab };
+        let tab = match self.settings_tab {
+            // 这两页是独占窗口，不是设置页：从设置入口进来要落到真正的设置页
+            SettingsTab::Translate | SettingsTab::Vocab => SettingsTab::Service,
+            other => other,
+        };
         self.open_window(tab);
     }
 
