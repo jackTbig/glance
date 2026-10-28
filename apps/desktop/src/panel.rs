@@ -10,6 +10,8 @@ pub enum Phase {
     Failed(String),
     /// 不是错误，只是告诉用户为什么没翻（比如进程在例外名单里）。没有重试按钮
     Notice(String),
+    /// 生词库的每日推送：今天该复习了。带一个「开始测验」按钮
+    VocabPush { count: usize },
 }
 
 #[derive(Debug, Clone)]

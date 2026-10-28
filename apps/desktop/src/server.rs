@@ -186,11 +186,13 @@ const WORKERS: usize = 8;
 
 /// 起服务。`translator` 用 Mutex 包着以便设置变更后热替换。
 /// `dict` 是离线词库（可能没装/打不开 → 查词返回 found:false），给扩展端"先离线后模型"用
+/// `vocab` 是生词库：扩展端查的词也收进去（与桌面端共用同一份）
 pub fn spawn(
     port: u16,
     allowed_ids: Vec<String>,
     translator: Arc<Mutex<Translator>>,
     dict: SharedDict,
+    vocab: crate::vocab::SharedVocab,
     app_version: &'static str,
 ) -> anyhow::Result<ServerHandle> {
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("本地服务无法监听 {port} 端口：{e}"))?;
@@ -205,6 +207,7 @@ pub fn spawn(
       let allowed_ids = allowed_ids.clone();
       let translator = translator.clone();
       let dict = dict.clone();
+      let vocab = vocab.clone();
       let seen = seen.clone();
       std::thread::Builder::new().name(format!("local-server-{i}")).spawn(move || {
         loop {
@@ -302,8 +305,19 @@ pub fn spawn(
                         Err(e) => json_response(400, &serde_json::json!({ "error": format!("请求格式错误：{e}") }), origin.as_deref()),
                         Ok(req) => {
                             let tr = translator.lock().unwrap().clone();
+                            // 扩展端查单词（scene=word）：把模型的词条收进生词库。
+                            // 与桌面端共用同一份库（服务就在桌面端进程里）
+                            let word_query = (req.scene == "word" && req.items.len() == 1)
+                                .then(|| req.items[0].text.clone());
                             match handle_translate(&tr, req) {
-                                Ok(r) => json_response(200, &serde_json::to_value(r).unwrap(), origin.as_deref()),
+                                Ok(r) => {
+                                    if let Some(q) = word_query {
+                                        if let Some(t) = r.results.first().and_then(|x| x.text.as_ref()) {
+                                            crate::vocab::record_markers(&vocab, &q, t, "插件");
+                                        }
+                                    }
+                                    json_response(200, &serde_json::to_value(r).unwrap(), origin.as_deref())
+                                }
                                 Err(e) => json_response(400, &serde_json::json!({ "error": e.to_string() }), origin.as_deref()),
                             }
                         }

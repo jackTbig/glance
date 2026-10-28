@@ -11,7 +11,14 @@ const LOG_ENV: &str = "TRANSLATE_TOOL_LOG";
 fn main() -> eframe::Result<()> {
     let dir = Config::dir();
     desktop_shell::logging::init(&dir, LOG_PREFIX, LOG_ENV, 7);
-    if !desktop_shell::single_instance::claim("translate-tool-single-instance") {
+    // 调试钩子：TT_INSTANCE=<后缀> 换一个互斥量名，让开发版与已装的正式版能同时跑。
+    // 截图与自测时不必关掉正在用的那个（关别人的进程不该由测试顺手做掉）
+    let inst = std::env::var("TT_INSTANCE").ok().filter(|s| !s.trim().is_empty());
+    let mutex = match &inst {
+        Some(s) => format!("translate-tool-single-instance-{s}"),
+        None => "translate-tool-single-instance".to_string(),
+    };
+    if !desktop_shell::single_instance::claim(&mutex) {
         tracing::warn!("已有一个简译在运行，本次启动退出");
         return Ok(());
     }

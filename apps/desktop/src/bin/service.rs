@@ -34,11 +34,15 @@ fn main() -> anyhow::Result<()> {
 
     let tr = Arc::new(Mutex::new(Translator::new(cfg.translator_config())?));
     let dict = translate_tool::server::open_shared_dict();
+    // 生词库只留在内存里：这个入口是给端到端测试与排障用的，
+    // 写盘会把你真的生词库搅乱（也污染测试数据）
+    let vocab = Arc::new(Mutex::new(translate_tool::vocab::Vocab::open(None)));
     let h = translate_tool::server::spawn(
         cfg.server.port,
         cfg.server.allowed_extension_ids.clone(),
         tr,
         dict,
+        vocab,
         env!("CARGO_PKG_VERSION"),
     )?;
     println!("本地服务已启动：http://127.0.0.1:{}", h.port);

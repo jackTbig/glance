@@ -22,6 +22,12 @@ fn http(port: u16, method: &str, path: &str, origin: Option<&str>, body: &str) -
 }
 
 fn setup() -> (mock_llm::MockServer, server::ServerHandle) {
+    let (m, h, _v) = setup_with_vocab();
+    (m, h)
+}
+
+/// 与 `setup` 一样，但把生词库也交出来：插件收录那条路要断言它
+fn setup_with_vocab() -> (mock_llm::MockServer, server::ServerHandle, translate_tool::vocab::SharedVocab) {
     let mock = mock_llm::spawn(0);
     let mut cfg = Config::default();
     cfg.backend.openai_base_url = mock.base_url.clone();
@@ -29,15 +35,19 @@ fn setup() -> (mock_llm::MockServer, server::ServerHandle) {
     cfg.backend.max_retries = 0;
     let tr = Translator::new(cfg.translator_config()).unwrap();
     // 词库传 None：本地服务没有词典时 /v1/lookup_offline 照样工作（只是查不到）
+    // 生词库传内存版：测试不该往真词库里写东西
+    let vocab: translate_tool::vocab::SharedVocab =
+        Arc::new(Mutex::new(translate_tool::vocab::Vocab::open(None)));
     let h = server::spawn(
         0,
         cfg.server.allowed_extension_ids.clone(),
         Arc::new(Mutex::new(tr)),
         Arc::new(Mutex::new(None)),
+        vocab.clone(),
         "test",
     )
     .unwrap();
-    (mock, h)
+    (mock, h, vocab)
 }
 
 #[test]
@@ -105,8 +115,33 @@ fn bad_scene_and_empty_items_are_400() {
 }
 
 #[test]
-fn options_preflight_returns_cors_headers() {
-    let (_m, h) = setup();
+fn plugin_word_lookup_lands_in_the_vocabulary() {
+    // 插件划词查单词 → 结果要进生词库（与桌面端共用同一份，插件的词也要能背）
+    let (_m, h, vocab) = setup_with_vocab();
+    let req = serde_json::json!({ "scene": "word", "items": [{ "id": "s", "text": "mocked" }] }).to_string();
+    let (code, body) = http(h.port, "POST", "/v1/translate", Some("chrome-extension://abc"), &req);
+    assert_eq!(code, 200, "{body}");
+    let g = vocab.lock().unwrap();
+    assert_eq!(g.len(), 1, "插件查的词要进生词库");
+    assert_eq!(g.words()[0].word, "mocked");
+    assert_eq!(g.words()[0].source, "插件");
+    assert!(g.words()[0].meaning().is_some(), "要带中文释义才出得了题");
+    h.stop();
+}
+
+#[test]
+fn plugin_sentence_translation_is_not_recorded() {
+    // 只有查词场景才收进生词库：普通译文不是生词
+    let (_m, h, vocab) = setup_with_vocab();
+    let req = serde_json::json!({ "scene": "selection", "items": [{ "id": "s", "text": "hello" }] }).to_string();
+    let (code, body) = http(h.port, "POST", "/v1/translate", Some("chrome-extension://abc"), &req);
+    assert_eq!(code, 200, "{body}");
+    assert!(vocab.lock().unwrap().is_empty(), "译文不该进生词库");
+    h.stop();
+}
+
+#[test]
+fn options_preflight_returns_cors_headers() {    let (_m, h) = setup();
     let mut s = std::net::TcpStream::connect(("127.0.0.1", h.port)).unwrap();
     s.write_all(b"OPTIONS /v1/translate HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: chrome-extension://abc\r\nConnection: close\r\n\r\n").unwrap();
     let mut buf = Vec::new();

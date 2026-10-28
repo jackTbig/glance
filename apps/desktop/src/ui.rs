@@ -23,6 +23,8 @@ pub const APP_NAME_ZH: &str = "简译";
 pub enum SettingsTab {
     /// 主窗口的「翻译」页：手动输入单词或句子来翻（Jack 2026-09-22 要求）
     Translate,
+    /// 生词库：查过的词攒在这儿，每天随机抽几个考考自己
+    Vocab,
     Service,
     Trigger,
     Glossary,
@@ -34,8 +36,9 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 7] = [
+    pub const ALL: [SettingsTab; 8] = [
         SettingsTab::Translate,
+        SettingsTab::Vocab,
         SettingsTab::Service,
         SettingsTab::Trigger,
         SettingsTab::Glossary,
@@ -47,6 +50,7 @@ impl SettingsTab {
     pub fn label(self) -> &'static str {
         match self {
             SettingsTab::Translate => "翻译",
+            SettingsTab::Vocab => "生词库",
             SettingsTab::Service => "翻译服务",
             SettingsTab::Trigger => "触发方式",
             SettingsTab::Glossary => "术语表",
@@ -59,6 +63,7 @@ impl SettingsTab {
     pub fn hint(self) -> &'static str {
         match self {
             SettingsTab::Translate => "输入单词或句子，自动判断英译中还是中译英",
+            SettingsTab::Vocab => "查过的单词都攒在这儿，随机抽几个考考自己",
             SettingsTab::Service => "接口地址、API Key、各场景用哪个后端",
             SettingsTab::Trigger => "快捷键、悬停、划词图标，以及不想被打扰的程序",
             SettingsTab::Glossary => "让专有名词按你定的译法翻",
@@ -66,6 +71,16 @@ impl SettingsTab {
             SettingsTab::Env => "缺什么、影响哪个功能、能不能一键补上",
             SettingsTab::About => "版本、各组件装在哪、出问题时要提供的信息",
         }
+    }
+}
+
+/// 窗口尺寸分三类：设置页、翻译页（窄而竖长）、生词库页（左边词表右边做题，宽）。
+/// 换类时只改大小不挪位置（用户可能拖过窗口）
+fn size_class(tab: SettingsTab) -> u8 {
+    match tab {
+        SettingsTab::Translate => 1,
+        SettingsTab::Vocab => 2,
+        _ => 0,
     }
 }
 
@@ -157,12 +172,18 @@ pub struct App {
     logged_card_w: Option<f32>,
     /// 主窗口「翻译」页的状态
     manual: crate::manual::ManualState,
+    /// 生词库。桌面端与插件查的词都进这一份（插件走本地服务，服务在同一进程里）
+    vocab: crate::vocab::SharedVocab,
+    /// 生词库页的状态（当前这局测验等）
+    vocab_page: crate::vocab_ui::VocabPage,
+    /// 今天的推送还没弹出去（到点时正开着窗口或卡片，就等空下来再弹）
+    vocab_push_pending: bool,
     /// 设置页「模型」下拉的候选列表（后台拉取，见 `models.rs`）
     models: crate::models::ModelList,
     /// 窗口已经开着时又被要求打开（换页）：下一帧把它提到前面、改标题，但不重新摆位
     settings_raise: bool,
-    /// 窗口当前按哪类页定的尺寸（true = 翻译页）；None = 窗口没开
-    settings_sized_as: Option<bool>,
+    /// 窗口当前按哪类页定的尺寸（见 `size_class`）；None = 窗口没开
+    settings_sized_as: Option<u8>,
     /// 下次跑 logic 时把窗口从最小化恢复。窗口最小化时 eframe 只跑 logic 不跑 ui，
     /// 恢复命令必须在 logic 里发，否则点托盘「打开」看着就是没反应（Jack 2026-09-24 实测）
     settings_unminimize: bool,
@@ -251,6 +272,10 @@ impl App {
         let translator = Arc::new(Mutex::new(ai_translate::Translator::new(cfg.translator_config())?));
         let capturer = Arc::new(Capturer::new());
         let (engine, events) = Engine::spawn(translator.clone(), capturer.clone());
+        // 生词库：查过的词攒这儿。桌面端与插件（走本地服务）共用这一份
+        let vocab: crate::vocab::SharedVocab = Arc::new(Mutex::new(crate::vocab::Vocab::open(Some(
+            crate::vocab::Vocab::default_path(),
+        ))));
         // 把开关同步给引擎：不同步的话用户关掉了，重启又会自己回来
         engine.set_offline(cfg.ui.offline_dict);
         let (trig_tx, triggers) = crossbeam_channel::unbounded();
@@ -291,7 +316,14 @@ impl App {
 
         let server = if cfg.server.enabled {
             let dict = crate::server::open_shared_dict();
-            match crate::server::spawn(cfg.server.port, cfg.server.allowed_extension_ids.clone(), translator.clone(), dict, APP_VERSION) {
+            match crate::server::spawn(
+                cfg.server.port,
+                cfg.server.allowed_extension_ids.clone(),
+                translator.clone(),
+                dict,
+                vocab.clone(),
+                APP_VERSION,
+            ) {
                 Ok(h) => Some(h),
                 Err(e) => {
                     tracing::error!("{e}");
@@ -365,6 +397,9 @@ impl App {
                 input: main_input.clone().unwrap_or_default(),
                 ..Default::default()
             },
+            vocab,
+            vocab_page: Default::default(),
+            vocab_push_pending: false,
             settings_raise: false,
             logged_content_w: None,
             cur_seq: 0,
@@ -404,6 +439,13 @@ impl App {
             quit: false,
         })
         .map(|mut app| {
+            // 调试钩子：TT_VOCAB_QUIZ=1 启动即开生词库页并直接出一套题（截图与自测用）
+            if std::env::var("TT_VOCAB_QUIZ").is_ok_and(|v| v == "1") {
+                app.vocab_page.start(&app.vocab);
+                app.settings_tab = SettingsTab::Vocab;
+                app.settings_open = true;
+                app.settings_place_frames = PLACE_FRAMES;
+            }
             // 调试钩子：TT_DEMO_WORD=glance 启动即查一次词并弹卡片（截图与验收用）
             if let Ok(w) = std::env::var("TT_DEMO_WORD") {
                 if !w.trim().is_empty() {
@@ -656,6 +698,12 @@ impl App {
             };
             // 主窗口手动翻译的回包走自己那一份状态，不碰浮动卡片
             if self.manual.owns(seq) {
+                // 主窗口查的单词也进生词库（场景由引擎改判，词条是行标记格式）
+                if let Event::Done { text, .. } = &e {
+                    if self.manual.scene == Scene::Word {
+                        crate::vocab::record_markers(&self.vocab, &self.manual.original, text, "桌面端");
+                    }
+                }
                 self.manual.on_event(e);
                 continue;
             }
@@ -732,6 +780,10 @@ impl App {
                     p.offline = false;
                 }
                 Event::Done { text, took_ms, .. } => {
+                    // 查到的单词收进生词库（只有查词场景收：普通译文不是生词）
+                    if scene_of(p.scene_label) == Scene::Word {
+                        crate::vocab::record_markers(&self.vocab, &p.original, &text, "桌面端");
+                    }
                     p.translated = text;
                     p.offline = false;
                     p.phase = Phase::Done;
@@ -764,7 +816,7 @@ impl App {
     fn drain_tray(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         use crate::tray::{
             MENU_CAPTION_CLICKABLE, MENU_CAPTION_MINI, MENU_CAPTION_PAUSE, MENU_CAPTION_SETTINGS, MENU_CAPTION_TOGGLE,
-            MENU_DIRECTION, MENU_FILE_TRANSLATE, MENU_MAIN, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS,
+            MENU_DIRECTION, MENU_FILE_TRANSLATE, MENU_MAIN, MENU_PAUSE, MENU_QUIT, MENU_SETTINGS, MENU_VOCAB,
         };
         use desktop_shell::caption_ipc::Command;
         use desktop_shell::tray::{Action, Input};
@@ -797,6 +849,7 @@ impl App {
         let mut items = vec![
             (MENU_MAIN, "翻译窗口…".to_string(), false),
             (MENU_FILE_TRANSLATE, "翻译文件…".to_string(), false),
+            (MENU_VOCAB, "生词库…".to_string(), false),
             (MENU_SETTINGS, "设置…".to_string(), false),
             (MENU_PAUSE, "暂停取词".to_string(), self.paused),
             (
@@ -828,6 +881,7 @@ impl App {
         items.push((MENU_QUIT, "退出".to_string(), false));
         match crate::tray::show_menu(hwnd, x, y, &items) {
             Some(MENU_MAIN) => self.open_main(),
+            Some(MENU_VOCAB) => self.open_window(SettingsTab::Vocab),
             Some(MENU_FILE_TRANSLATE) => self.start_file_translate(hwnd),
             Some(MENU_SETTINGS) => self.open_settings(),
             Some(MENU_DIRECTION) => self.flip_direction(),
@@ -897,6 +951,54 @@ impl App {
         self.mode = Mode::Panel;
         self.cur_seq = 0;
         self.notice_until = Some(Instant::now() + Duration::from_millis(1600));
+    }
+
+    /// 生词库的每日推送：到点弹一张「今天有 N 个生词待复习」的卡片。
+    ///
+    /// 跑在 `logic()` 里：窗口被系统判定不可见时 eframe 只跑 logic 不跑 ui，
+    /// 那段时间也得把「该推了」这件事记上（画出来要等 ui 再跑）。
+    fn check_vocab_push(&mut self) {
+        use chrono::Timelike;
+        let now = chrono::Local::now();
+        let today = crate::vocab::today_str();
+        let (due, count) = {
+            let g = self.vocab.lock().unwrap();
+            let due = crate::vocab::push_due(
+                g.settings(),
+                g.last_push(),
+                now.hour() as u8,
+                now.minute() as u8,
+                &today,
+            );
+            // 不是那个分钟就别去数词了：这个检查每秒跑十几次
+            (due, if due { g.eligible().len() } else { 0 })
+        };
+        if due && count > 0 {
+            // 到点了先记下「今天要推」。**别只在这一分钟里试一次**：
+            // 用户那会儿正开着设置窗，这一分钟过去今天的推送就没了。
+            self.vocab_push_pending = true;
+        }
+        if !self.vocab_push_pending {
+            return;
+        }
+        // 已经有卡片或窗口开着就别打断，等空下来再推
+        if self.panel.is_some() || self.settings_open {
+            return;
+        }
+        self.vocab_push_pending = false;
+        {
+            let mut g = self.vocab.lock().unwrap();
+            g.set_last_push(&today);
+            if let Err(e) = g.save() {
+                tracing::warn!("生词库写盘失败：{e}");
+            }
+        }
+        let mut st = PanelState::new("生词库", Source::Uia, (0, 0));
+        st.phase = Phase::VocabPush { count };
+        self.panel = Some(st);
+        self.mode = Mode::Panel;
+        self.cur_seq = 0;
+        tracing::info!("生词库推送：今天 {count} 个生词待复习");
     }
 
     /// 托盘「翻译文件…」：弹文件对话框，多选；在后台线程翻译；进度事件走 `file_events` 通道
@@ -1160,6 +1262,7 @@ impl eframe::App for App {
         self.drain_events(ctx);
         self.drain_tray(ctx, frame);
         self.poll_outside_click(ctx);
+        self.check_vocab_push();
         if self.settings_open && self.settings_unminimize {
             self.settings_unminimize = false;
             ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -1664,6 +1767,7 @@ impl App {
         let mut pin_toggled = false;
         let mut retry = false;
         let mut copy = false;
+        let mut open_vocab = false;
         let (mut drag_started, mut dragging, mut drag_stopped) = (false, false, false);
         let mut content_h = 0.0;
         let mut content_w = 0.0;
@@ -1682,7 +1786,10 @@ impl App {
             .show(root_ui, |ui| {
                 let head = ui.horizontal(|ui| {
                     ui.label(RichText::new(p.scene_label).color(Color32::from_rgb(40, 90, 180)).size(13.0));
-                    ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::from_gray(120)).size(12.0));
+                    // 生词库推送不是从某个程序取来的词，没有「来源」
+                    if !matches!(p.phase, Phase::VocabPush { .. }) {
+                        ui.label(RichText::new(format!("· {}", p.source.label_zh())).color(Color32::from_gray(120)).size(12.0));
+                    }
                     if p.offline {
                         ui.label(RichText::new("· 离线").color(Color32::from_rgb(150, 110, 20)).size(12.0))
                             .on_hover_text("本地词库的释义，模型的完整词条回来后会替换");
@@ -1763,6 +1870,16 @@ impl App {
                                 retry = true;
                             }
                         }
+                        Phase::VocabPush { count } => {
+                            ui.label(
+                                RichText::new(format!("今天有 {count} 个生词待复习"))
+                                    .color(Color32::from_gray(20))
+                                    .size(base),
+                            );
+                            if ui.button("开始测验").clicked() {
+                                open_vocab = true;
+                            }
+                        }
                     }
                 });
                 // 量内容必须用 ScrollArea 的 content_size，**不能用 ui.min_rect()**：
@@ -1820,6 +1937,12 @@ impl App {
         if close {
             self.close_panel();
             return;
+        }
+        // 推送卡片上点「开始测验」：收起卡片，开生词库页并直接出一套题
+        if open_vocab {
+            self.close_panel();
+            self.vocab_page.start(&self.vocab);
+            self.open_window(SettingsTab::Vocab);
         }
 
     }
@@ -1965,7 +2088,7 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Title(window_title(self.settings_tab)));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(d.to_logical_pos(at)));
-            self.settings_sized_as = Some(self.settings_tab == SettingsTab::Translate);
+            self.settings_sized_as = Some(size_class(self.settings_tab));
             self.last_place = None; // 设置窗自己管摆位，别让缓存挡住后续的摆放
             tracing::debug!(
                 "设置窗摆位：剩 {} 帧 ppp={} 目标物理{:?} → 逻辑{:?}",
@@ -1996,7 +2119,7 @@ impl App {
         }
 
         // 翻译页与设置页尺寸不同：换到另一类页时只改大小，不挪位置（用户可能拖过窗口）
-        let kind = self.settings_tab == SettingsTab::Translate;
+        let kind = size_class(self.settings_tab);
         if self.settings_place_frames == 0 && self.settings_sized_as.is_some_and(|k| k != kind) {
             self.settings_sized_as = Some(kind);
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(win_w, win_h)));
@@ -2020,6 +2143,8 @@ impl App {
         // 翻译页是独立的主窗口：不要左侧设置导航，整个窗口给输入框和结果
         if self.settings_tab == SettingsTab::Translate {
             close |= self.draw_translate_window(root_ui);
+        } else if self.settings_tab == SettingsTab::Vocab {
+            close |= self.draw_vocab_window(root_ui);
         } else {
             egui::Panel::left("settings-nav").exact_size(104.0).show(root_ui, |ui| {
                 ui.add_space(8.0);
@@ -2087,8 +2212,8 @@ impl App {
                     area = area.vertical_scroll_offset(0.0);
                 }
                 area.show(ui, |ui| match self.settings_tab {
-                    // 翻译页走 draw_translate_window，不会到这里
-                    SettingsTab::Translate => {}
+                    // 翻译页与生词库页走自己的整窗布局，不会到这里
+                    SettingsTab::Translate | SettingsTab::Vocab => {}
                     SettingsTab::Service => self.settings_service(ui),
                     SettingsTab::Trigger => self.settings_trigger(ui),
                     SettingsTab::Glossary => self.settings_glossary(ui),
@@ -2447,9 +2572,15 @@ impl App {
         self.env_items = Some(desktop_shell::deps::check_all(app_dir.as_deref(), &langs, &voices));
     }
 
+    /// 生词库页（独占窗口，跟翻译页一样不画左侧导航）。返回是否要关窗。
+    fn draw_vocab_window(&mut self, root_ui: &mut egui::Ui) -> bool {
+        crate::vocab_ui::draw(&mut self.vocab_page, root_ui, &self.vocab);
+        // Esc 收起窗口（与浮动卡片、翻译页一致）
+        root_ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+    }
+
     /// 主窗口（翻译页）的外框：顶栏（名字 + 设置入口）+ 翻译区。返回是否要关窗。
-    fn draw_translate_window(&mut self, root_ui: &mut egui::Ui) -> bool {
-        let mut close = false;
+    fn draw_translate_window(&mut self, root_ui: &mut egui::Ui) -> bool {        let mut close = false;
         let mut to_settings = false;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(root_ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(18, 14)))
@@ -2978,12 +3109,13 @@ impl App {
 /// 窗口客户区尺寸（交给 `ViewportCommand::InnerSize`）。设置页 771x691 是 Jack 2026-09-09
 /// 用鼠标调出来的顺手值。**单位是逻辑像素**：2026-09-22 实拍，给翻译页 860 宽落地成 1720 物理宽
 /// （200% 缩放）——与早先「按物理像素落地」的记录相反，以这次截图为准。
-/// 翻译页是查词窗口，窄而竖长，结果卡片在里面滚
+/// 翻译页是查词窗口，窄而竖长，结果卡片在里面滚。
+/// 生词库页左边词表右边做题，要宽一些
 fn window_size(tab: SettingsTab) -> (f32, f32) {
-    if tab == SettingsTab::Translate {
-        (520.0, 600.0)
-    } else {
-        (771.0, 691.0)
+    match tab {
+        SettingsTab::Translate => (520.0, 600.0),
+        SettingsTab::Vocab => (860.0, 640.0),
+        _ => (771.0, 691.0),
     }
 }
 
@@ -2999,12 +3131,12 @@ fn result_card(ui: &mut egui::Ui, max_h: f32, add: impl FnOnce(&mut egui::Ui)) {
         });
 }
 
-/// 窗口标题：翻译页是主窗口，其余是设置
+/// 窗口标题：翻译页是主窗口，生词库页自己一个，其余是设置
 fn window_title(tab: SettingsTab) -> String {
-    if tab == SettingsTab::Translate {
-        APP_NAME_ZH.to_string()
-    } else {
-        format!("{APP_NAME_ZH} 设置")
+    match tab {
+        SettingsTab::Translate => APP_NAME_ZH.to_string(),
+        SettingsTab::Vocab => format!("{APP_NAME_ZH} 生词库"),
+        _ => format!("{APP_NAME_ZH} 设置"),
     }
 }
 

@@ -18,4 +18,6 @@ pub mod presets;
 pub mod server;
 pub mod tray;
 pub mod ui;
+pub mod vocab;
+pub mod vocab_ui;
 pub mod watcher;
