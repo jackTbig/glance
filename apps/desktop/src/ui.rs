@@ -153,8 +153,6 @@ pub struct App {
     /// 文件翻译后台线程的事件流（点击托盘「翻译文件…」时启动）
     file_events: Option<Receiver<crate::file_translate::FileEvent>>,
     triggers: Receiver<Trigger>,
-    /// 触发流的发信端：后台确认线程用它把「窗口里确实有选区」的结果发回来
-    trig_tx: crossbeam_channel::Sender<Trigger>,
     watcher: Watcher,
     _hotkeys: GlobalHotKeyManager,
     hotkey_ids: Vec<(u32, HotkeyAction)>,
@@ -281,7 +279,7 @@ impl App {
         // 把开关同步给引擎：不同步的话用户关掉了，重启又会自己回来
         engine.set_offline(cfg.ui.offline_dict);
         let (trig_tx, triggers) = crossbeam_channel::unbounded();
-        let watcher = crate::watcher::spawn(watch_cfg(&cfg), trig_tx.clone());
+        let watcher = crate::watcher::spawn(watch_cfg(&cfg), trig_tx);
 
         let hk = GlobalHotKeyManager::new().map_err(|e| anyhow::anyhow!("热键管理器初始化失败：{e}"))?;
         let mut hotkey_ids = Vec::new();
@@ -376,7 +374,6 @@ impl App {
             events,
             file_events: None,
             triggers,
-            trig_tx: trig_tx.clone(),
             watcher,
             _hotkeys: hk,
             hotkey_ids,
@@ -549,9 +546,6 @@ impl App {
                 Trigger::SelectionEnded { x, y, over_text } => {
                     self.on_selection_ended(x, y, over_text);
                 }
-                Trigger::SelectionConfirmed { x, y, target, clip_seq } => {
-                    self.on_selection_confirmed(x, y, target, clip_seq);
-                }
                 Trigger::Hovered { x, y } if !self.cfg.ui.hover_enabled => {
                     tracing::debug!("悬停触发于({x},{y})，但悬停取词没开（按开关热键可开）");
                 }
@@ -581,7 +575,7 @@ impl App {
     /// 划词结束（鼠标抬起）：**只有真划过文字才弹图标**。
     ///
     /// 以前只看「有没有拖动」，于是拖文件、拖窗口、拖滑块都会冒出一个「译」图标，
-    /// 点了才发现根本没选中东西。现在先看光标形状：拖动期间光标是 I 形 = 停在文字上。
+    /// 点了才发现根本没选中东西。现在看光标形状：拖动期间光标是 I 形 = 停在文字上。
     fn on_selection_ended(&mut self, x: i32, y: i32, over_text: bool) {
         if !self.cfg.ui.selection_icon {
             tracing::debug!("划词结束于({x},{y})，但设置里关了小图标");
@@ -594,63 +588,13 @@ impl App {
         if self.excluded_at(x, y).is_some() {
             return;
         }
-        if over_text {
-            self.show_selection_icon(x, y);
-        } else {
-            // 光标不像停在文字上：可能是拖文件、拖滑块，也可能是自绘光标的应用。
-            // 后台问一次无障碍接口「窗口里到底有没有选区」，有才弹。
-            self.confirm_selection_bg(x, y);
+        if !over_text {
+            tracing::debug!("划词结束于({x},{y})，但拖动时光标一直是箭头（没划过文字），不弹图标");
+            return;
         }
-    }
-
-    fn show_selection_icon(&mut self, x: i32, y: i32) {
         let target = text_capture::clipboard::foreign_foreground_window();
         tracing::info!("划词结束（划过文字），弹图标；取词目标窗口 {target:?}");
         let clip_seq = self.watcher.clip_seq_at_press();
-        self.mode = Mode::Icon { pos: (x, y), since: Instant::now(), target, clip_seq };
-    }
-
-    /// 后台确认「窗口里到底有没有选中文字」。
-    ///
-    /// 只读无障碍接口：不发按键、不碰剪贴板，用户那边毫无感觉。
-    /// **只对浏览器与终端做**：资源管理器这类窗口的「选区」是选中的文件，
-    /// 拿它当文字选区会误报；浏览器与终端的选区就是文字选区，读法也是现成的。
-    fn confirm_selection_bg(&mut self, x: i32, y: i32) {
-        let target = text_capture::clipboard::foreign_foreground_window();
-        let Some(hwnd) = target else {
-            tracing::debug!("划词结束于({x},{y})，没有前台外部窗口，不弹图标");
-            return;
-        };
-        let class = text_capture::clipboard::class_name(hwnd as isize);
-        if !text_capture::clipboard::is_browser_class(&class) && !text_capture::clipboard::is_terminal_class(&class) {
-            tracing::debug!("划词结束于({x},{y})，目标窗口是 {class}（既不是浏览器也不是终端），不弹图标");
-            return;
-        }
-        let clip_seq = self.watcher.clip_seq_at_press();
-        let capturer = self.capturer.clone();
-        let tx = self.trig_tx.clone();
-        let spawned = std::thread::Builder::new().name("sel-check".into()).spawn(move || {
-            let Some(text) = capturer.selection_text(target) else {
-                tracing::debug!("划词结束于({x},{y})，光标不在文字上，窗口里也没有选区，不弹图标");
-                return;
-            };
-            tracing::info!("划词结束于({x},{y})，窗口里有选区（{} 字），弹图标", text.chars().count());
-            let _ = tx.send(Trigger::SelectionConfirmed { x, y, target, clip_seq });
-        });
-        if spawned.is_err() {
-            tracing::debug!("起后台确认线程失败，不弹图标");
-        }
-    }
-
-    /// 后台确认过了：确实有选区，补上图标
-    fn on_selection_confirmed(&mut self, x: i32, y: i32, target: Option<isize>, clip_seq: u32) {
-        if !matches!(self.mode, Mode::Idle) {
-            tracing::debug!("划词确认到了({x},{y})，但界面正忙（{:?}），忽略", self.mode);
-            return;
-        }
-        if self.excluded_at(x, y).is_some() {
-            return;
-        }
         self.mode = Mode::Icon { pos: (x, y), since: Instant::now(), target, clip_seq };
     }
 

@@ -52,7 +52,11 @@ fn main() -> anyhow::Result<()> {
         while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
             let (x, y) = text_capture::screen::cursor_pos();
             let down = unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 };
-            let over = text_capture::screen::cursor_shape() == text_capture::screen::CursorShape::IBeam;
+            let over = match text_capture::screen::cursor_shape() {
+                text_capture::screen::CursorShape::IBeam => translate_tool::watcher::CursorKind::IBeam,
+                text_capture::screen::CursorShape::Arrow => translate_tool::watcher::CursorKind::Arrow,
+                text_capture::screen::CursorShape::Other => translate_tool::watcher::CursorKind::Unknown,
+            };
             if let Some(t) = st.step(x, y, down, false, over, std::time::Instant::now()) {
                 let _ = tx_s.send(t);
             }

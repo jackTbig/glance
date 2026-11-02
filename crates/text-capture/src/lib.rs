@@ -219,22 +219,6 @@ impl Capturer {
         Ok(Captured { text: text.trim().to_string(), source: Source::Clipboard, took_ms: t0.elapsed().as_millis() })
     }
 
-    /// 只读地看窗口里当前选中了什么文字（**不发按键、不碰剪贴板**）。
-    ///
-    /// 划词弹图标前用它确认「到底选中了没有」：浏览器与终端读得到，
-    /// 别的应用大多读不到（返回 None）——读不到就别下结论，交给别的判据。
-    pub fn selection_text(&self, target: Option<isize>) -> Option<String> {
-        let hwnd = target.unwrap_or_else(clipboard::foreground_window);
-        let u = self.uia.as_ref()?;
-        let t = u.selection_in(hwnd).ok().flatten()?;
-        let t = t.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    }
-
     /// 悬停：先问无障碍接口，拿不到就截鼠标周围一块做文字识别。
     /// 识别出来的多行里**只挑鼠标压着的那一行**，不然一悬停就把周围一片都送去翻。
     pub fn at_point(&self, x: i32, y: i32) -> anyhow::Result<Captured> {

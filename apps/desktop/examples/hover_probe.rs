@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         let (x, y) = text_capture::screen::cursor_pos();
         let md = HoverModifier::Alt.is_down();
         samples.push((x, y, md));
-        if let Some(t) = st.step(x, y, false, md, false, Instant::now()) {
+        if let Some(t) = st.step(x, y, false, md, translate_tool::watcher::CursorKind::Unknown, Instant::now()) {
             fired = Some(t);
             break;
         }
