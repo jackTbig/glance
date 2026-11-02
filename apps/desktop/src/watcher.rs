@@ -9,8 +9,12 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Trigger {
-    /// 用户拖选完一段文字，鼠标抬起在这个位置
-    SelectionEnded { x: i32, y: i32 },
+    /// 用户拖选完一段文字，鼠标抬起在这个位置。
+    /// `over_text` = 拖动期间光标是不是 I 形（也就是划过的是不是文字）：
+    /// 拖文件、拖窗口、拖滑块都不是文字，不该弹划词图标。
+    SelectionEnded { x: i32, y: i32, over_text: bool },
+    /// 后台确认过「窗口里确实有选区」之后补发的（光标不像停在文字上时的兜底）
+    SelectionConfirmed { x: i32, y: i32, target: Option<isize>, clip_seq: u32 },
     /// 按住修饰键并在此停留够久
     Hovered { x: i32, y: i32 },
 }
@@ -41,6 +45,8 @@ pub struct WatchState {
     cfg: WatchConfig,
     down_at: Option<(i32, i32)>,
     was_down: bool,
+    /// 本次拖动期间光标是不是 I 形（划过的是不是文字）
+    drag_over_text: bool,
     /// 悬停：位置与开始时间
     still_since: Option<(i32, i32, Instant)>,
     hover_fired_at: Option<(i32, i32)>,
@@ -50,7 +56,15 @@ pub struct WatchState {
 
 impl WatchState {
     pub fn new(cfg: WatchConfig) -> WatchState {
-        WatchState { cfg, down_at: None, was_down: false, still_since: None, hover_fired_at: None, paused: false }
+        WatchState {
+            cfg,
+            down_at: None,
+            was_down: false,
+            drag_over_text: false,
+            still_since: None,
+            hover_fired_at: None,
+            paused: false,
+        }
     }
 
     pub fn set_config(&mut self, cfg: WatchConfig) {
@@ -59,8 +73,16 @@ impl WatchState {
         self.hover_fired_at = None;
     }
 
-    /// 喂一帧：鼠标位置、左键是否按下、修饰键是否按下、当前时刻
-    pub fn step(&mut self, x: i32, y: i32, left_down: bool, mod_down: bool, now: Instant) -> Option<Trigger> {
+    /// 喂一帧：鼠标位置、左键是否按下、修饰键是否按下、光标是不是 I 形、当前时刻
+    pub fn step(
+        &mut self,
+        x: i32,
+        y: i32,
+        left_down: bool,
+        mod_down: bool,
+        over_text: bool,
+        now: Instant,
+    ) -> Option<Trigger> {
         if self.paused {
             self.was_down = left_down;
             return None;
@@ -69,12 +91,18 @@ impl WatchState {
         let mut out = None;
         if left_down && !self.was_down {
             self.down_at = Some((x, y));
+            self.drag_over_text = false;
         } else if !left_down && self.was_down {
             if let Some((sx, sy)) = self.down_at.take() {
                 if (x - sx).abs() + (y - sy).abs() >= self.cfg.min_drag_px {
-                    out = Some(Trigger::SelectionEnded { x, y });
+                    out = Some(Trigger::SelectionEnded { x, y, over_text: self.drag_over_text });
                 }
             }
+        }
+        // 拖动期间只要有一帧光标是 I 形，就算划过文字
+        // （从文字里拖到窗口边缘松手，抬起那帧已经不在文字上了）
+        if left_down && over_text {
+            self.drag_over_text = true;
         }
         self.was_down = left_down;
         if out.is_some() {
@@ -170,6 +198,8 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
                     press_seq2.store(text_capture::clipboard::sequence_number(), std::sync::atomic::Ordering::SeqCst);
                 }
                 last_left = left_down;
+                // 拖动时才问光标形状：只在按住左键的情况下才需要知道「划过的是不是文字」
+                let over_text = left_down && text_capture::screen::cursor_shape() == text_capture::screen::CursorShape::IBeam;
                 let mod_down = st.cfg.hover_modifier.is_down();
                 // 修饰键按下 / 松开各记一行：排「按住 Alt 没反应」时，
                 // 先要能分清是没读到按键，还是读到了但后面没走通
@@ -177,7 +207,7 @@ pub fn spawn(cfg: WatchConfig, tx: Sender<Trigger>) -> Watcher {
                     tracing::debug!("悬停修饰键 {} {}，鼠标物理({x},{y})", st.cfg.hover_modifier.label_zh(), if mod_down { "按下" } else { "松开" });
                     last_mod = mod_down;
                 }
-                if let Some(t) = st.step(x, y, left_down, mod_down, Instant::now()) {
+                if let Some(t) = st.step(x, y, left_down, mod_down, over_text, Instant::now()) {
                     tracing::debug!("鼠标监视触发 {t:?}");
                     if tx.send(t).is_err() {
                         break;
@@ -214,56 +244,85 @@ mod tests {
     fn drag_then_release_fires_selection() {
         let mut s = st();
         let t = Instant::now();
-        assert_eq!(s.step(10, 10, true, false, t), None);
-        assert_eq!(s.step(60, 10, true, false, t), None);
-        assert_eq!(s.step(60, 10, false, false, t), Some(Trigger::SelectionEnded { x: 60, y: 10 }));
+        assert_eq!(s.step(10, 10, true, false, true, t), None);
+        assert_eq!(s.step(60, 10, true, false, true, t), None);
+        assert_eq!(
+            s.step(60, 10, false, false, true, t),
+            Some(Trigger::SelectionEnded { x: 60, y: 10, over_text: true })
+        );
+    }
+
+    /// 拖的不是文字（拖文件、拖窗口）→ 标记 over_text=false，界面据此不弹图标
+    #[test]
+    fn drag_over_non_text_is_marked() {
+        let mut s = st();
+        let t = Instant::now();
+        s.step(10, 10, true, false, false, t);
+        s.step(60, 10, true, false, false, t);
+        assert_eq!(
+            s.step(60, 10, false, false, false, t),
+            Some(Trigger::SelectionEnded { x: 60, y: 10, over_text: false })
+        );
+    }
+
+    /// 从文字里拖到空白处松手：中途划过文字就算划过文字
+    #[test]
+    fn drag_that_started_over_text_counts() {
+        let mut s = st();
+        let t = Instant::now();
+        s.step(10, 10, true, false, true, t);
+        s.step(60, 10, true, false, false, t);
+        assert_eq!(
+            s.step(60, 10, false, false, false, t),
+            Some(Trigger::SelectionEnded { x: 60, y: 10, over_text: true })
+        );
     }
 
     #[test]
     fn plain_click_does_not_fire() {
         let mut s = st();
         let t = Instant::now();
-        s.step(10, 10, true, false, t);
-        assert_eq!(s.step(12, 11, false, false, t), None, "移动不足 12 px 不算划选");
+        s.step(10, 10, true, false, true, t);
+        assert_eq!(s.step(12, 11, false, false, true, t), None, "移动不足 12 px 不算划选");
     }
 
     #[test]
     fn hover_fires_once_after_delay() {
         let mut s = st();
         let t0 = Instant::now();
-        assert_eq!(s.step(50, 50, false, true, t0), None, "刚停下不触发");
-        assert_eq!(s.step(50, 50, false, true, t0 + Duration::from_millis(200)), None);
+        assert_eq!(s.step(50, 50, false, true, false, t0), None, "刚停下不触发");
+        assert_eq!(s.step(50, 50, false, true, false, t0 + Duration::from_millis(200)), None);
         assert_eq!(
-            s.step(50, 50, false, true, t0 + Duration::from_millis(320)),
+            s.step(50, 50, false, true, false, t0 + Duration::from_millis(320)),
             Some(Trigger::Hovered { x: 50, y: 50 })
         );
-        assert_eq!(s.step(50, 50, false, true, t0 + Duration::from_millis(900)), None, "同一位置只触发一次");
+        assert_eq!(s.step(50, 50, false, true, false, t0 + Duration::from_millis(900)), None, "同一位置只触发一次");
     }
 
     #[test]
     fn moving_resets_hover_timer() {
         let mut s = st();
         let t0 = Instant::now();
-        s.step(50, 50, false, true, t0);
-        s.step(200, 200, false, true, t0 + Duration::from_millis(200));
-        assert_eq!(s.step(200, 200, false, true, t0 + Duration::from_millis(400)), None, "移动后重新计时");
-        assert!(s.step(200, 200, false, true, t0 + Duration::from_millis(560)).is_some());
+        s.step(50, 50, false, true, false, t0);
+        s.step(200, 200, false, true, false, t0 + Duration::from_millis(200));
+        assert_eq!(s.step(200, 200, false, true, false, t0 + Duration::from_millis(400)), None, "移动后重新计时");
+        assert!(s.step(200, 200, false, true, false, t0 + Duration::from_millis(560)).is_some());
     }
 
     #[test]
     fn hover_needs_modifier() {
         let mut s = st();
         let t0 = Instant::now();
-        s.step(50, 50, false, false, t0);
-        assert_eq!(s.step(50, 50, false, false, t0 + Duration::from_millis(500)), None);
+        s.step(50, 50, false, false, false, t0);
+        assert_eq!(s.step(50, 50, false, false, false, t0 + Duration::from_millis(500)), None);
     }
 
     #[test]
     fn modifier_none_disables_hover() {
         let mut s = WatchState::new(WatchConfig { hover_modifier: HoverModifier::None, ..Default::default() });
         let t0 = Instant::now();
-        s.step(50, 50, false, true, t0);
-        assert_eq!(s.step(50, 50, false, true, t0 + Duration::from_secs(1)), None);
+        s.step(50, 50, false, true, false, t0);
+        assert_eq!(s.step(50, 50, false, true, false, t0 + Duration::from_secs(1)), None);
     }
 
     #[test]
@@ -271,8 +330,8 @@ mod tests {
         let mut s = st();
         s.paused = true;
         let t0 = Instant::now();
-        s.step(10, 10, true, false, t0);
-        assert_eq!(s.step(80, 10, false, false, t0), None);
-        assert_eq!(s.step(80, 10, false, true, t0 + Duration::from_secs(1)), None);
+        s.step(10, 10, true, false, true, t0);
+        assert_eq!(s.step(80, 10, false, false, true, t0), None);
+        assert_eq!(s.step(80, 10, false, true, true, t0 + Duration::from_secs(1)), None);
     }
 }

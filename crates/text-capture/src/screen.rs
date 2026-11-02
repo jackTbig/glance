@@ -38,6 +38,68 @@ pub fn cursor_pos() -> (i32, i32) {
     }
 }
 
+/// 光标形状粗判：用来分辨「鼠标停在文字上」还是「停在别的东西上」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    /// I 形：停在可选中的文字上
+    IBeam,
+    /// 箭头：不在文字上（拖文件、拖滑块、拖图片都是这个）
+    Arrow,
+    /// 其它（手型、拖动图标、自绘光标……）认不准
+    Other,
+}
+
+/// 当前光标的形状。取不到就按「认不准」处理。
+///
+/// 判据是光标手柄：系统 I 形/箭头都是共享对象，手柄全局唯一。
+/// 拿不到形状信息时返回 Other——**宁可认不准，也不要把划词判没了**。
+pub fn cursor_shape() -> CursorShape {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorInfo, LoadCursorW, CURSORINFO, IDC_ARROW, IDC_IBEAM,
+        };
+
+        static IBEAM: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+        static ARROW: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+        unsafe {
+            let mut ibeam = IBEAM.load(Ordering::Relaxed);
+            if ibeam.is_null() {
+                ibeam = LoadCursorW(std::ptr::null_mut(), IDC_IBEAM);
+                IBEAM.store(ibeam, Ordering::Relaxed);
+            }
+            let mut arrow = ARROW.load(Ordering::Relaxed);
+            if arrow.is_null() {
+                arrow = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
+                ARROW.store(arrow, Ordering::Relaxed);
+            }
+            if ibeam.is_null() || arrow.is_null() {
+                return CursorShape::Other;
+            }
+            let mut info = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+            if GetCursorInfo(&mut info) == 0 {
+                return CursorShape::Other;
+            }
+            // 光标被藏起来了（有些程序拖拽时藏光标）：这时候形状不可信
+            if info.flags & windows_sys::Win32::UI::WindowsAndMessaging::CURSOR_SUPPRESSED != 0 {
+                return CursorShape::Other;
+            }
+            if info.hCursor == ibeam {
+                CursorShape::IBeam
+            } else if info.hCursor == arrow {
+                CursorShape::Arrow
+            } else {
+                CursorShape::Other
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        CursorShape::Other
+    }
+}
+
 /// 以 (x, y) 为中心的 w×h 矩形，收敛到虚拟屏范围内
 pub fn rect_around(x: i32, y: i32, w: u32, h: u32) -> (i32, i32, u32, u32) {
     let (vx, vy, vw, vh) = virtual_screen();
