@@ -14,6 +14,11 @@ extension/node_modules
 # 探针产出的存证截图
 *_live.png
 region_strip.png
+sel_icon_probe.png
+
+# 探针开的临时文件
+apps/desktop/tt_probe_sel_icon.txt
+apps/desktop/region_probe.txt
 
 # 字幕的安装依赖与产物（大文件，不进 git；vc_redist 从微软下载，模型在 D:\models）
 apps/caption/installer/deps/
