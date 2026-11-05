@@ -94,10 +94,18 @@ async function init() {
   const conn = $("conn");
   if (reply?.ok && reply.health) {
     const h = reply.health as Health;
-    conn.textContent = `桌面端已连接 · v${h.version}`;
-    conn.className = "conn ok";
-    $("serviceName").textContent = h.model ? `${h.model}` : h.backend ?? "—";
-    $("serviceName").title = `后端 ${h.backend ?? "?"} · 模型 ${h.model ?? "?"}`;
+    if (h.backend === "direct") {
+      // 直连模式：不需要桌面端，桌面端没跑也不算异常
+      conn.textContent = h.configured ? `第三方接口 · ${h.model}` : "第三方接口未配置";
+      conn.className = h.configured ? "conn ok" : "conn bad";
+      $("serviceName").textContent = h.model || "—";
+      $("serviceName").title = "插件直连模型接口";
+    } else {
+      conn.textContent = `桌面端已连接 · v${h.version}`;
+      conn.className = "conn ok";
+      $("serviceName").textContent = h.model ? `${h.model}` : h.backend ?? "—";
+      $("serviceName").title = `后端 ${h.backend ?? "?"} · 模型 ${h.model ?? "?"}`;
+    }
   } else {
     conn.textContent = "桌面端未运行";
     conn.className = "conn bad";

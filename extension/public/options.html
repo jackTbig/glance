@@ -12,6 +12,9 @@
   @media (prefers-color-scheme: dark) { .hint2 { color: #999; } code { background: #333; } }
   .hint { color: #666; font-size: 12px; margin-bottom: 18px; }
   .row { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .combo { display: flex; gap: 6px; align-items: center; }
+  .combo input { flex: 1; min-width: 0; }
+  .combo button { flex: none; padding: 5px 10px; white-space: nowrap; }
   input[type=number], input[type=text], select, textarea { padding: 5px 7px; border: 1px solid #ccc; border-radius: 5px; font: inherit; width: 100%; box-sizing: border-box; }
   textarea { height: 70px; resize: vertical; }
   button { padding: 7px 14px; border: none; border-radius: 6px; background: #285ab4; color: #fff; cursor: pointer; font: inherit; }
@@ -26,8 +29,43 @@
 </style>
 </head>
 <body>
-  <h1>translate-tool</h1>
-  <div class="hint">API Key、模型、术语表在桌面端设置。这里只管浏览器里的行为。</div>
+  <h1>简译 Glance 设置</h1>
+  <div class="hint">浏览器里的行为在这里配。翻译默认交给本机桌面端；也可以让插件直连第三方模型接口。</div>
+
+  <h2>翻译后端</h2>
+  <div class="row"><label for="backend">后端</label>
+    <select id="backend">
+      <option value="local">本机桌面端（简译 Glance）</option>
+      <option value="direct">第三方模型接口（插件直连）</option>
+    </select>
+  </div>
+  <div id="directBox" hidden>
+    <div class="row"><label for="apiPreset">服务商</label>
+      <select id="apiPreset">
+        <option value="">自定义</option>
+        <option value="https://api.deepseek.com/v1">DeepSeek</option>
+        <option value="https://api.openai.com/v1">OpenAI</option>
+        <option value="https://open.bigmodel.cn/api/paas/v4">智谱 GLM</option>
+        <option value="https://dashscope.aliyuncs.com/compatible-mode/v1">通义千问</option>
+        <option value="https://api.moonshot.cn/v1">月之暗面 Kimi</option>
+        <option value="https://api.siliconflow.cn/v1">SiliconFlow</option>
+      </select>
+    </div>
+    <div class="row"><label for="apiBase">接口地址</label><input id="apiBase" type="text" placeholder="https://api.deepseek.com/v1" /></div>
+    <div class="row"><label for="apiKey">API Key</label><input id="apiKey" type="password" placeholder="sk-…" autocomplete="off" /></div>
+    <div class="row"><label for="apiModel">模型</label>
+      <span class="combo">
+        <input id="apiModel" type="text" list="modelList" placeholder="deepseek-flash" autocomplete="off" />
+        <datalist id="modelList"></datalist>
+        <button id="listModels" class="ghost">模型列表</button>
+      </span>
+    </div>
+    <div class="hint2">接口地址填到 <code>/v1</code> 这一层（如 <code>https://api.deepseek.com/v1</code>）。
+      Key 只存在这台电脑的浏览器里（<code>chrome.storage.local</code>），不会同步到 Google；
+      插件会用它直接请求你填的地址，保存时会向 Chrome 申请访问该站点的权限。</div>
+  </div>
+
+  <h2>浏览器行为</h2>
   <div class="row"><label for="port">本地服务端口</label><input id="port" type="number" min="1024" max="65535" /></div>
   <div class="row"><label for="hoverModifier">段落翻译自动触发键</label>
     <select id="hoverModifier"><option value="alt">Alt</option><option value="ctrl">Ctrl</option><option value="shift">Shift</option><option value="none">关闭悬停</option></select>
@@ -47,7 +85,7 @@
   <div class="row"><label for="keyFullPage">整页翻译</label><input id="keyFullPage" type="text" /></div>
   <div class="row"><label for="keySelection">翻译选中文字</label><input id="keySelection" type="text" /></div>
 
-  <p><button id="save">保存</button> <button id="check" class="ghost">检测桌面端</button><span id="status"></span></p>
+  <p><button id="save">保存</button> <button id="check" class="ghost">检测桌面端</button> <button id="test" class="ghost">测试直连接口</button><span id="status"></span></p>
   <script src="options.js"></script>
 </body>
 </html>

@@ -10,6 +10,9 @@ export type Scene = "full_page" | "selection" | "hover" | "screenshot" | "word";
 /** 页面显示模式 */
 export type DisplayMode = "bilingual" | "translation_only" | "original";
 
+/** 翻译走哪条路：local = 本机桌面端，direct = 插件直连第三方模型接口 */
+export type Backend = "local" | "direct";
+
 export interface Settings {
   port: number;
   /** 悬停修饰键；none = 关闭悬停 */
@@ -26,6 +29,12 @@ export interface Settings {
    *  （Alt+Shift+T 就是 Chrome 的工具栏焦点键，永远拿不到）。 */
   keyFullPage: string;
   keySelection: string;
+  /** 翻译后端 */
+  backend: Backend;
+  /** 直连模式的接口地址，填到 /v1 这一层，如 https://api.deepseek.com/v1 */
+  apiBase: string;
+  /** 直连模式的模型名 */
+  apiModel: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -37,7 +46,14 @@ export const DEFAULT_SETTINGS: Settings = {
   disabledHosts: [],
   keyFullPage: "Alt+Shift+Y",
   keySelection: "Alt+Shift+S",
+  backend: "local",
+  apiBase: "",
+  apiModel: "",
 };
+
+/** API Key 单独存 local：sync 会同步到 Google 的服务器，Key 不能进那里 */
+export const API_KEY_KEY = "apiKey";
+
 
 /** 把 "Alt+Shift+H" 解析成可比对的形状；不合法返回 null */
 export function parseHotkey(spec: string): { alt: boolean; ctrl: boolean; shift: boolean; key: string } | null {
@@ -85,6 +101,8 @@ export interface Health {
   model?: string;
   concurrency: number;
   batch_size: number;
+  /** 直连模式下：地址/Key/模型是否齐了 */
+  configured?: boolean;
 }
 
 /** popup 问 content script 要的当前页状态 */
@@ -121,7 +139,11 @@ export type Message =
   | { kind: "translate"; scene: Scene; items: TranslateItem[]; context?: string }
   | { kind: "health" }
   | { kind: "settings" }
-  | { kind: "lookup_offline"; text: string };
+  | { kind: "lookup_offline"; text: string }
+  /** 设置页测试直连接口：地址/Key/模型由设置页给，方便先试再存 */
+  | { kind: "direct_test"; base: string; key: string; model: string }
+  /** 设置页拉模型列表（照桌面端：点开下拉就拉，失败把原因带回去） */
+  | { kind: "list_models"; base: string; key: string };
 
 /** popup / background → content script */
 export type PageCommand =
@@ -137,6 +159,8 @@ export type Reply =
   | { ok: true; health: Health }
   | { ok: true; settings: Settings }
   | { ok: true; offline: LookupOfflineResult }
+  /** 测试直连的结果：models 是服务商给的模型列表（不支持 /models 时为空） */
+  | { ok: true; models: string[]; reply?: string }
   | { ok: false; error: string };
 
 /** 服务未运行时给用户看的提示 */
@@ -177,11 +201,17 @@ export function worthTranslating(text: string): boolean {
   return t.replace(/\s/g, "").length >= 2 && /[\p{L}]/u.test(t) && !isMostlyChinese(t);
 }
 
+/** 扩展自己的浮层：划词卡片、小图标、提示条。它们不是页面内容，别拿去翻译 */
+const OWN_UI_SELECTOR = "#tt-panel, #tt-icon, #tt-toast";
+
 function isSkipped(el: Element): boolean {
   if (SKIP_TAGS.has(el.tagName)) return true;
   if (el.classList.contains(TRANSLATION_CLASS)) return true;
   if (el.hasAttribute(MARK_ATTR)) return true;
   if (el.closest(`[${MARK_ATTR}]`) !== null) return true;
+  // 卡片插在 body 上，整页翻译后的增量翻译器会把它当成新内容再翻一遍——
+  // 结果卡片里的译文又被机器翻译，词条、释义全糊掉。
+  if (el.closest(OWN_UI_SELECTOR) !== null) return true;
   const he = el as HTMLElement;
   if (he.isContentEditable) return true;
   return false;

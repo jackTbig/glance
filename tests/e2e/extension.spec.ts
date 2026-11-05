@@ -224,6 +224,32 @@ test("划词：选中后出图标，点击弹面板给译文", async () => {
   await page.close();
 });
 
+test("整页翻译后再划词：卡片自己的内容不会被再翻一遍", async () => {
+  const page = await openPage();
+  await triggerPage(page); // 先整页翻：增量翻译器这时是开着的
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+
+  await page.evaluate(() => {
+    const el = document.getElementById("p1")!;
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const s = window.getSelection()!;
+    s.removeAllRanges();
+    s.addRange(r);
+  });
+  await page.bringToFront();
+  await tell(ctx, "translate_selection");
+
+  const panel = page.locator("#tt-panel");
+  await expect(panel).toBeVisible({ timeout: 15_000 });
+  await expect(panel.locator(".tt-body")).toHaveText(/zh=/, { timeout: 30_000 });
+  // 卡片插在 body 上，增量翻译器会把它当成新加的页面内容——
+  // 真翻一遍的话，卡片里会长出 .tt-translation 节点，词条被二次翻译糊掉
+  await page.waitForTimeout(1500);
+  expect(await panel.locator(".tt-translation").count()).toBe(0);
+  await page.close();
+});
+
 test("划词：选中单个词弹词典卡，版式与桌面端一致；选中句子仍是译文卡", async () => {
   const page = await openPage();
   // 只选中 p1 里的一个词
@@ -795,4 +821,68 @@ test("整页翻译：一段一个请求，请求数正好等于段数", async ()
   console.log("3 段页面，假后端收到的请求数：", stats.requests);
   expect(stats.requests).toBe(3); // 打包发的话只会是 1
   await page.close();
+});
+
+// ---------------- 直连模式：插件自己请求模型接口，不经过桌面端 ----------------
+
+test("直连模式：不经桌面端，插件直接向模型接口要译文", async () => {
+  const sw = ctx.serviceWorkers()[0];
+
+  // 走真实用户路径：在设置页填地址/Key/模型并保存
+  const opt = await ctx.newPage();
+  await opt.goto(`chrome-extension://${EXTENSION_ID}/options.html`);
+  // 等设置页自己把配置读进来（读端口那步完成即说明 load 跑完了）
+  await expect(opt.locator("#port")).toHaveValue(String(SERVICE_PORT), { timeout: 10_000 });
+  await opt.selectOption("#backend", "direct");
+  await opt.fill("#apiBase", `http://127.0.0.1:${MOCK_PORT}/v1`);
+  await opt.fill("#apiKey", "test-key");
+
+  // 模型列表：点按钮拉接口，列表进下拉（跟桌面端一个路子）
+  await opt.click("#listModels");
+  await expect(opt.locator("#status")).toHaveText(/拉到 2 个模型/, { timeout: 15_000 });
+  await expect(opt.locator("#listModels")).toHaveText("2 个模型");
+  await expect(opt.locator("#modelList option")).toHaveText(["mock-model-a", "mock-model-b"]);
+  // 从列表里挑一个填进模型框
+  await opt.fill("#apiModel", "mock-model-a");
+
+  await opt.click("#save");
+  await expect(opt.locator("#status")).toHaveText(/已保存/, { timeout: 10_000 });
+
+  // Key 存 local，不进 sync
+  const stored = await opt.evaluate(async () => ({
+    sync: await chrome.storage.sync.get(["backend", "apiBase", "apiModel"]),
+    local: await chrome.storage.local.get(["apiKey"]),
+  }));
+  expect(stored.sync.backend).toBe("direct");
+  expect(stored.sync.apiBase).toBe(`http://127.0.0.1:${MOCK_PORT}/v1`);
+  expect(stored.sync.apiModel).toBe("mock-model-a");
+  expect(stored.sync).not.toHaveProperty("apiKey");
+  expect(stored.local.apiKey).toBe("test-key");
+
+  // 菜单上显示的是直连，不是「桌面端未运行」
+  const popup = await openPopup();
+  await expect(popup.locator("#conn")).toHaveText(/第三方接口/, { timeout: 15_000 });
+  await expect(popup.locator("#conn")).toHaveClass(/ok/);
+  await popup.close();
+
+  // 整页翻译：照样逐段上屏
+  const page = await openPage();
+  await triggerPage(page);
+  await expect(page.locator("#p1 .tt-translation")).toHaveText(/zh=/, { timeout: 30_000 });
+  await page.close();
+
+  // 划词场景（另一套提示词）：从扩展页发消息，验这条路也通
+  const rep = await opt.evaluate(async () => {
+    const r = await chrome.runtime.sendMessage({ kind: "translate", scene: "selection", items: [{ id: "s", text: "hello" }] });
+    return r as { ok: boolean; results?: { id: string; text?: string; error?: string }[] };
+  });
+  expect(rep.ok).toBe(true);
+  expect(rep.results?.[0]?.text ?? "").toMatch(/zh=/);
+
+  // 切回本机桌面端，后面的用例不受影响
+  await sw.evaluate(async (port) => {
+    await chrome.storage.sync.set({ backend: "local", port, apiBase: "", apiModel: "" });
+    await chrome.storage.local.set({ apiKey: "" });
+  }, SERVICE_PORT);
+  await opt.close();
 });

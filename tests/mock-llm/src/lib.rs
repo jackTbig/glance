@@ -5,6 +5,7 @@
 //!   `stream=true` 按 SSE 分 3 片吐，否则普通 JSON。
 //! - 文本含 `[[429]]` → 该文本首次返回 429 + `Retry-After: 0`，第二次正常；
 //!   `[[500]]` → 永远 500；`[[slow:N]]` → 延迟 N ms；`[[drop:K]]` → 回包中删掉以 `⟨K⟩` 开头的那一行。
+//! - `GET /models` → OpenAI 兼容的模型列表（插件设置页的「模型列表」下拉要拉它）。
 //! - `GET /stats` → `{ "requests", "max_inflight", "inflight", "last_thinking" }`；`POST /reset` 清零。
 //!   `last_thinking` = 最近一次请求体里的 `enable_thinking`（null = 没带这个参数；
 //!   只认布尔值——应用侧配置是强类型 Option<bool>，不会有别的形状上来）。
@@ -163,6 +164,17 @@ async fn stats(State(st): State<Shared>) -> Json<Stats> {
     Json(st.lock().unwrap().stats.clone())
 }
 
+/// 模型列表：OpenAI 兼容形状。插件的「模型列表」下拉要拉它。
+async fn models() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "object": "list",
+        "data": [
+            {"id": "mock-model-a", "object": "model"},
+            {"id": "mock-model-b", "object": "model"}
+        ]
+    }))
+}
+
 async fn reset(State(st): State<Shared>) -> StatusCode {
     let mut g = st.lock().unwrap();
     g.stats = Stats::default();
@@ -174,6 +186,8 @@ fn router(st: Shared) -> Router {
     Router::new()
         .route("/chat/completions", post(chat))
         .route("/v1/chat/completions", post(chat))
+        .route("/models", get(models))
+        .route("/v1/models", get(models))
         .route("/stats", get(stats))
         .route("/reset", post(reset))
         .with_state(st)
