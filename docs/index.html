@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>简译 Glance —— 桌面端 + Chrome 插件的翻译工具</title>
+<meta name="description" content="Windows 上的翻译工具：任意窗口划词取词、框选屏幕区域翻译，配套 Chrome 插件做整页/悬停/划词翻译。翻译交给大模型，API Key 不进浏览器。" />
+<style>
+  :root { --ink:#12161f; --sub:#5b6472; --line:#e6e9ef; --bg:#fff; --card:#f7f9fc; --accent:#285ab4; --code:#f0f2f6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e8ecf3; --sub:#a3adbd; --line:#2a3038; --bg:#0f1218; --card:#171b22; --accent:#7aa7ff; --code:#1e242c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.8 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  a { color:var(--accent); }
+  .wrap { max-width:980px; margin:0 auto; padding:0 24px; }
+  header { border-bottom:1px solid var(--line); }
+  header .wrap { display:flex; align-items:center; gap:12px; padding-top:16px; padding-bottom:16px; }
+  header img { width:34px; height:34px; border-radius:9px; }
+  header b { font-size:17px; letter-spacing:-.2px; }
+  header nav { margin-left:auto; display:flex; gap:20px; font-size:15px; }
+  header nav a { color:var(--sub); text-decoration:none; }
+  header nav a:hover { color:var(--ink); }
+  .hero { padding:64px 0 48px; }
+  .hero h1 { font-size:42px; line-height:1.25; margin:0 0 14px; letter-spacing:-.8px; }
+  .hero p.lead { font-size:19px; color:var(--sub); margin:0 0 28px; max-width:660px; }
+  .btns { display:flex; flex-wrap:wrap; gap:12px; }
+  .btns a { display:inline-block; padding:11px 20px; border-radius:9px; text-decoration:none;
+            border:1px solid var(--line); color:var(--ink); background:var(--bg); font-weight:600; }
+  .btns a.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .shots { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin:12px 0 0; }
+  .shots figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .shots img { width:100%; display:block; }
+  .shots figcaption { padding:9px 13px; font-size:13px; color:var(--sub); }
+  h2 { font-size:24px; margin:56px 0 10px; letter-spacing:-.3px; }
+  h3 { font-size:17px; margin:26px 0 6px; }
+  .cols { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:16px; margin:16px 0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px 22px; }
+  .card h3 { margin-top:0; }
+  ul { padding-left:22px; } li { margin:5px 0; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:15px; }
+  th, td { border:1px solid var(--line); padding:9px 11px; text-align:left; vertical-align:top; }
+  th { background:var(--card); }
+  code { background:var(--code); padding:1px 5px; border-radius:4px; font-size:14px; }
+  .note { color:var(--sub); font-size:14px; }
+  footer { margin-top:64px; padding:24px 0 48px; border-top:1px solid var(--line); color:var(--sub); font-size:14px; }
+  @media (max-width:640px) { .hero h1 { font-size:32px; } header nav { display:none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <img src="img/icon-128.png" alt="简译 Glance" />
+    <b>简译 Glance</b>
+    <nav>
+      <a href="#features">功能</a>
+      <a href="#install">安装</a>
+      <a href="#privacy">隐私</a>
+      <a href="#support">支持</a>
+      <a href="https://github.com/jackTbig/translate-tool">源码</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+<section class="hero">
+  <h1>网页上的翻译助手，<br />也是一台看得见的翻译引擎</h1>
+  <p class="lead">桌面端 + Chrome 插件，翻译交给大模型。目标语言固定简体中文，中文段落自动跳过。</p>
+  <div class="btns">
+    <a class="primary" href="https://github.com/jackTbig/translate-tool/releases">下载桌面端</a>
+    <a href="https://chromewebstore.google.com/">安装 Chrome 插件</a>
+    <a href="https://github.com/jackTbig/translate-tool">看源码</a>
+  </div>
+</section>
+
+<div class="shots">
+  <figure><img src="img/screenshot-page.png" alt="整页双语对照" /><figcaption>整页翻译：双语对照，可切仅译文 / 原文</figcaption></figure>
+  <figure><img src="img/screenshot-word.png" alt="划词词典卡" /><figcaption>划词取词：单个词给的是词典卡</figcaption></figure>
+  <figure><img src="img/screenshot-settings.png" alt="设置页" /><figcaption>设置页：本机桌面端，或直连模型接口</figcaption></figure>
+</div>
+
+<h2 id="features">能做什么</h2>
+<div class="cols">
+  <div class="card">
+    <h3>桌面端（Windows）</h3>
+    <ul>
+      <li>任意窗口划词取词：浏览器、终端、PDF 阅读器都取得到</li>
+      <li>框选屏幕区域翻译，译文盖回原位置</li>
+      <li>取到单个词给词典卡：音标、词性、释义、词形、例句</li>
+      <li>术语表对照、朗读（Windows 语音合成）</li>
+      <li>实时字幕（可选组件，本地 whisper 识别）</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Chrome 插件</h3>
+    <ul>
+      <li>整页翻译：按文档顺序分批上屏</li>
+      <li>悬停翻译：按住 Ctrl 停在段落上</li>
+      <li>划词翻译：选中弹图标，单个词给词典卡</li>
+      <li>格式与公式保留：链接、加粗、已渲染的公式都留着</li>
+    </ul>
+  </div>
+</div>
+
+<h2>两种后端</h2>
+<table>
+  <tr><th></th><th>本机桌面端</th><th>直连模型接口</th></tr>
+  <tr><td>谁请求模型</td><td>桌面端服务（只监听 127.0.0.1）</td><td>插件自己请求</td></tr>
+  <tr><td>API Key 放哪</td><td>桌面端配置文件，不进浏览器</td><td>浏览器扩展的本地存储，不参与账号同步</td></tr>
+  <tr><td>离线词库</td><td>有，查单词先秒出本地释义</td><td>没有</td></tr>
+  <tr><td>适合</td><td>自己的电脑、机密页面</td><td>只想装插件、多设备用</td></tr>
+</table>
+<p class="note">直连模式支持任何 OpenAI 兼容的服务：DeepSeek、OpenAI、通义千问、智谱、Kimi、硅基流动……</p>
+
+<h2 id="install">安装</h2>
+<ul>
+  <li><strong>桌面端</strong>：<a href="https://github.com/jackTbig/translate-tool/releases">Releases</a> 里下载 <code>简译Glance-setup-&lt;版本&gt;.exe</code>（约 684 MB，含实时字幕组件与两个语音识别模型）。</li>
+  <li><strong>Chrome 插件</strong>：Chrome 应用商店（审核中）；也可以从 <a href="https://github.com/jackTbig/translate-tool/releases">Releases</a> 下载 <code>glance-extension-&lt;版本&gt;.zip</code> 解压后在 <code>chrome://extensions</code> 里「加载已解压的扩展程序」。</li>
+</ul>
+<p class="note">商店版与解压版是两个不同的扩展，ID 不一样，商店版会申请本机服务（127.0.0.1）的访问权限。</p>
+
+<h2 id="privacy">隐私政策</h2>
+<p class="note">生效日期：2026-11-05　适用版本：1.2.3 及以后</p>
+
+<h3>我们收集什么</h3>
+<p>开发者不收集任何数据。扩展与桌面端里没有统计、广告、后台或用户账号，也没有向开发者服务器发送的任何一条信息。处理的数据只有两类：</p>
+<ul>
+  <li>你主动要求翻译的网页文字（整页翻译时页面上的段落、划词时你选中的那段文字）。</li>
+  <li>你在设置页填的模型接口地址、API Key、模型名，以及快捷键等界面设置。</li>
+</ul>
+
+<h3>数据发给谁</h3>
+<ul>
+  <li><strong>走本机桌面端</strong>：文字发给你自己电脑上运行的桌面端服务，只走回环地址 127.0.0.1，不经过网络。这时你的 API Key 只在桌面端的配置文件里，浏览器和扩展都拿不到。</li>
+  <li><strong>直连模型接口</strong>：文字直接发给你填写的那个接口地址。服务商按它自己的隐私政策处理这些文字。</li>
+</ul>
+<p>无论走哪条路，开发者都拿不到这些内容。</p>
+
+<h3>数据存在哪里</h3>
+<table>
+  <tr><th>内容</th><th>存储位置</th><th>是否随账号同步</th></tr>
+  <tr><td>API Key</td><td>浏览器扩展的本地存储（chrome.storage.local）</td><td>否，不会同步到 Google</td></tr>
+  <tr><td>接口地址、模型名、快捷键等设置</td><td>浏览器扩展的同步存储（chrome.storage.sync）</td><td>是，仅为方便你在多台设备上用同一套设置</td></tr>
+  <tr><td>翻译历史</td><td>不保存。扩展没有翻译历史功能</td><td>—</td></tr>
+</table>
+<p>清空 API Key：在扩展设置页把 API Key 框清空并保存即可。卸载扩展会删除上述全部本地数据。</p>
+
+<h3>权限的用途</h3>
+<table>
+  <tr><th>权限</th><th>用途</th></tr>
+  <tr><td>storage</td><td>保存上述设置与 API Key</td></tr>
+  <tr><td>activeTab</td><td>你点扩展图标时识别当前标签页</td></tr>
+  <tr><td>scripting</td><td>扩展更新后给已打开的标签页重新注入脚本</td></tr>
+  <tr><td>http://127.0.0.1/*</td><td>连接你自己电脑上的桌面端服务</td></tr>
+  <tr><td>站点访问权限</td><td>只在你填写了模型接口地址后，才会就该地址单独向你申请，由你在 Chrome 弹窗里逐次决定</td></tr>
+</table>
+
+<h3>第三方组件</h3>
+<p>插件打包了 <a href="https://katex.org/">KaTeX</a>（LaTeX 公式渲染，MIT 许可），完全本地运行，不联网加载任何代码。</p>
+
+<h3>变更</h3>
+<p>政策如有变更，会随新版本发布，并更新本文件顶部的生效日期与版本号。</p>
+
+<h2 id="support">支持与反馈</h2>
+<ul>
+  <li>邮箱：jackt20210001@gmail.com</li>
+  <li>源码与问题反馈：<a href="https://github.com/jackTbig/translate-tool">github.com/jackTbig/translate-tool</a></li>
+</ul>
+<p class="note">反馈时带上这三样，定位会快很多：出问题页面的网址、扩展的版本号（chrome://extensions 里能看到）、以及「关于」页里的排障信息复制内容。</p>
+
+<h2>快捷键</h2>
+<table>
+  <tr><th>动作</th><th>快捷键</th></tr>
+  <tr><td>整页翻译</td><td>Alt+Shift+Y</td></tr>
+  <tr><td>划词翻译</td><td>Alt+Shift+S</td></tr>
+  <tr><td>段落翻译</td><td>按住 Ctrl（可改成 Alt 或 Shift）停在段落上</td></tr>
+</table>
+
+<footer>
+  简译 Glance · 1.2.3 · <a href="#privacy">隐私政策</a> · <a href="#support">支持</a> · <a href="https://github.com/jackTbig/translate-tool">源码</a> · MIT 许可
+</footer>
+
+</div>
+</body>
+</html>

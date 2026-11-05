@@ -27,3 +27,6 @@ apps/caption/dist/
 apps/caption/logs/
 apps/caption/transcripts/
 apps/caption/config.toml
+
+# 项目工作笔记：只留本机，不进公开仓库
+CLAUDE.md
