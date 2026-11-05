@@ -44,9 +44,9 @@ Windows 上的翻译工具：**一个桌面端 + 一个 Chrome 插件**，翻译
 
 ## 安装
 
-- **桌面端**：[Releases](https://github.com/jackTbig/translate-tool/releases) 里下载 `简译Glance-setup-<版本>.exe`
+- **桌面端**：[Releases](https://github.com/jackTbig/glance/releases) 里下载 `简译Glance-setup-<版本>.exe`
   （约 684 MB，含实时字幕组件与两个语音识别模型；不装字幕的话体积会小很多）
-- **Chrome 插件**：Chrome 应用商店（审核中）；也可以从 [Releases](https://github.com/jackTbig/translate-tool/releases)
+- **Chrome 插件**：Chrome 应用商店（审核中）；也可以从 [Releases](https://github.com/jackTbig/glance/releases)
   下载 `glance-extension-<版本>.zip` 解压后在 `chrome://extensions` 里「加载已解压的扩展程序」
   （注意：商店版与解压版是不同的扩展，ID 不一样）
 
