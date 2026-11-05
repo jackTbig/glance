@@ -855,10 +855,6 @@ impl CaptionApp {
                             d.translate.openai_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
                             d.translate.openai_model = "qwen-turbo".into();
                         }
-                        if ui.button("自建网关").clicked() {
-                            d.translate.openai_base_url = "https://gateway.example.com/v1".into();
-                            d.translate.openai_model = "deepseek-v4-flash".into();
-                        }
                         if ui.button("Ollama 本地").clicked() {
                             d.translate.openai_base_url = "http://127.0.0.1:11434/v1".into();
                             d.translate.openai_model = "qwen2.5:7b".into();

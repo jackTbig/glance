@@ -30,3 +30,6 @@ apps/caption/config.toml
 
 # 项目工作笔记：只留本机，不进公开仓库
 CLAUDE.md
+
+# 字幕子项目的工作笔记：同样只留本机
+apps/caption/CLAUDE.md
