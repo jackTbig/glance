@@ -183,7 +183,7 @@ try {
 
   // 4) 插件菜单
   const menu = await ctx.newPage();
-  await menu.setViewportSize({ width: 420, height: 640 });
+  await menu.setViewportSize({ width: 640, height: 400 });
   await menu.goto(`chrome-extension://${ID}/popup.html`);
   await menu.waitForTimeout(1200);
   await menu.screenshot({ path: `${OUT}/screenshot-4-menu.png` });

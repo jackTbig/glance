@@ -40,15 +40,22 @@ def build() -> None:
         subprocess.run(["npm", "run", "build"], cwd=EXT, check=True)
 
 
-def check_package(manifest: dict, entries: list[str]) -> list[str]:
+def resolve_text(text: str, messages: dict) -> str:
+    """把 manifest 里的 __MSG_xxx__ 换成 messages.json 里的真话"""
+    for name, entry in messages.items():
+        text = text.replace(f"__MSG_{name}__", entry.get("message", ""))
+    return text
+
+
+def check_package(manifest: dict, entries: list[str], messages: dict) -> list[str]:
     """按商店的规矩自查一遍，把问题挑出来（不改内容，只报错）"""
     problems = []
     if "key" in manifest:
         problems.append("manifest 里还有 key 字段，商店会拒收（key field is not allowed in manifest）")
     for f in REQUIRED_FIELDS:
-        if not manifest.get(f):
-            problems.append(f"manifest 缺必填字段 {f}")
-    desc = manifest.get("description", "")
+        if not resolve_text(str(manifest.get(f, "")), messages):
+            problems.append(f"manifest 缺必填字段 {f}（或它的 __MSG_ 消息没写）")
+    desc = resolve_text(str(manifest.get("description", "")), messages)
     if len(desc) > MAX_DESCRIPTION:
         problems.append(f"description {len(desc)} 字符，超过商店的 {MAX_DESCRIPTION} 上限")
     if any(e.startswith("_metadata/") for e in entries):
@@ -57,6 +64,13 @@ def check_package(manifest: dict, entries: list[str]) -> list[str]:
         problems.append("包里混进了 node_modules/")
     if not any(e == "manifest.json" for e in entries):
         problems.append("manifest.json 不在压缩包根目录")
+    # manifest 里引用的 __MSG_ 必须在 _locales 里存在，否则 Chrome 直接拒绝加载这个扩展
+    for f in ("name", "description"):
+        for token in str(manifest.get(f, "")).split():
+            if token.startswith("__MSG_") and token.endswith("__"):
+                key = token[len("__MSG_") : -2]
+                if key not in messages:
+                    problems.append(f"manifest 引用了 __MSG_{key}__，但 _locales 里没有这条消息")
     return problems
 
 
@@ -72,6 +86,13 @@ def main() -> None:
         sys.exit(f"没有 {manifest_path}，先构建再打包")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # manifest 里的 __MSG_xxx__ 要能在 _locales 里找到对应消息
+    locale = manifest.get("default_locale", "")
+    messages: dict = {}
+    if locale:
+        msg_path = DIST / "_locales" / locale / "messages.json"
+        if msg_path.exists():
+            messages = json.loads(msg_path.read_text(encoding="utf-8"))
     version = manifest["version"]
     OUT.mkdir(exist_ok=True)
     target = OUT / f"glance-extension-{version}.zip"
@@ -91,7 +112,7 @@ def main() -> None:
     with zipfile.ZipFile(target) as z:
         entries = z.namelist()
         packed_manifest = json.loads(z.read("manifest.json").decode("utf-8"))
-    problems = check_package(packed_manifest, entries)
+    problems = check_package(packed_manifest, entries, messages)
     if problems:
         sys.exit("打包出来的包不合商店的规矩：\n  - " + "\n  - ".join(problems))
 
@@ -101,6 +122,8 @@ def main() -> None:
 
     print(f"打包完成 → {target}")
     print(f"  {len(entries)} 个文件，{size_mb:.2f} MB")
+    print(f"  标题：{resolve_text(str(packed_manifest.get('name', '')), messages)}")
+    print(f"  简述：{resolve_text(str(packed_manifest.get('description', '')), messages)}")
     print(f"  manifest 版本 {packed_manifest['version']}，key 字段已去掉（解压版的那份保留）")
     print("  商店上传：Chrome Web Store → 新建项目 → 上传该 ZIP")
 

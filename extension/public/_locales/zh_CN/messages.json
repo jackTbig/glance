@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "简译 Glance",
+    "description": "扩展名称，显示在浏览器扩展列表与商店页面上"
+  },
+  "extDescription": {
+    "message": "整页 / 悬停 / 划词翻译，译成简体中文。可搭配「简译 Glance」桌面端（任意窗口划词、截屏翻译、术语表、朗读），也可直连 DeepSeek、OpenAI 等模型接口。",
+    "description": "商店列表页的简短说明（上限 132 字符）"
+  }
+}
